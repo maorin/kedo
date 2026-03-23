@@ -1,0 +1,18 @@
+Metadata-Version: 2.4
+Name: kedo
+Version: 0.1.0
+Summary: 从需求到部署的全流程自动化开发工具
+License: MIT
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: click>=8.1
+Requires-Dist: openai>=1.0
+Requires-Dist: rich>=13.0
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: jinja2>=3.1
+Provides-Extra: dev
+Requires-Dist: pytest>=7.4; extra == "dev"
+Requires-Dist: pytest-mock>=3.12; extra == "dev"
+
+# kedo
+kedo — AI 开发助手
