@@ -1,0 +1,777 @@
+"""
+FastAPI 服务主入口
+
+启动 API 服务器，初始化所有组件，注册路由
+"""
+from __future__ import annotations
+
+import logging
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from api.routes import router, set_dependencies
+from api.websocket import ws_manager
+from core.agent_loop import AgentLoop
+from core.evaluator import Evaluator
+from core.memory import AgentMemory
+from core.planner import Planner
+from core.state_manager import StateManager
+from tools.base import ToolRegistry
+from tools.code_generator import CodeGeneratorTool
+from tools.file_tool import FileReadTool, FileSearchTool, FileWriteTool
+from tools.git_tool import GitTool
+from tools.shell_executor import ShellExecutorTool
+from tools.test_runner import TestRunnerTool
+
+logger = logging.getLogger(__name__)
+
+
+def create_app(config: dict = None) -> FastAPI:
+    """
+    创建并配置 FastAPI 应用
+
+    Args:
+        config: 配置字典，包含 LLM API key、项目路径等
+    """
+    config = config or {}
+
+    app = FastAPI(
+        title="kedo",
+        description="AI-powered development assistant with full pipeline automation",
+        version="0.1.0",
+    )
+
+    # CORS (允许 Dashboard 跨域访问)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # ----------------------------------------------------------
+    # 初始化组件
+    # ----------------------------------------------------------
+
+    # LLM 客户端 (需要替换为实际的 LLM client)
+    llm_client = create_llm_client(config)
+
+    # 状态管理器
+    state_manager = StateManager(
+        storage_dir=config.get("storage_dir", ".kedo/state")
+    )
+
+    # 记忆管理器
+    memory = AgentMemory(
+        max_context_chars=config.get("max_context_chars", 120_000)
+    )
+
+    # 工具注册
+    shell = ShellExecutorTool(
+        working_dir=config.get("project_path", "."),
+        sandbox_mode=config.get("sandbox_mode", True),
+    )
+    tool_registry = ToolRegistry()
+    tool_registry.register(CodeGeneratorTool(llm_client, config=config))
+    tool_registry.register(shell)
+    tool_registry.register(TestRunnerTool(shell))
+    tool_registry.register(GitTool(shell))
+    tool_registry.register(FileReadTool())
+    tool_registry.register(FileWriteTool())
+    tool_registry.register(FileSearchTool())
+
+    # Planner & Evaluator
+    planner = Planner(llm_client, memory, config=config)
+    evaluator = Evaluator(llm_client, memory, config=config)
+
+    # Version Manager (候选版本管理)
+    from core.version_manager import VersionManager
+    version_manager = VersionManager(
+        event_bus=state_manager.event_bus,
+        git_tool=GitTool(shell) if config.get("git_enabled", True) else None,
+    )
+
+    # Agent Loop
+    agent_loop = AgentLoop(
+        state_manager=state_manager,
+        planner=planner,
+        evaluator=evaluator,
+        tool_registry=tool_registry,
+        memory=memory,
+        version_manager=version_manager,
+        config=config,
+    )
+
+    # 注册 WebSocket 事件处理
+    state_manager.event_bus.subscribe("*", ws_manager.handle_event)
+
+    # 注入依赖到路由（含 create_llm_client 引用，避免循环导入）
+    set_dependencies(
+        agent_loop, state_manager,
+        create_llm_client_fn=create_llm_client,
+        project_path=config.get("project_path", "."),
+    )
+
+    # 注册路由 — 必须在 StaticFiles 之前
+    app.include_router(router, prefix="/api")
+
+    # 静态文件 (Dashboard) — 使用包相对路径，避免 CWD 不同时找不到
+    from pathlib import Path as _Path
+    _package_dir = _Path(__file__).resolve().parent.parent  # kedo/
+    _dashboard_dir = _package_dir / "dashboard"
+    try:
+        if _dashboard_dir.is_dir():
+            app.mount("/dashboard", StaticFiles(directory=str(_dashboard_dir), html=True), name="dashboard")
+        else:
+            logger.warning(f"Dashboard directory not found at {_dashboard_dir}, skipping")
+    except Exception:
+        logger.warning("Dashboard static files mount failed, skipping")
+
+    # 根路由重定向到 Dashboard
+    from fastapi.responses import RedirectResponse
+
+    @app.get("/")
+    async def root():
+        return RedirectResponse(url="/dashboard")
+
+    # ----------------------------------------------------------
+    # 启动/关闭事件
+    # ----------------------------------------------------------
+
+    @app.on_event("startup")
+    async def startup():
+        logger.info("kedo starting up...")
+
+    @app.on_event("shutdown")
+    async def shutdown():
+        logger.info("kedo shutting down...")
+
+    return app
+
+
+def create_llm_client(config: dict):
+    """
+    创建 LLM 客户端
+
+    支持多种 LLM 后端 (优先级: 环境变量 > 配置文件):
+    - anthropic: Anthropic Claude API (需要 ANTHROPIC_API_KEY)
+    - openai: OpenAI API (需要 OPENAI_API_KEY)
+    - ollama: 本地模型
+    - mock: 模拟 LLM，无需 API Key，用于测试/演示
+
+    strict_mode: 如果为 True，缺少 API Key 时直接报错而非回退到 Mock
+    """
+    import os
+
+    provider = config.get("llm_provider", "anthropic")
+    strict_mode = config.get("strict_mode", False)
+
+    def _handle_missing_key(provider_name: str, env_var: str, help_url: str = ""):
+        """处理 API Key 缺失：strict_mode 下报错，否则回退到 Mock 并标记"""
+        if strict_mode:
+            raise RuntimeError(
+                f"[strict_mode] {provider_name} 需要 API Key，但未找到 {env_var}。\n"
+                f"请设置环境变量 {env_var} 或在 config.yaml 中配置。\n"
+                + (f"获取 Key: {help_url}" if help_url else "")
+            )
+        logger.warning(f"No {env_var} found, falling back to Mock LLM")
+        logger.warning(f"Set env var {env_var} or edit config.yaml to use real {provider_name}")
+        # ★ 标记回退状态，供 REPL 检测
+        config["_mock_fallback"] = True
+        config["_mock_fallback_reason"] = f"未找到 {env_var}，已自动回退到 Mock 模式"
+        config["_intended_provider"] = provider_name
+        return MockLLMClient()
+
+    if provider == "mock":
+        logger.info("Using Mock LLM (no API key required)")
+        config["_mock_fallback"] = False  # 用户主动选择 mock，不算回退
+        return MockLLMClient()
+
+    elif provider == "anthropic":
+        api_key = os.environ.get("ANTHROPIC_API_KEY") or config.get("anthropic_api_key", "")
+        if not api_key:
+            return _handle_missing_key("Claude (Anthropic)", "ANTHROPIC_API_KEY", "https://console.anthropic.com")
+        config["_mock_fallback"] = False
+        return AnthropicClient(
+            api_key=api_key,
+            model=config.get("model", "claude-sonnet-4-20250514"),
+        )
+
+    elif provider == "openai":
+        api_key = os.environ.get("OPENAI_API_KEY") or config.get("openai_api_key", "")
+        if not api_key:
+            return _handle_missing_key("OpenAI", "OPENAI_API_KEY")
+        config["_mock_fallback"] = False
+        return OpenAIClient(
+            api_key=api_key,
+            model=config.get("model", "gpt-4"),
+        )
+
+    elif provider == "kimi-code":
+        # Kimi Code 2.5 — 编程专用端点
+        api_key = os.environ.get("KIMI_API_KEY") or os.environ.get("MOONSHOT_API_KEY") or config.get("kimi_api_key", "")
+        if not api_key:
+            return _handle_missing_key("Kimi Code 2.5", "KIMI_API_KEY", "https://platform.moonshot.ai")
+        config["_mock_fallback"] = False
+        # ★ 自动纠正模型名：如果 model 不是 kimi 系列（比如误配了 claude/gpt），用默认值
+        model = config.get("model", "kimi-k2.5")
+        if not model.startswith("kimi") and not model.startswith("moonshot"):
+            logger.warning(f"模型 '{model}' 不兼容 kimi-code，自动切换为 kimi-k2.5")
+            model = "kimi-k2.5"
+        return KimiClient(
+            api_key=api_key,
+            model=model,
+            base_url=config.get("kimi_base_url", "https://api.kimi.com/coding/v1"),
+        )
+
+    elif provider == "kimi":
+        # Kimi K2.5 — 通用 Moonshot 端点
+        api_key = os.environ.get("KIMI_API_KEY") or os.environ.get("MOONSHOT_API_KEY") or config.get("kimi_api_key", "")
+        if not api_key:
+            return _handle_missing_key("Kimi K2.5", "KIMI_API_KEY", "https://platform.moonshot.ai")
+        config["_mock_fallback"] = False
+        # ★ 自动纠正模型名
+        model = config.get("model", "kimi-k2.5")
+        if not model.startswith("kimi") and not model.startswith("moonshot"):
+            logger.warning(f"模型 '{model}' 不兼容 kimi，自动切换为 kimi-k2.5")
+            model = "kimi-k2.5"
+        return KimiClient(
+            api_key=api_key,
+            model=model,
+            base_url=config.get("kimi_base_url", "https://api.moonshot.ai/v1"),
+        )
+
+    elif provider == "ollama":
+        config["_mock_fallback"] = False
+        return OllamaClient(
+            base_url=config.get("ollama_url", "http://localhost:11434"),
+            model=config.get("model", "codellama"),
+        )
+
+    else:
+        raise ValueError(f"Unknown LLM provider: {provider}")
+
+
+# ============================================================
+# LLM Client 接口 (可替换为实际实现)
+# ============================================================
+
+class BaseLLMClient:
+    async def chat(self, messages: list[dict]) -> str:
+        raise NotImplementedError
+
+    async def stream_chat(self, messages: list[dict]):
+        """流式输出 — 逐 token yield str，默认回退到非流式"""
+        result = await self.chat(messages)
+        yield result
+
+
+class MockLLMClient(BaseLLMClient):
+    """
+    模拟 LLM 客户端 — 无需 API Key，用于测试和演示
+
+    根据 prompt 内容智能生成合理的模拟响应，
+    可以跑通完整的 Agent Loop 流程
+    """
+
+    async def chat(self, messages: list[dict]) -> str:
+        import asyncio
+        import json
+
+        # 模拟一点延迟，更真实
+        await asyncio.sleep(0.5)
+
+        last_msg = messages[-1]["content"] if messages else ""
+        all_text = " ".join(m["content"] for m in messages).lower()
+
+        # 根据上下文返回不同的模拟响应
+        # ★ 注意：匹配顺序很关键，更具体的 pattern 必须放前面
+
+        # 1) 评估阶段 — 必须在 plan 之前（因为 plan 的 system prompt 里也包含 "evaluate" 等通用词）
+        #    通过检测 evaluator 特有的关键词来精确匹配
+        if "evaluate these changes" in all_text or ("score" in all_text and "code changes" in all_text):
+            return json.dumps({
+                "score": 85,
+                "requirements_met": ["Core functionality implemented", "Code is readable"],
+                "requirements_missed": [],
+                "risks": ["No error handling for edge cases"],
+                "suggestions": ["Add input validation", "Add more test cases"],
+            })
+
+        # 2) 计划阶段 — Planner 的 system prompt 包含 "execution plan"
+        elif "execution plan" in all_text or "generate the execution plan" in all_text or "break it down" in all_text:
+            return json.dumps([
+                {
+                    "title": "Analyze Requirements",
+                    "description": "Understand the requirements and identify key components",
+                    "step_type": "code_generate",
+                },
+                {
+                    "title": "Generate Code",
+                    "description": "Write the core implementation code",
+                    "step_type": "code_generate",
+                },
+                {
+                    "title": "Build & Lint",
+                    "description": "python -c \"print('Build: OK')\"",
+                    "step_type": "build",
+                },
+                {
+                    "title": "Run Tests",
+                    "description": "Execute test suite",
+                    "step_type": "test",
+                },
+                {
+                    "title": "Quality Review",
+                    "description": "Evaluate code quality",
+                    "step_type": "evaluate",
+                },
+                {
+                    "title": "Human Review",
+                    "description": "Review and approve changes",
+                    "step_type": "review",
+                },
+            ])
+
+        # 3) 代码生成 — CodeGenerator 的 prompt 包含 "create a new file" 或 "modify"
+        elif "create a new file" in all_text or "modify the following file" in all_text or "output only the code" in all_text:
+            if "hello" in all_text:
+                return '''def hello_world():
+    """Say hello to the world!"""
+    print("Hello, World!")
+
+if __name__ == "__main__":
+    hello_world()'''
+            return '''# Auto-generated code by kedo (Mock Mode)
+def main():
+    """Main entry point."""
+    print("Feature implemented successfully!")
+    return True
+
+if __name__ == "__main__":
+    main()'''
+
+        # 3b) 评估 fallback — 宽松匹配
+        elif "evaluate" in all_text or "score" in all_text:
+            return json.dumps({
+                "score": 85,
+                "requirements_met": ["Core functionality implemented", "Code is readable"],
+                "requirements_missed": [],
+                "risks": ["No error handling for edge cases"],
+                "suggestions": ["Add input validation", "Add more test cases"],
+            })
+
+        # 4) 通用回复
+        else:
+            return "Task completed successfully. [Mock LLM Response]"
+
+    async def stream_chat(self, messages: list[dict]):
+        """模拟流式输出 — 逐字符 yield"""
+        import asyncio
+        result = await self.chat(messages)
+        for char in result:
+            yield char
+            await asyncio.sleep(0.01)
+
+
+class OpenAIClient(BaseLLMClient):
+    def __init__(self, api_key: str, model: str = "gpt-4"):
+        self.api_key = api_key
+        self.model = model
+
+    async def chat(self, messages: list[dict]) -> str:
+        try:
+            import openai
+            client = openai.AsyncOpenAI(api_key=self.api_key)
+            response = await client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=0.1,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            raise RuntimeError(f"OpenAI API error: {e}")
+
+    async def stream_chat(self, messages: list[dict]):
+        try:
+            import openai
+            client = openai.AsyncOpenAI(api_key=self.api_key)
+            stream = await client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=0.1,
+                stream=True,
+            )
+            async for chunk in stream:
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    yield delta.content
+        except Exception as e:
+            raise RuntimeError(f"OpenAI API stream error: {e}")
+
+
+class AnthropicClient(BaseLLMClient):
+    def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514"):
+        self.api_key = api_key
+        self.model = model
+
+    async def chat(self, messages: list[dict]) -> str:
+        try:
+            import anthropic
+            client = anthropic.AsyncAnthropic(api_key=self.api_key)
+            # 分离 system 消息
+            system = "\n".join(m["content"] for m in messages if m["role"] == "system")
+            user_messages = [m for m in messages if m["role"] != "system"]
+            response = await client.messages.create(
+                model=self.model,
+                max_tokens=4096,
+                system=system,
+                messages=user_messages,
+            )
+            return response.content[0].text
+        except Exception as e:
+            raise RuntimeError(f"Anthropic API error: {e}")
+
+    async def stream_chat(self, messages: list[dict]):
+        try:
+            import anthropic
+            client = anthropic.AsyncAnthropic(api_key=self.api_key)
+            system = "\n".join(m["content"] for m in messages if m["role"] == "system")
+            user_messages = [m for m in messages if m["role"] != "system"]
+            async with client.messages.stream(
+                model=self.model,
+                max_tokens=4096,
+                system=system,
+                messages=user_messages,
+            ) as stream:
+                async for text in stream.text_stream:
+                    yield text
+        except Exception as e:
+            raise RuntimeError(f"Anthropic API stream error: {e}")
+
+
+class KimiClient(BaseLLMClient):
+    """
+    Moonshot Kimi K2.5 客户端
+
+    兼容 OpenAI Chat Completions API 格式
+    申请 Key: https://platform.moonshot.ai/
+
+    使用流式响应 (stream=True) 避免长时间等待导致读超时。
+    """
+
+    # 超时配置（秒）
+    CONNECT_TIMEOUT = 30       # 连接超时
+    READ_TIMEOUT = 300         # 读超时（流式模式下每个 chunk 间的超时）
+    WRITE_TIMEOUT = 30         # 写超时
+    MAX_RETRIES = 2            # 最大重试次数
+
+    def __init__(self, api_key: str, model: str = "kimi-k2.5",
+                 base_url: str = "https://api.moonshot.ai/v1"):
+        self.api_key = api_key
+        self.model = model
+        self.base_url = base_url
+
+    async def chat(self, messages: list[dict]) -> str:
+        import httpx
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "claude-code/0.1.0",
+        }
+
+        timeout = httpx.Timeout(
+            connect=self.CONNECT_TIMEOUT,
+            read=self.READ_TIMEOUT,
+            write=self.WRITE_TIMEOUT,
+            pool=self.CONNECT_TIMEOUT,
+        )
+
+        last_error = None
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            try:
+                return await self._stream_chat(headers, messages, timeout)
+            except httpx.TimeoutException as e:
+                last_error = e
+                logger.warning(f"Kimi API 超时 (attempt {attempt}/{self.MAX_RETRIES}): {e}")
+                if attempt < self.MAX_RETRIES:
+                    import asyncio
+                    await asyncio.sleep(2 * attempt)  # 指数退避
+                    continue
+                raise RuntimeError(
+                    f"Kimi API 请求超时 ({self.READ_TIMEOUT}s)，已重试 {self.MAX_RETRIES} 次。\n"
+                    f"可能原因：1) 网络不稳定 2) 请求内容过大 3) Kimi 服务繁忙\n"
+                    f"建议：稍后重试，或尝试简化提示词"
+                )
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                detail = ""
+                try:
+                    body = e.response.json()
+                    detail = body.get("error", {}).get("message", "") if isinstance(body.get("error"), dict) else str(body.get("error", ""))
+                except Exception:
+                    pass
+                if status == 401:
+                    raise RuntimeError(f"Kimi API Key 无效或已过期 (endpoint: {self.base_url})，请用 /login 重新输入。{f' ({detail})' if detail else ''}")
+                elif status == 429:
+                    # 频率限制可以重试
+                    last_error = e
+                    if attempt < self.MAX_RETRIES:
+                        import asyncio
+                        await asyncio.sleep(3 * attempt)
+                        continue
+                    raise RuntimeError(f"Kimi API 请求频率超限，已重试 {self.MAX_RETRIES} 次。{f' ({detail})' if detail else ''}")
+                elif status == 400:
+                    raise RuntimeError(f"Kimi API 请求参数错误: {detail or e}")
+                else:
+                    raise RuntimeError(f"Kimi API 错误 (HTTP {status}): {detail or e}")
+            except RuntimeError:
+                raise
+            except Exception as e:
+                raise RuntimeError(f"Kimi API error: {e}")
+
+        raise RuntimeError(f"Kimi API 未知错误: {last_error}")
+
+    async def stream_chat(self, messages: list[dict]):
+        """流式输出 — 逐 token yield，复用 SSE 解析逻辑"""
+        import httpx
+        import json as _json
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "kedo/0.1.0",
+        }
+        timeout = httpx.Timeout(
+            connect=self.CONNECT_TIMEOUT,
+            read=self.READ_TIMEOUT,
+            write=self.WRITE_TIMEOUT,
+            pool=self.CONNECT_TIMEOUT,
+        )
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "POST",
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json={
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": 0.1,
+                    "stream": True,
+                },
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if line.startswith("data: "):
+                        data_str = line[6:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            chunk = _json.loads(data_str)
+                            text = self._extract_chunk_content(chunk)
+                            if text:
+                                yield text
+                        except (ValueError, IndexError, KeyError):
+                            continue
+                    elif line.startswith("{"):
+                        try:
+                            chunk = _json.loads(line)
+                            text = self._extract_chunk_content(chunk)
+                            if text:
+                                yield text
+                        except (ValueError, IndexError, KeyError):
+                            continue
+
+    async def _stream_chat(
+        self, headers: dict, messages: list[dict], timeout
+    ) -> str:
+        """
+        使用流式响应 (stream=True) 接收 LLM 输出。
+
+        流式模式下 read_timeout 是每个 chunk 之间的间隔超时，
+        而非整体响应超时，因此不会因为生成时间长而超时。
+
+        兼容两种 SSE 格式：
+        - 标准 OpenAI: data: {"choices":[{"delta":{"content":"..."}}]}
+        - Kimi Code:   可能直接返回 content 字段或使用 message 而非 delta
+        """
+        import httpx
+        import json as _json
+
+        content_parts = []
+        raw_lines_sample = []  # 保留前几行用于调试
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "POST",
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json={
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": 0.1,
+                    "stream": True,
+                },
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    # 记录前 5 行用于调试
+                    if len(raw_lines_sample) < 5:
+                        raw_lines_sample.append(line[:200])
+
+                    # 标准 SSE: "data: {...}"
+                    if line.startswith("data: "):
+                        data_str = line[6:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            chunk = _json.loads(data_str)
+                            text = self._extract_chunk_content(chunk)
+                            if text:
+                                content_parts.append(text)
+                        except (ValueError, IndexError, KeyError) as e:
+                            logger.debug(f"Skip unparsable SSE chunk: {data_str[:100]}... ({e})")
+                            continue
+                    # 有些 API 直接返回 JSON（不带 "data: " 前缀）
+                    elif line.startswith("{"):
+                        try:
+                            chunk = _json.loads(line)
+                            text = self._extract_chunk_content(chunk)
+                            if text:
+                                content_parts.append(text)
+                        except (ValueError, IndexError, KeyError):
+                            continue
+
+        full_content = "".join(content_parts)
+
+        if not full_content:
+            # 尝试非流式回退
+            logger.warning(
+                f"Stream returned empty content. Raw lines sample: {raw_lines_sample}. "
+                f"Falling back to non-stream request."
+            )
+            return await self._non_stream_chat(headers, messages, timeout)
+
+        return full_content
+
+    @staticmethod
+    def _extract_chunk_content(chunk: dict) -> str:
+        """
+        从 SSE chunk 中提取文本内容。
+
+        兼容多种格式：
+        - OpenAI 标准: choices[0].delta.content
+        - 某些 API:   choices[0].message.content
+        - Kimi Code:   choices[0].delta.content 或 text 字段
+        """
+        choices = chunk.get("choices", [])
+        if not choices:
+            return ""
+        choice = choices[0]
+        # 标准 delta 格式
+        delta = choice.get("delta", {})
+        if delta and "content" in delta:
+            return delta["content"] or ""
+        # message 格式（某些非标准实现）
+        message = choice.get("message", {})
+        if message and "content" in message:
+            return message["content"] or ""
+        # text 格式
+        if "text" in choice:
+            return choice["text"] or ""
+        return ""
+
+    async def _non_stream_chat(
+        self, headers: dict, messages: list[dict], timeout
+    ) -> str:
+        """
+        非流式回退：当流式响应解析为空时使用。
+
+        使用更长的超时（读超时翻倍），因为要等完整响应。
+        """
+        import httpx
+
+        fallback_timeout = httpx.Timeout(
+            connect=self.CONNECT_TIMEOUT,
+            read=self.READ_TIMEOUT * 2,  # 非流式需要更长的读超时
+            write=self.WRITE_TIMEOUT,
+            pool=self.CONNECT_TIMEOUT,
+        )
+
+        async with httpx.AsyncClient(timeout=fallback_timeout) as client:
+            response = await client.post(
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json={
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": 0.1,
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            if not content:
+                logger.error(f"Non-stream also returned empty. Response: {str(data)[:500]}")
+                raise RuntimeError(
+                    "Kimi API 返回空响应（流式和非流式均为空）。\n"
+                    "可能原因：1) API Key 权限不足 2) 模型暂时不可用 3) 请求被服务端过滤\n"
+                    "建议：检查 API Key 是否有效，或稍后重试"
+                )
+            return content
+
+
+class OllamaClient(BaseLLMClient):
+    def __init__(self, base_url: str = "http://localhost:11434", model: str = "codellama"):
+        self.base_url = base_url
+        self.model = model
+
+    async def chat(self, messages: list[dict]) -> str:
+        try:
+            import httpx
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/api/chat",
+                    json={"model": self.model, "messages": messages, "stream": False},
+                    timeout=120,
+                )
+                return response.json()["message"]["content"]
+        except Exception as e:
+            raise RuntimeError(f"Ollama API error: {e}")
+
+    async def stream_chat(self, messages: list[dict]):
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=120) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self.base_url}/api/chat",
+                    json={"model": self.model, "messages": messages, "stream": True},
+                ) as response:
+                    async for line in response.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            import json as _json
+                            data = _json.loads(line)
+                            content = data.get("message", {}).get("content", "")
+                            if content:
+                                yield content
+                            if data.get("done"):
+                                break
+                        except (ValueError, KeyError):
+                            continue
+        except Exception as e:
+            raise RuntimeError(f"Ollama API stream error: {e}")

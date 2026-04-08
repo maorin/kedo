@@ -1,0 +1,7 @@
+api
+cli
+core
+dashboard
+kedo
+pipeline
+tools

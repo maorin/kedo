@@ -1,0 +1,2863 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kedo AI Development Assistant Dashboard</title>
+    <!-- Markdown 渲染 + 代码高亮 + Mermaid -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.0/mermaid.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+            background: linear-gradient(135deg, #0a0e1a 0%, #1a1f2e 100%);
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+
+        .container {
+            display: flex;
+            height: 100vh;
+            flex-direction: column;
+        }
+
+        header {
+            background: linear-gradient(90deg, rgba(13, 17, 30, 0.95) 0%, rgba(30, 41, 59, 0.95) 100%);
+            padding: 0.75rem 2rem;
+            border-bottom: 1px solid rgba(100, 200, 255, 0.2);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+            z-index: 100;
+        }
+
+        .header-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            max-width: 2000px;
+            margin: 0 auto;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 2rem;
+        }
+
+        .logo {
+            font-size: 1.6rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #00d9ff, #0099cc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: 2px;
+        }
+
+        .view-switcher {
+            display: flex;
+            gap: 0;
+            background: rgba(30, 41, 59, 0.6);
+            border-radius: 6px;
+            border: 1px solid rgba(100, 200, 255, 0.15);
+            overflow: hidden;
+        }
+
+        .view-btn {
+            padding: 0.4rem 1rem;
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: #888;
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .view-btn:hover {
+            color: #ccc;
+            background: rgba(100, 200, 255, 0.05);
+        }
+
+        .view-btn.active {
+            color: #00d9ff;
+            background: rgba(0, 217, 255, 0.12);
+        }
+
+        .header-status {
+            display: flex;
+            gap: 2rem;
+            align-items: center;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.85rem;
+        }
+
+        .status-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #22c55e;
+            box-shadow: 0 0 10px rgba(34, 197, 94, 0.5);
+        }
+
+        .status-indicator.disconnected {
+            background: #ef4444;
+            box-shadow: 0 0 10px rgba(239, 68, 68, 0.5);
+        }
+
+        .main-content {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            gap: 1px;
+            background: #000;
+        }
+
+        /* ====== Pipeline 视图 ====== */
+        .pipeline-view {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        .pipeline-view.hidden { display: none; }
+
+        .sidebar {
+            width: 300px;
+            background: rgba(15, 23, 42, 0.8);
+            border-right: 1px solid rgba(100, 200, 255, 0.1);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .sidebar-section {
+            border-bottom: 1px solid rgba(100, 200, 255, 0.1);
+            padding: 1rem;
+        }
+
+        .sidebar-title {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #64b5f6;
+            margin-bottom: 0.75rem;
+            font-weight: 600;
+        }
+
+        .task-input-group {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .task-input {
+            flex: 1;
+            padding: 0.5rem;
+            background: rgba(30, 41, 59, 0.6);
+            border: 1px solid rgba(100, 200, 255, 0.2);
+            border-radius: 4px;
+            color: #e0e0e0;
+            font-size: 0.85rem;
+            transition: all 0.3s;
+        }
+
+        .task-input:focus {
+            outline: none;
+            border-color: #00d9ff;
+            box-shadow: 0 0 10px rgba(0, 217, 255, 0.2);
+        }
+
+        .task-button {
+            padding: 0.5rem 1rem;
+            background: linear-gradient(135deg, #0099cc, #00d9ff);
+            border: none;
+            border-radius: 4px;
+            color: white;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.85rem;
+            transition: all 0.3s;
+        }
+
+        .task-button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 16px rgba(0, 217, 255, 0.3);
+        }
+
+        .task-list {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .task-item {
+            padding: 0.75rem 1rem;
+            background: rgba(30, 41, 59, 0.5);
+            border-left: 3px solid #0099cc;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 0.85rem;
+            max-height: 72px;
+            overflow: hidden;
+        }
+
+        .task-item:hover {
+            background: rgba(30, 41, 59, 0.8);
+            box-shadow: 0 4px 12px rgba(0, 217, 255, 0.1);
+        }
+
+        .task-item.active {
+            border-left-color: #00d9ff;
+            background: rgba(0, 217, 255, 0.1);
+        }
+
+        .task-item-title {
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+            color: #00d9ff;
+        }
+
+        .task-item-status {
+            font-size: 0.78rem;
+            color: #888;
+        }
+
+        .center-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: rgba(10, 14, 26, 0.9);
+            overflow: hidden;
+        }
+
+        .flowchart-container {
+            flex: 1;
+            overflow: auto;
+            padding: 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(45deg, rgba(0, 30, 60, 0.3), rgba(0, 60, 120, 0.2));
+        }
+
+        svg.flowchart {
+            max-width: 100%;
+            height: auto;
+            filter: drop-shadow(0 0 20px rgba(0, 217, 255, 0.2));
+        }
+
+        .right-panel {
+            width: 350px;
+            background: rgba(15, 23, 42, 0.8);
+            border-left: 1px solid rgba(100, 200, 255, 0.1);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .panel-tabs {
+            display: flex;
+            border-bottom: 1px solid rgba(100, 200, 255, 0.1);
+        }
+
+        .panel-tab {
+            flex: 1;
+            padding: 0.75rem;
+            text-align: center;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: #888;
+            transition: all 0.3s;
+        }
+
+        .panel-tab:hover { color: #00d9ff; }
+
+        .panel-tab.active {
+            color: #00d9ff;
+            border-bottom-color: #00d9ff;
+        }
+
+        .panel-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1rem;
+            display: none;
+        }
+
+        .panel-content.active { display: block; }
+
+        .log-entry {
+            padding: 0.6rem;
+            margin-bottom: 0.4rem;
+            background: rgba(30, 41, 59, 0.5);
+            border-left: 3px solid #0099cc;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            line-height: 1.4;
+        }
+
+        .log-entry.success { border-left-color: #22c55e; background: rgba(34, 197, 94, 0.05); }
+        .log-entry.error { border-left-color: #ef4444; background: rgba(239, 68, 68, 0.05); }
+        .log-entry.warning { border-left-color: #f59e0b; background: rgba(245, 158, 11, 0.05); }
+
+        .log-timestamp { font-size: 0.72rem; color: #666; margin-right: 0.4rem; }
+        .log-type {
+            display: inline-block;
+            padding: 0.15rem 0.4rem;
+            background: rgba(0, 217, 255, 0.2);
+            border-radius: 2px;
+            font-size: 0.68rem;
+            font-weight: 600;
+            margin-right: 0.4rem;
+        }
+
+        .candidate-version {
+            padding: 1rem;
+            margin-bottom: 0.75rem;
+            background: rgba(30, 41, 59, 0.6);
+            border: 1px solid rgba(100, 200, 255, 0.2);
+            border-radius: 4px;
+        }
+
+        .version-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
+        .version-name { font-weight: 600; color: #00d9ff; }
+        .confidence-badge {
+            padding: 0.3rem 0.6rem;
+            background: rgba(34, 197, 94, 0.2);
+            color: #22c55e;
+            border-radius: 3px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        .version-details { font-size: 0.8rem; color: #888; margin: 0.5rem 0; }
+        .version-actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
+
+        .btn-approve, .btn-reject {
+            flex: 1; padding: 0.5rem; border: none; border-radius: 3px;
+            cursor: pointer; font-size: 0.8rem; font-weight: 600; transition: all 0.3s;
+        }
+        .btn-approve { background: linear-gradient(135deg, #22c55e, #16a34a); color: white; }
+        .btn-approve:hover { box-shadow: 0 4px 12px rgba(34, 197, 94, 0.3); }
+        .btn-reject { background: linear-gradient(135deg, #ef4444, #dc2626); color: white; }
+        .btn-reject:hover { box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3); }
+
+        .discussion-item {
+            padding: 0.75rem; margin-bottom: 0.5rem;
+            background: rgba(30, 41, 59, 0.5); border-left: 3px solid #f59e0b; border-radius: 4px; font-size: 0.85rem;
+        }
+        .issue-title { font-weight: 600; color: #f59e0b; margin-bottom: 0.3rem; }
+        .proposal-item {
+            padding: 0.75rem; margin-bottom: 0.5rem;
+            background: rgba(0, 217, 255, 0.05); border-left: 3px solid #0099cc; border-radius: 4px; font-size: 0.85rem;
+        }
+        .proposal-text { color: #b0c4de; font-style: italic; }
+
+        /* ====== 文档视图 ====== */
+        .docs-view {
+            display: none;
+            flex: 1;
+            overflow: hidden;
+        }
+        .docs-view.active { display: flex; }
+
+        /* ====== 部署监控视图 ====== */
+        .monitor-view {
+            display: none;
+            flex: 1;
+            overflow-y: auto;
+            padding: 1.5rem 2rem;
+        }
+        .monitor-view.active { display: block; }
+
+        .monitor-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1.5rem;
+        }
+        .monitor-header h2 {
+            font-size: 1.3rem;
+            color: #e0e0e0;
+            font-weight: 600;
+        }
+        .monitor-refresh-btn {
+            padding: 0.4rem 1rem;
+            font-size: 0.8rem;
+            background: rgba(0, 217, 255, 0.1);
+            color: #00d9ff;
+            border: 1px solid rgba(0, 217, 255, 0.3);
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .monitor-refresh-btn:hover {
+            background: rgba(0, 217, 255, 0.2);
+        }
+
+        .monitor-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        .monitor-card {
+            background: rgba(15, 23, 42, 0.8);
+            border: 1px solid rgba(100, 200, 255, 0.1);
+            border-radius: 8px;
+            padding: 1.2rem;
+        }
+        .monitor-card-title {
+            font-size: 0.75rem;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 0.5rem;
+        }
+        .monitor-card-value {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #e0e0e0;
+        }
+        .monitor-card-value.success { color: #22c55e; }
+        .monitor-card-value.warning { color: #f59e0b; }
+        .monitor-card-value.error   { color: #ef4444; }
+        .monitor-card-value.info    { color: #00d9ff; }
+
+        .monitor-table-wrap {
+            background: rgba(15, 23, 42, 0.8);
+            border: 1px solid rgba(100, 200, 255, 0.1);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .monitor-table-title {
+            padding: 0.8rem 1.2rem;
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: #b0c4de;
+            border-bottom: 1px solid rgba(100, 200, 255, 0.1);
+        }
+        .monitor-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.82rem;
+        }
+        .monitor-table th {
+            text-align: left;
+            padding: 0.6rem 1rem;
+            color: #888;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-size: 0.72rem;
+            border-bottom: 1px solid rgba(100, 200, 255, 0.08);
+        }
+        .monitor-table td {
+            padding: 0.6rem 1rem;
+            color: #c9d1d9;
+            border-bottom: 1px solid rgba(100, 200, 255, 0.05);
+        }
+        .monitor-table tr:hover td {
+            background: rgba(100, 200, 255, 0.03);
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 10px;
+            font-size: 0.72rem;
+            font-weight: 600;
+        }
+        .status-badge.success { background: rgba(34,197,94,0.15); color: #22c55e; }
+        .status-badge.running { background: rgba(0,217,255,0.12); color: #00d9ff; }
+        .status-badge.pending { background: rgba(100,100,100,0.2); color: #888; }
+        .status-badge.failed  { background: rgba(239,68,68,0.15); color: #ef4444; }
+        .status-badge.skipped { background: rgba(245,158,11,0.12); color: #f59e0b; }
+
+        /* ====== 抽拉式侧边栏 ====== */
+        .deploy-layout {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            height: 100%;
+        }
+        .deploy-main {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1.5rem 2rem;
+        }
+        .deploy-drawer-toggle {
+            position: absolute;
+            right: 0;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 24px;
+            height: 60px;
+            background: rgba(0, 217, 255, 0.15);
+            border: 1px solid rgba(0, 217, 255, 0.3);
+            border-right: none;
+            border-radius: 6px 0 0 6px;
+            color: #00d9ff;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.75rem;
+            z-index: 10;
+            transition: all 0.2s;
+        }
+        .deploy-drawer-toggle:hover {
+            background: rgba(0, 217, 255, 0.25);
+            width: 28px;
+        }
+        .deploy-drawer {
+            width: 0;
+            overflow: hidden;
+            background: rgba(15, 23, 42, 0.95);
+            border-left: 1px solid rgba(100, 200, 255, 0.1);
+            transition: width 0.3s ease;
+            position: relative;
+            flex-shrink: 0;
+        }
+        .deploy-drawer.open {
+            width: 420px;
+        }
+        .deploy-drawer-inner {
+            width: 420px;
+            height: 100%;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+        }
+        .drawer-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 1rem 1.2rem;
+            border-bottom: 1px solid rgba(100, 200, 255, 0.1);
+            flex-shrink: 0;
+        }
+        .drawer-header h3 {
+            font-size: 1rem;
+            color: #e0e0e0;
+            font-weight: 600;
+        }
+        .drawer-close-btn {
+            background: none;
+            border: none;
+            color: #888;
+            font-size: 1.2rem;
+            cursor: pointer;
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            transition: all 0.15s;
+        }
+        .drawer-close-btn:hover {
+            color: #e0e0e0;
+            background: rgba(100, 200, 255, 0.1);
+        }
+        .drawer-section {
+            padding: 1rem 1.2rem;
+            border-bottom: 1px solid rgba(100, 200, 255, 0.06);
+        }
+        .drawer-section-title {
+            font-size: 0.75rem;
+            color: #64b5f6;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 0.8rem;
+            font-weight: 600;
+        }
+        .drawer-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.78rem;
+        }
+        .drawer-table th {
+            text-align: left;
+            padding: 0.4rem 0.5rem;
+            color: #888;
+            font-weight: 600;
+            font-size: 0.68rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid rgba(100, 200, 255, 0.08);
+        }
+        .drawer-table td {
+            padding: 0.45rem 0.5rem;
+            color: #c9d1d9;
+            border-bottom: 1px solid rgba(100, 200, 255, 0.04);
+            vertical-align: top;
+        }
+        .drawer-table tr:hover td {
+            background: rgba(100, 200, 255, 0.03);
+        }
+        .drawer-url {
+            color: #00d9ff;
+            text-decoration: none;
+            word-break: break-all;
+            font-size: 0.76rem;
+        }
+        .drawer-url:hover { text-decoration: underline; }
+        .drawer-empty {
+            text-align: center;
+            color: #666;
+            padding: 1.5rem 0.5rem;
+            font-size: 0.8rem;
+        }
+
+        .docs-sidebar {
+            width: 280px;
+            background: rgba(15, 23, 42, 0.8);
+            border-right: 1px solid rgba(100, 200, 255, 0.1);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .docs-sidebar-header {
+            padding: 1rem;
+            border-bottom: 1px solid rgba(100, 200, 255, 0.1);
+        }
+
+        .docs-tree {
+            flex: 1;
+            overflow-y: auto;
+            padding: 0.5rem;
+        }
+
+        .tree-item {
+            display: flex;
+            align-items: center;
+            padding: 0.35rem 0.5rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.82rem;
+            color: #b0c4de;
+            transition: all 0.15s;
+            user-select: none;
+        }
+        .tree-item:hover {
+            background: rgba(100, 200, 255, 0.08);
+            color: #e0e0e0;
+        }
+        .tree-item.active {
+            background: rgba(0, 217, 255, 0.12);
+            color: #00d9ff;
+        }
+        .tree-item .icon {
+            margin-right: 0.4rem;
+            font-size: 0.9rem;
+            width: 1.1em;
+            text-align: center;
+            flex-shrink: 0;
+        }
+        .tree-children {
+            padding-left: 1rem;
+        }
+        .tree-children.collapsed { display: none; }
+
+        .docs-main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            background: rgba(10, 14, 26, 0.95);
+        }
+
+        .docs-breadcrumb {
+            padding: 0.6rem 1.5rem;
+            border-bottom: 1px solid rgba(100, 200, 255, 0.1);
+            font-size: 0.8rem;
+            color: #888;
+            background: rgba(15, 23, 42, 0.5);
+        }
+        .docs-breadcrumb span { color: #64b5f6; }
+
+        .docs-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 2rem 3rem;
+        }
+
+        /* Markdown 渲染样式 */
+        .markdown-body {
+            color: #c9d1d9;
+            font-size: 0.95rem;
+            line-height: 1.7;
+        }
+        .markdown-body h1 { font-size: 1.8rem; color: #00d9ff; border-bottom: 1px solid rgba(100,200,255,0.2); padding-bottom: 0.4rem; margin: 1.5rem 0 1rem; }
+        .markdown-body h2 { font-size: 1.4rem; color: #58a6ff; border-bottom: 1px solid rgba(100,200,255,0.1); padding-bottom: 0.3rem; margin: 1.3rem 0 0.8rem; }
+        .markdown-body h3 { font-size: 1.15rem; color: #79c0ff; margin: 1rem 0 0.6rem; }
+        .markdown-body h4 { font-size: 1rem; color: #a5d6ff; margin: 0.8rem 0 0.5rem; }
+        .markdown-body p { margin: 0.6rem 0; }
+        .markdown-body ul, .markdown-body ol { padding-left: 1.5rem; margin: 0.6rem 0; }
+        .markdown-body li { margin: 0.3rem 0; }
+        .markdown-body code {
+            background: rgba(110, 118, 129, 0.2);
+            padding: 0.15rem 0.35rem;
+            border-radius: 3px;
+            font-size: 0.88em;
+            font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+        }
+        .markdown-body pre {
+            background: rgba(22, 27, 34, 0.9);
+            border: 1px solid rgba(100, 200, 255, 0.15);
+            border-radius: 6px;
+            padding: 1rem;
+            overflow-x: auto;
+            margin: 0.8rem 0;
+        }
+        .markdown-body pre code {
+            background: none;
+            padding: 0;
+            font-size: 0.85rem;
+        }
+        .markdown-body blockquote {
+            border-left: 3px solid #0099cc;
+            padding-left: 1rem;
+            color: #8b949e;
+            margin: 0.6rem 0;
+        }
+        .markdown-body table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 0.8rem 0;
+        }
+        .markdown-body th, .markdown-body td {
+            border: 1px solid rgba(100, 200, 255, 0.15);
+            padding: 0.5rem 0.75rem;
+            text-align: left;
+        }
+        .markdown-body th {
+            background: rgba(30, 41, 59, 0.6);
+            color: #64b5f6;
+            font-weight: 600;
+        }
+        .markdown-body a { color: #58a6ff; text-decoration: none; }
+        .markdown-body a:hover { text-decoration: underline; }
+        .markdown-body img { max-width: 100%; border-radius: 4px; }
+        .markdown-body hr { border: none; border-top: 1px solid rgba(100,200,255,0.15); margin: 1.5rem 0; }
+
+        /* Mermaid 图表 */
+        .mermaid { background: transparent !important; text-align: center; margin: 1rem 0; }
+
+        /* 需求文档编辑器 */
+        .req-editor-wrap {
+            display: none;
+            flex-direction: column;
+            flex: 1;
+            overflow: hidden;
+        }
+        .req-editor-wrap.active { display: flex; }
+        .req-editor-toolbar {
+            padding: 0.5rem 1.5rem;
+            border-bottom: 1px solid rgba(100, 200, 255, 0.1);
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+            background: rgba(15, 23, 42, 0.5);
+        }
+        .req-editor-toolbar button {
+            padding: 0.35rem 0.8rem;
+            background: rgba(0, 153, 204, 0.3);
+            border: 1px solid rgba(0, 153, 204, 0.5);
+            color: #00d9ff;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.78rem;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+        .req-editor-toolbar button:hover { background: rgba(0, 153, 204, 0.5); }
+        .req-editor-toolbar button.save-btn { background: rgba(34, 197, 94, 0.3); border-color: rgba(34, 197, 94, 0.5); color: #22c55e; }
+        .req-editor-toolbar button.save-btn:hover { background: rgba(34, 197, 94, 0.5); }
+        .req-editor-toolbar .status-text { font-size: 0.75rem; color: #888; margin-left: auto; }
+
+        .req-textarea {
+            flex: 1;
+            padding: 1.5rem 2rem;
+            background: rgba(10, 14, 26, 0.95);
+            border: none;
+            color: #c9d1d9;
+            font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+            font-size: 0.88rem;
+            line-height: 1.6;
+            resize: none;
+            outline: none;
+        }
+
+        /* 空状态 */
+        .docs-empty {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: #666;
+            gap: 1rem;
+        }
+        .docs-empty .empty-icon { font-size: 3rem; opacity: 0.5; }
+        .docs-empty .empty-text { font-size: 0.95rem; }
+        .docs-empty .empty-hint { font-size: 0.8rem; color: #555; }
+
+        /* Footer */
+        footer {
+            background: linear-gradient(90deg, rgba(13, 17, 30, 0.95) 0%, rgba(30, 41, 59, 0.95) 100%);
+            border-top: 1px solid rgba(100, 200, 255, 0.2);
+            padding: 0.6rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.8rem;
+            color: #888;
+        }
+
+        .footer-left { display: flex; gap: 2rem; }
+        .footer-item { display: flex; align-items: center; gap: 0.5rem; }
+        .iteration-counter {
+            padding: 0.3rem 0.6rem;
+            background: rgba(0, 217, 255, 0.1);
+            border-radius: 4px;
+            color: #00d9ff;
+            font-weight: 600;
+        }
+
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(100, 200, 255, 0.3); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(100, 200, 255, 0.5); }
+
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+        @keyframes glow { 0%, 100% { filter: drop-shadow(0 0 5px rgba(0, 217, 255, 0.5)); } 50% { filter: drop-shadow(0 0 15px rgba(0, 217, 255, 0.8)); } }
+        .node-running { animation: glow 1.5s ease-in-out infinite; }
+        .fade-in { animation: fadeIn 0.3s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+        .demo-mode-banner {
+            background: rgba(245, 158, 11, 0.15);
+            border-bottom: 1px solid rgba(245, 158, 11, 0.3);
+            padding: 0.6rem 2rem;
+            text-align: center;
+            color: #f59e0b;
+            font-size: 0.82rem;
+            font-weight: 500;
+        }
+        .no-data { text-align: center; color: #666; padding: 2rem; font-size: 0.9rem; }
+
+        @media (max-width: 1400px) {
+            .sidebar { width: 250px; }
+            .right-panel { width: 300px; }
+            .docs-sidebar { width: 240px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="demoModeBanner" class="demo-mode-banner" style="display: none;">
+            DEMO MODE - WebSocket connection unavailable. Running with simulated data.
+        </div>
+
+        <header>
+            <div class="header-content">
+                <div class="header-left">
+                    <div class="logo">⚡ KEDO</div>
+                    <div class="view-switcher">
+                        <button class="view-btn active" data-view="pipeline">Pipeline</button>
+                        <button class="view-btn" data-view="docs">文档</button>
+                        <button class="view-btn" data-view="code">代码</button>
+                        <button class="view-btn" data-view="build">打包</button>
+                        <button class="view-btn" data-view="deploy">部署</button>
+                        <button class="view-btn" data-view="test">测试</button>
+                    </div>
+                </div>
+                <div class="header-status">
+                    <div class="status-item">
+                        <div class="status-indicator" id="connectionStatus"></div>
+                        <span id="connectionText">Connecting...</span>
+                    </div>
+                    <div class="status-item">
+                        <span>Tasks: <strong id="taskCount">0</strong></span>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <div class="main-content">
+            <!-- ====== Pipeline 视图 ====== -->
+            <div class="pipeline-view" id="pipelineView">
+                <div class="sidebar">
+                    <div class="sidebar-section">
+                        <div class="sidebar-title">新建任务</div>
+                        <div class="task-input-group">
+                            <input type="text" class="task-input" id="taskInput" placeholder="输入任务描述...">
+                            <button class="task-button" id="createTaskBtn">创建</button>
+                        </div>
+                    </div>
+                    <div class="sidebar-section" style="flex: 1; display: flex; flex-direction: column; padding: 0;">
+                        <div style="padding: 1rem; border-bottom: 1px solid rgba(100, 200, 255, 0.1);">
+                            <div class="sidebar-title">任务列表</div>
+                        </div>
+                        <div class="task-list" id="taskList"></div>
+                    </div>
+                </div>
+
+                <div class="center-content">
+                    <div class="flowchart-container">
+                        <svg class="flowchart" id="flowchart" width="900" height="400" viewBox="0 0 900 400"></svg>
+                    </div>
+                </div>
+
+                <div class="right-panel">
+                    <div class="panel-tabs">
+                        <div class="panel-tab active" data-tab="logs">日志</div>
+                        <div class="panel-tab" data-tab="review">审查</div>
+                        <div class="panel-tab" data-tab="discussion">讨论</div>
+                    </div>
+                    <div class="panel-content active" id="logs-panel">
+                        <div id="logsList"></div>
+                    </div>
+                    <div class="panel-content" id="review-panel">
+                        <div id="candidatesList"></div>
+                    </div>
+                    <div class="panel-content" id="discussion-panel">
+                        <div id="discussionContent"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ====== 代码监控视图 ====== -->
+            <div class="monitor-view" id="codeView">
+                <div class="monitor-header">
+                    <h2>代码监控</h2>
+                    <button class="monitor-refresh-btn" onclick="refreshCodeData()">刷新</button>
+                </div>
+                <div class="monitor-cards">
+                    <div class="monitor-card">
+                        <div class="monitor-card-title">代码生成任务</div>
+                        <div class="monitor-card-value info" id="codeTotal">0</div>
+                    </div>
+                    <div class="monitor-card">
+                        <div class="monitor-card-title">已完成</div>
+                        <div class="monitor-card-value success" id="codeSuccess">0</div>
+                    </div>
+                    <div class="monitor-card">
+                        <div class="monitor-card-title">失败</div>
+                        <div class="monitor-card-value error" id="codeFailed">0</div>
+                    </div>
+                    <div class="monitor-card">
+                        <div class="monitor-card-title">进行中</div>
+                        <div class="monitor-card-value warning" id="codeRunning">0</div>
+                    </div>
+                </div>
+                <div class="monitor-table-wrap">
+                    <div class="monitor-table-title">代码生成记录</div>
+                    <table class="monitor-table">
+                        <thead>
+                            <tr>
+                                <th>任务</th>
+                                <th>文件数</th>
+                                <th>代码行数</th>
+                                <th>状态</th>
+                                <th>开始时间</th>
+                                <th>耗时</th>
+                            </tr>
+                        </thead>
+                        <tbody id="codeTableBody">
+                            <tr><td colspan="6" style="text-align:center;color:#888;padding:2rem;">暂无代码生成记录</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- ====== 打包监控视图 ====== -->
+            <div class="monitor-view" id="buildView">
+                <div class="monitor-header">
+                    <h2>打包监控</h2>
+                    <button class="monitor-refresh-btn" onclick="refreshBuildData()">刷新</button>
+                </div>
+                <div class="monitor-cards">
+                    <div class="monitor-card">
+                        <div class="monitor-card-title">总打包次数</div>
+                        <div class="monitor-card-value info" id="buildTotal">0</div>
+                    </div>
+                    <div class="monitor-card">
+                        <div class="monitor-card-title">成功</div>
+                        <div class="monitor-card-value success" id="buildSuccess">0</div>
+                    </div>
+                    <div class="monitor-card">
+                        <div class="monitor-card-title">失败</div>
+                        <div class="monitor-card-value error" id="buildFailed">0</div>
+                    </div>
+                    <div class="monitor-card">
+                        <div class="monitor-card-title">进行中</div>
+                        <div class="monitor-card-value warning" id="buildRunning">0</div>
+                    </div>
+                </div>
+                <div class="monitor-table-wrap">
+                    <div class="monitor-table-title">打包记录</div>
+                    <table class="monitor-table">
+                        <thead>
+                            <tr>
+                                <th>任务</th>
+                                <th>产物</th>
+                                <th>大小</th>
+                                <th>状态</th>
+                                <th>开始时间</th>
+                                <th>耗时</th>
+                            </tr>
+                        </thead>
+                        <tbody id="buildTableBody">
+                            <tr><td colspan="6" style="text-align:center;color:#888;padding:2rem;">暂无打包记录</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- ====== 部署监控视图 ====== -->
+            <div class="monitor-view" id="deployView" style="padding:0;overflow:hidden;">
+                <div class="deploy-layout">
+                    <!-- 左侧主内容 -->
+                    <div class="deploy-main">
+                        <div class="monitor-header">
+                            <h2>部署监控</h2>
+                            <div style="display:flex;gap:0.5rem;">
+                                <button class="monitor-refresh-btn" onclick="toggleDeployDrawer()" id="deployDrawerBtn">地址 / Agent</button>
+                                <button class="monitor-refresh-btn" onclick="refreshDeployData()">刷新</button>
+                            </div>
+                        </div>
+                        <div class="monitor-cards">
+                            <div class="monitor-card">
+                                <div class="monitor-card-title">总部署次数</div>
+                                <div class="monitor-card-value info" id="deployTotal">0</div>
+                            </div>
+                            <div class="monitor-card">
+                                <div class="monitor-card-title">成功</div>
+                                <div class="monitor-card-value success" id="deploySuccess">0</div>
+                            </div>
+                            <div class="monitor-card">
+                                <div class="monitor-card-title">失败</div>
+                                <div class="monitor-card-value error" id="deployFailed">0</div>
+                            </div>
+                            <div class="monitor-card">
+                                <div class="monitor-card-title">进行中</div>
+                                <div class="monitor-card-value warning" id="deployRunning">0</div>
+                            </div>
+                        </div>
+                        <div class="monitor-table-wrap">
+                            <div class="monitor-table-title">部署记录</div>
+                            <table class="monitor-table">
+                                <thead>
+                                    <tr>
+                                        <th>任务</th>
+                                        <th>环境</th>
+                                        <th>部署地址</th>
+                                        <th>状态</th>
+                                        <th>开始时间</th>
+                                        <th>耗时</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="deployTableBody">
+                                    <tr><td colspan="6" style="text-align:center;color:#888;padding:2rem;">暂无部署记录</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- 右侧抽拉面板 -->
+                    <div class="deploy-drawer" id="deployDrawer">
+                        <button class="deploy-drawer-toggle" onclick="toggleDeployDrawer()" title="展开/收起">◀</button>
+                        <div class="deploy-drawer-inner">
+                            <div class="drawer-header">
+                                <h3>详情面板</h3>
+                                <button class="drawer-close-btn" onclick="toggleDeployDrawer()">✕</button>
+                            </div>
+
+                            <!-- 部署地址 -->
+                            <div class="drawer-section">
+                                <div class="drawer-section-title">部署地址与状态</div>
+                                <table class="drawer-table">
+                                    <thead>
+                                        <tr>
+                                            <th>服务</th>
+                                            <th>地址</th>
+                                            <th>状态</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="deployEndpointBody">
+                                        <tr><td colspan="3" class="drawer-empty">暂无部署地址</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <!-- Agent 列表 -->
+                            <div class="drawer-section" style="border-bottom:none;">
+                                <div class="drawer-section-title">Agent 列表</div>
+                                <table class="drawer-table">
+                                    <thead>
+                                        <tr>
+                                            <th>名称</th>
+                                            <th>阶段</th>
+                                            <th>状态</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="deployAgentBody">
+                                        <tr><td colspan="3" class="drawer-empty">暂无 Agent 信息</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ====== 测试监控视图 ====== -->
+            <div class="monitor-view" id="testView" style="padding:0;overflow:hidden;">
+                <div class="deploy-layout">
+                    <!-- 左侧主内容 -->
+                    <div class="deploy-main">
+                        <div class="monitor-header">
+                            <h2>测试监控</h2>
+                            <div style="display:flex;gap:0.5rem;">
+                                <button class="monitor-refresh-btn" onclick="toggleTestDrawer()">地址 / Agent</button>
+                                <button class="monitor-refresh-btn" onclick="refreshTestData()">刷新</button>
+                            </div>
+                        </div>
+                        <div class="monitor-cards">
+                            <div class="monitor-card">
+                                <div class="monitor-card-title">总测试用例</div>
+                                <div class="monitor-card-value info" id="testTotal">0</div>
+                            </div>
+                            <div class="monitor-card">
+                                <div class="monitor-card-title">通过</div>
+                                <div class="monitor-card-value success" id="testPassed">0</div>
+                            </div>
+                            <div class="monitor-card">
+                                <div class="monitor-card-title">失败</div>
+                                <div class="monitor-card-value error" id="testFailed">0</div>
+                            </div>
+                            <div class="monitor-card">
+                                <div class="monitor-card-title">跳过</div>
+                                <div class="monitor-card-value warning" id="testSkipped">0</div>
+                            </div>
+                        </div>
+                        <div class="monitor-table-wrap">
+                            <div class="monitor-table-title">测试执行记录</div>
+                            <table class="monitor-table">
+                                <thead>
+                                    <tr>
+                                        <th>测试套件</th>
+                                        <th>用例数</th>
+                                        <th>通过</th>
+                                        <th>失败</th>
+                                        <th>状态</th>
+                                        <th>耗时</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="testTableBody">
+                                    <tr><td colspan="6" style="text-align:center;color:#888;padding:2rem;">暂无测试记录</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- 右侧抽拉面板 -->
+                    <div class="deploy-drawer" id="testDrawer">
+                        <button class="deploy-drawer-toggle" onclick="toggleTestDrawer()" title="展开/收起">◀</button>
+                        <div class="deploy-drawer-inner">
+                            <div class="drawer-header">
+                                <h3>详情面板</h3>
+                                <button class="drawer-close-btn" onclick="toggleTestDrawer()">✕</button>
+                            </div>
+
+                            <!-- 测试地址 -->
+                            <div class="drawer-section">
+                                <div class="drawer-section-title">测试地址与状态</div>
+                                <table class="drawer-table">
+                                    <thead>
+                                        <tr>
+                                            <th>服务</th>
+                                            <th>地址</th>
+                                            <th>状态</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="testEndpointBody">
+                                        <tr><td colspan="3" class="drawer-empty">暂无测试地址</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <!-- Agent 列表 -->
+                            <div class="drawer-section" style="border-bottom:none;">
+                                <div class="drawer-section-title">Agent 列表</div>
+                                <table class="drawer-table">
+                                    <thead>
+                                        <tr>
+                                            <th>名称</th>
+                                            <th>阶段</th>
+                                            <th>状态</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="testAgentBody">
+                                        <tr><td colspan="3" class="drawer-empty">暂无 Agent 信息</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ====== 文档视图 ====== -->
+            <div class="docs-view" id="docsView">
+                <div class="docs-sidebar">
+                    <div class="docs-sidebar-header">
+                        <div class="sidebar-title">项目文档</div>
+                    </div>
+                    <!-- 按 Pipeline 阶段分类的快捷入口 -->
+                    <div style="padding: 0.5rem;" id="docQuickEntries">
+                        <div class="tree-item doc-category-entry" data-doc-path="requirement.md" data-doc-label="需求文档" style="background:rgba(0,217,255,0.06);border:1px solid rgba(0,217,255,0.15);border-radius:4px;margin-bottom:0.35rem;">
+                            <span class="icon">📋</span><span>① 需求文档</span>
+                        </div>
+                        <div class="tree-item doc-category-entry" data-doc-dir="sdd" data-doc-label="SDD 设计文档" style="background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.2);border-radius:4px;margin-bottom:0.35rem;">
+                            <span class="icon">📐</span><span>② SDD 设计文档</span>
+                        </div>
+                        <div class="tree-item doc-category-entry" data-doc-dir="deploy" data-doc-label="部署文档" style="background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.2);border-radius:4px;margin-bottom:0.35rem;">
+                            <span class="icon">🚀</span><span>④ 部署文档</span>
+                        </div>
+                        <div class="tree-item doc-category-entry" data-doc-dir="test" data-doc-label="测试文档" style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);border-radius:4px;margin-bottom:0.35rem;">
+                            <span class="icon">🧪</span><span>⑤ 测试文档</span>
+                        </div>
+                    </div>
+                    <div style="padding: 0 0.5rem;">
+                        <div style="font-size:0.72rem;color:#64b5f6;text-transform:uppercase;letter-spacing:1px;margin-bottom:0.3rem;padding:0 0.5rem;">全部文件</div>
+                    </div>
+                    <div class="docs-tree" id="docsTree"></div>
+                </div>
+
+                <div class="docs-main">
+                    <div class="docs-breadcrumb" id="docsBreadcrumb">
+                        <span>docs</span> / 选择一个文件查看
+                    </div>
+
+                    <!-- Markdown 阅读区 -->
+                    <div class="docs-content" id="docsContent">
+                        <div class="docs-empty">
+                            <div class="empty-icon">📖</div>
+                            <div class="empty-text">选择左侧文件查看内容</div>
+                            <div class="empty-hint">支持 Markdown 渲染、Mermaid 图表、在线编辑</div>
+                        </div>
+                    </div>
+
+                    <!-- 通用文档编辑器（需求/SDD/部署/测试 共用） -->
+                    <div class="req-editor-wrap" id="docEditorWrap">
+                        <div class="req-editor-toolbar">
+                            <button id="docEditBtn">编辑</button>
+                            <button id="docPreviewBtn">预览</button>
+                            <button id="docSaveBtn" class="save-btn">保存</button>
+                            <span class="status-text" id="docStatusText"></span>
+                        </div>
+                        <textarea class="req-textarea" id="docTextarea" placeholder="# 在此编写文档内容..."></textarea>
+                        <div class="docs-content" id="docPreview" style="display:none;"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <footer>
+            <div class="footer-left">
+                <div class="footer-item">
+                    <span>状态: <strong id="footerStatus">待机</strong></span>
+                </div>
+                <div class="footer-item">
+                    <div class="iteration-counter">迭代 #<span id="iterationNumber">0</span></div>
+                </div>
+            </div>
+            <div>
+                <span id="apiInfo">API: 初始化中...</span>
+            </div>
+        </footer>
+    </div>
+
+    <script>
+        // ============================================================
+        // 初始化配置
+        // ============================================================
+        const API_BASE = `${window.location.protocol}//${window.location.host}/api`;
+        const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/ws`;
+
+        // Mermaid 初始化
+        mermaid.initialize({
+            startOnLoad: false,
+            theme: 'dark',
+            themeVariables: {
+                darkMode: true,
+                background: '#0a0e1a',
+                primaryColor: '#0099cc',
+                primaryTextColor: '#e0e0e0',
+                lineColor: '#64b5f6',
+            }
+        });
+
+        // Marked 配置
+        marked.setOptions({
+            highlight: function(code, lang) {
+                if (lang && hljs.getLanguage(lang)) {
+                    return hljs.highlight(code, { language: lang }).value;
+                }
+                return hljs.highlightAuto(code).value;
+            },
+            breaks: true,
+            gfm: true
+        });
+
+        // ============================================================
+        // Flowchart 定义
+        // ============================================================
+        // 简化五步流程：需求提出 → SDD文档 → 代码生成 → 部署 → 测试 (失败回 SDD)
+        const FLOWCHART_NODES = [
+            { id: 'requirement', label: '需求提出',   sub: '提示词输入',             x: 100, y: 120, step: '①' },
+            { id: 'sdd',         label: 'SDD 文档',   sub: 'AI生成 / 人工修改',      x: 280, y: 120, step: '②' },
+            { id: 'coding',      label: '代码生成',   sub: 'AI 自动生成',            x: 460, y: 120, step: '③' },
+            { id: 'deploy',      label: '部署',       sub: '自动部署 / 人工部署',     x: 640, y: 120, step: '④' },
+            { id: 'testing',     label: '测试',       sub: '自动测试 / 人工测试',     x: 820, y: 120, step: '⑤' },
+            { id: 'test_decision', label: '',          x: 820, y: 280, isDecision: true },
+            { id: 'done',        label: '✓ 完成',     x: 820, y: 370, isDone: true },
+        ];
+
+        const FLOWCHART_EDGES = [
+            { from: 'requirement', to: 'sdd' },
+            { from: 'sdd',         to: 'coding' },
+            { from: 'coding',      to: 'deploy' },
+            { from: 'deploy',      to: 'testing' },
+            { from: 'testing',     to: 'test_decision' },
+            { from: 'test_decision', to: 'done',  label: '通过' },
+            // 测试不通过 → 回到 SDD 修改（曲线回环）
+            { from: 'test_decision', to: 'sdd',   label: '不通过', isCurve: true },
+        ];
+
+        const NODE_STATUS = { PENDING: 'pending', RUNNING: 'running', SUCCESS: 'success', FAILED: 'failed' };
+
+        // ============================================================
+        // App State
+        // ============================================================
+        let appState = {
+            ws: null,
+            isConnected: false,
+            isDemoMode: false,
+            tasks: [],
+            currentTaskId: null,
+            nodeStatus: {},
+            logs: [],
+            candidates: [],
+            discussion: null,
+            iterationCount: 0,
+            maxLogs: 100,
+            // 文档视图状态
+            currentView: 'pipeline',
+            docsTree: [],
+            currentDocPath: null,       // 当前查看的文件路径
+            editorDocPath: null,        // 当前编辑器绑定的文件路径
+            editorIsEditing: false,     // 是否处于编辑模式
+        };
+
+        FLOWCHART_NODES.forEach(node => {
+            appState.nodeStatus[node.id] = NODE_STATUS.PENDING;
+        });
+
+        // ============================================================
+        // DOM Elements
+        // ============================================================
+        const dom = {
+            flowchart: document.getElementById('flowchart'),
+            taskList: document.getElementById('taskList'),
+            taskInput: document.getElementById('taskInput'),
+            createTaskBtn: document.getElementById('createTaskBtn'),
+            taskCount: document.getElementById('taskCount'),
+            connectionStatus: document.getElementById('connectionStatus'),
+            connectionText: document.getElementById('connectionText'),
+            logsList: document.getElementById('logsList'),
+            candidatesList: document.getElementById('candidatesList'),
+            discussionContent: document.getElementById('discussionContent'),
+            footerStatus: document.getElementById('footerStatus'),
+            iterationNumber: document.getElementById('iterationNumber'),
+            apiInfo: document.getElementById('apiInfo'),
+            demoModeBanner: document.getElementById('demoModeBanner'),
+            panelTabs: document.querySelectorAll('.panel-tab'),
+            panelContents: document.querySelectorAll('.panel-content'),
+            // 视图切换
+            pipelineView: document.getElementById('pipelineView'),
+            docsView: document.getElementById('docsView'),
+            codeView: document.getElementById('codeView'),
+            buildView: document.getElementById('buildView'),
+            deployView: document.getElementById('deployView'),
+            testView: document.getElementById('testView'),
+            viewBtns: document.querySelectorAll('.view-btn'),
+            // 文档
+            docsTree: document.getElementById('docsTree'),
+            docsContent: document.getElementById('docsContent'),
+            docsBreadcrumb: document.getElementById('docsBreadcrumb'),
+            docQuickEntries: document.getElementById('docQuickEntries'),
+            docEditorWrap: document.getElementById('docEditorWrap'),
+            docTextarea: document.getElementById('docTextarea'),
+            docPreview: document.getElementById('docPreview'),
+            docEditBtn: document.getElementById('docEditBtn'),
+            docPreviewBtn: document.getElementById('docPreviewBtn'),
+            docSaveBtn: document.getElementById('docSaveBtn'),
+            docStatusText: document.getElementById('docStatusText'),
+        };
+
+        // ============================================================
+        // 视图切换
+        // ============================================================
+        function switchView(viewName) {
+            appState.currentView = viewName;
+            dom.viewBtns.forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.view === viewName);
+            });
+
+            // 隐藏所有视图
+            dom.pipelineView.style.display = 'none';
+            dom.pipelineView.classList.add('hidden');
+            dom.docsView.style.display = 'none';
+            dom.docsView.classList.remove('active');
+            dom.codeView.style.display = 'none';
+            dom.codeView.classList.remove('active');
+            dom.buildView.style.display = 'none';
+            dom.buildView.classList.remove('active');
+            dom.deployView.style.display = 'none';
+            dom.deployView.classList.remove('active');
+            dom.testView.style.display = 'none';
+            dom.testView.classList.remove('active');
+
+            // 显示对应视图
+            if (viewName === 'pipeline') {
+                dom.pipelineView.classList.remove('hidden');
+                dom.pipelineView.style.display = 'flex';
+            } else if (viewName === 'docs') {
+                dom.docsView.classList.add('active');
+                dom.docsView.style.display = 'flex';
+                if (appState.docsTree.length === 0) {
+                    loadDocsTree();
+                }
+            } else if (viewName === 'code') {
+                dom.codeView.classList.add('active');
+                dom.codeView.style.display = 'block';
+                refreshCodeData();
+            } else if (viewName === 'build') {
+                dom.buildView.classList.add('active');
+                dom.buildView.style.display = 'block';
+                refreshBuildData();
+            } else if (viewName === 'deploy') {
+                dom.deployView.classList.add('active');
+                dom.deployView.style.display = 'flex';
+                refreshDeployData();
+            } else if (viewName === 'test') {
+                dom.testView.classList.add('active');
+                dom.testView.style.display = 'flex';
+                refreshTestData();
+            }
+        }
+
+        dom.viewBtns.forEach(btn => {
+            btn.addEventListener('click', () => switchView(btn.dataset.view));
+        });
+
+        // ============================================================
+        // 代码监控
+        // ============================================================
+        async function refreshCodeData() {
+            try {
+                const resp = await fetch(`${API_BASE}/code/status`);
+                if (!resp.ok) throw new Error('API not available');
+                const data = await resp.json();
+                renderCodeData(data);
+            } catch (e) {
+                renderCodeData({ total: 0, success: 0, failed: 0, running: 0, records: [] });
+            }
+        }
+
+        function renderCodeData(data) {
+            document.getElementById('codeTotal').textContent = data.total || 0;
+            document.getElementById('codeSuccess').textContent = data.success || 0;
+            document.getElementById('codeFailed').textContent = data.failed || 0;
+            document.getElementById('codeRunning').textContent = data.running || 0;
+
+            const tbody = document.getElementById('codeTableBody');
+            tbody.textContent = '';
+            if (!data.records || data.records.length === 0) {
+                const tr = document.createElement('tr');
+                const td = document.createElement('td');
+                td.colSpan = 6;
+                td.style.cssText = 'text-align:center;color:#888;padding:2rem;';
+                td.textContent = '暂无代码生成记录';
+                tr.appendChild(td);
+                tbody.appendChild(tr);
+                return;
+            }
+            data.records.forEach(r => {
+                const tr = document.createElement('tr');
+                const cells = [
+                    { text: r.task || '-' },
+                    { text: String(r.files || 0) },
+                    { text: String(r.lines || 0) },
+                    { badge: true, status: r.status },
+                    { text: r.start_time || '-' },
+                    { text: r.duration || '-' }
+                ];
+                cells.forEach(c => {
+                    const td = document.createElement('td');
+                    if (c.badge) {
+                        const badge = document.createElement('span');
+                        badge.className = 'status-badge ' + (c.status || 'pending');
+                        badge.textContent = statusLabel(c.status);
+                        td.appendChild(badge);
+                    } else {
+                        td.textContent = c.text;
+                    }
+                    tr.appendChild(td);
+                });
+                tbody.appendChild(tr);
+            });
+        }
+
+        // ============================================================
+        // 打包监控
+        // ============================================================
+        async function refreshBuildData() {
+            try {
+                const resp = await fetch(`${API_BASE}/build/status`);
+                if (!resp.ok) throw new Error('API not available');
+                const data = await resp.json();
+                renderBuildData(data);
+            } catch (e) {
+                renderBuildData({ total: 0, success: 0, failed: 0, running: 0, records: [] });
+            }
+        }
+
+        function renderBuildData(data) {
+            document.getElementById('buildTotal').textContent = data.total || 0;
+            document.getElementById('buildSuccess').textContent = data.success || 0;
+            document.getElementById('buildFailed').textContent = data.failed || 0;
+            document.getElementById('buildRunning').textContent = data.running || 0;
+
+            const tbody = document.getElementById('buildTableBody');
+            tbody.textContent = '';
+            if (!data.records || data.records.length === 0) {
+                const tr = document.createElement('tr');
+                const td = document.createElement('td');
+                td.colSpan = 6;
+                td.style.cssText = 'text-align:center;color:#888;padding:2rem;';
+                td.textContent = '暂无打包记录';
+                tr.appendChild(td);
+                tbody.appendChild(tr);
+                return;
+            }
+            data.records.forEach(r => {
+                const tr = document.createElement('tr');
+                const cells = [
+                    { text: r.task || '-' },
+                    { text: r.artifact || '-' },
+                    { text: r.size || '-' },
+                    { badge: true, status: r.status },
+                    { text: r.start_time || '-' },
+                    { text: r.duration || '-' }
+                ];
+                cells.forEach(c => {
+                    const td = document.createElement('td');
+                    if (c.badge) {
+                        const badge = document.createElement('span');
+                        badge.className = 'status-badge ' + (c.status || 'pending');
+                        badge.textContent = statusLabel(c.status);
+                        td.appendChild(badge);
+                    } else {
+                        td.textContent = c.text;
+                    }
+                    tr.appendChild(td);
+                });
+                tbody.appendChild(tr);
+            });
+        }
+
+        // ============================================================
+        // 部署监控
+        // ============================================================
+        async function refreshDeployData() {
+            try {
+                const resp = await fetch(`${API_BASE}/deploy/status`);
+                if (!resp.ok) throw new Error('API not available');
+                const data = await resp.json();
+                renderDeployData(data);
+            } catch (e) {
+                renderDeployData({ total: 0, success: 0, failed: 0, running: 0, records: [] });
+            }
+        }
+
+        function renderDeployData(data) {
+            document.getElementById('deployTotal').textContent = data.total || 0;
+            document.getElementById('deploySuccess').textContent = data.success || 0;
+            document.getElementById('deployFailed').textContent = data.failed || 0;
+            document.getElementById('deployRunning').textContent = data.running || 0;
+
+            // ---- 部署地址与状态 ----
+            renderDeployEndpoints(data.endpoints || []);
+
+            // ---- Agent 列表 ----
+            renderDeployAgents(data.agents || []);
+
+            // ---- 部署记录 ----
+            const tbody = document.getElementById('deployTableBody');
+            tbody.textContent = '';
+            if (!data.records || data.records.length === 0) {
+                const tr = document.createElement('tr');
+                const td = document.createElement('td');
+                td.colSpan = 6;
+                td.style.cssText = 'text-align:center;color:#888;padding:2rem;';
+                td.textContent = '暂无部署记录';
+                tr.appendChild(td);
+                tbody.appendChild(tr);
+                return;
+            }
+            data.records.forEach(r => {
+                const tr = document.createElement('tr');
+                const cells = [
+                    { text: r.task || '-' },
+                    { text: r.env || '-' },
+                    { text: r.url || '-', isUrl: true },
+                    { badge: true, status: r.status },
+                    { text: r.start_time || '-' },
+                    { text: r.duration || '-' }
+                ];
+                cells.forEach(c => {
+                    const td = document.createElement('td');
+                    if (c.badge) {
+                        const badge = document.createElement('span');
+                        badge.className = 'status-badge ' + (c.status || 'pending');
+                        badge.textContent = statusLabel(c.status);
+                        td.appendChild(badge);
+                    } else if (c.isUrl && c.text !== '-') {
+                        const a = document.createElement('a');
+                        a.href = c.text;
+                        a.target = '_blank';
+                        a.style.cssText = 'color:#00d9ff;text-decoration:none;';
+                        a.textContent = c.text;
+                        td.appendChild(a);
+                    } else {
+                        td.textContent = c.text;
+                    }
+                    tr.appendChild(td);
+                });
+                tbody.appendChild(tr);
+            });
+        }
+
+        // ---- 抽拉面板开关 ----
+        function toggleDeployDrawer() {
+            const drawer = document.getElementById('deployDrawer');
+            const toggle = drawer.querySelector('.deploy-drawer-toggle');
+            drawer.classList.toggle('open');
+            toggle.textContent = drawer.classList.contains('open') ? '▶' : '◀';
+        }
+
+        function renderDeployEndpoints(endpoints) {
+            const tbody = document.getElementById('deployEndpointBody');
+            tbody.textContent = '';
+            if (!endpoints || endpoints.length === 0) {
+                const tr = document.createElement('tr');
+                const td = document.createElement('td');
+                td.colSpan = 3;
+                td.className = 'drawer-empty';
+                td.textContent = '暂无部署地址';
+                tr.appendChild(td);
+                tbody.appendChild(tr);
+                return;
+            }
+            endpoints.forEach(ep => {
+                const tr = document.createElement('tr');
+                // 服务（名称 + 环境 + 端口）
+                const tdName = document.createElement('td');
+                const nameSpan = document.createElement('div');
+                nameSpan.style.cssText = 'font-weight:600;color:#e0e0e0;';
+                nameSpan.textContent = ep.name || '-';
+                tdName.appendChild(nameSpan);
+                const envSpan = document.createElement('div');
+                envSpan.style.cssText = 'font-size:0.7rem;color:#888;margin-top:2px;';
+                envSpan.textContent = (ep.env || '-') + (ep.port ? ' :' + ep.port : '');
+                tdName.appendChild(envSpan);
+                tr.appendChild(tdName);
+                // 地址（可点击）
+                const tdUrl = document.createElement('td');
+                if (ep.url) {
+                    const a = document.createElement('a');
+                    a.href = ep.url;
+                    a.target = '_blank';
+                    a.className = 'drawer-url';
+                    a.textContent = ep.url;
+                    tdUrl.appendChild(a);
+                } else {
+                    tdUrl.textContent = '-';
+                }
+                tr.appendChild(tdUrl);
+                // 状态
+                const tdStatus = document.createElement('td');
+                const badge = document.createElement('span');
+                badge.className = 'status-badge ' + (ep.status || 'pending');
+                badge.textContent = statusLabel(ep.status);
+                tdStatus.appendChild(badge);
+                tr.appendChild(tdStatus);
+
+                tbody.appendChild(tr);
+            });
+        }
+
+        function renderDeployAgents(agents) {
+            const tbody = document.getElementById('deployAgentBody');
+            tbody.textContent = '';
+            if (!agents || agents.length === 0) {
+                const tr = document.createElement('tr');
+                const td = document.createElement('td');
+                td.colSpan = 3;
+                td.className = 'drawer-empty';
+                td.textContent = '暂无 Agent 信息';
+                tr.appendChild(td);
+                tbody.appendChild(tr);
+                return;
+            }
+            agents.forEach(ag => {
+                const tr = document.createElement('tr');
+                // 名称 + 类型
+                const tdName = document.createElement('td');
+                const nameDiv = document.createElement('div');
+                nameDiv.style.cssText = 'font-weight:600;color:#e0e0e0;';
+                nameDiv.textContent = ag.name || '-';
+                tdName.appendChild(nameDiv);
+                const typeDiv = document.createElement('div');
+                typeDiv.style.cssText = 'font-size:0.7rem;color:#888;margin-top:2px;';
+                typeDiv.textContent = ag.type || '-';
+                tdName.appendChild(typeDiv);
+                tr.appendChild(tdName);
+                // 负责阶段
+                const tdStage = document.createElement('td');
+                tdStage.textContent = ag.stage || '-';
+                tr.appendChild(tdStage);
+                // 状态
+                const tdStatus = document.createElement('td');
+                const badge = document.createElement('span');
+                badge.className = 'status-badge ' + (ag.status || 'pending');
+                badge.textContent = statusLabel(ag.status);
+                tdStatus.appendChild(badge);
+                tr.appendChild(tdStatus);
+
+                tbody.appendChild(tr);
+            });
+        }
+
+        // ============================================================
+        // 测试监控
+        // ============================================================
+        async function refreshTestData() {
+            try {
+                const resp = await fetch(`${API_BASE}/test/status`);
+                if (!resp.ok) throw new Error('API not available');
+                const data = await resp.json();
+                renderTestData(data);
+            } catch (e) {
+                renderTestData({ total: 0, passed: 0, failed: 0, skipped: 0, suites: [] });
+            }
+        }
+
+        function renderTestData(data) {
+            document.getElementById('testTotal').textContent = data.total || 0;
+            document.getElementById('testPassed').textContent = data.passed || 0;
+            document.getElementById('testFailed').textContent = data.failed || 0;
+            document.getElementById('testSkipped').textContent = data.skipped || 0;
+
+            // ---- 测试地址与状态 ----
+            renderTestEndpoints(data.endpoints || []);
+
+            // ---- Agent 列表 ----
+            renderTestAgents(data.agents || []);
+
+            // ---- 测试套件记录 ----
+            const tbody = document.getElementById('testTableBody');
+            tbody.textContent = '';
+            if (!data.suites || data.suites.length === 0) {
+                const tr = document.createElement('tr');
+                const td = document.createElement('td');
+                td.colSpan = 6;
+                td.style.cssText = 'text-align:center;color:#888;padding:2rem;';
+                td.textContent = '暂无测试记录';
+                tr.appendChild(td);
+                tbody.appendChild(tr);
+                return;
+            }
+            data.suites.forEach(s => {
+                const tr = document.createElement('tr');
+                const cells = [
+                    { text: s.name || '-' },
+                    { text: String(s.total || 0) },
+                    { text: String(s.passed || 0), style: 'color:#22c55e;' },
+                    { text: String(s.failed || 0), style: 'color:#ef4444;' },
+                    { badge: true, status: s.status },
+                    { text: s.duration || '-' }
+                ];
+                cells.forEach(c => {
+                    const td = document.createElement('td');
+                    if (c.badge) {
+                        const badge = document.createElement('span');
+                        badge.className = 'status-badge ' + (c.status || 'pending');
+                        badge.textContent = statusLabel(c.status);
+                        td.appendChild(badge);
+                    } else {
+                        td.textContent = c.text;
+                        if (c.style) td.style.cssText = c.style;
+                    }
+                    tr.appendChild(td);
+                });
+                tbody.appendChild(tr);
+            });
+        }
+
+        // ---- 测试抽拉面板开关 ----
+        function toggleTestDrawer() {
+            const drawer = document.getElementById('testDrawer');
+            const toggle = drawer.querySelector('.deploy-drawer-toggle');
+            drawer.classList.toggle('open');
+            toggle.textContent = drawer.classList.contains('open') ? '▶' : '◀';
+        }
+
+        function renderTestEndpoints(endpoints) {
+            const tbody = document.getElementById('testEndpointBody');
+            tbody.textContent = '';
+            if (!endpoints || endpoints.length === 0) {
+                const tr = document.createElement('tr');
+                const td = document.createElement('td');
+                td.colSpan = 3;
+                td.className = 'drawer-empty';
+                td.textContent = '暂无测试地址';
+                tr.appendChild(td);
+                tbody.appendChild(tr);
+                return;
+            }
+            endpoints.forEach(ep => {
+                const tr = document.createElement('tr');
+                // 服务（名称 + 环境 + 端口）
+                const tdName = document.createElement('td');
+                const nameSpan = document.createElement('div');
+                nameSpan.style.cssText = 'font-weight:600;color:#e0e0e0;';
+                nameSpan.textContent = ep.name || '-';
+                tdName.appendChild(nameSpan);
+                const envSpan = document.createElement('div');
+                envSpan.style.cssText = 'font-size:0.7rem;color:#888;margin-top:2px;';
+                envSpan.textContent = (ep.env || '-') + (ep.port ? ' :' + ep.port : '');
+                tdName.appendChild(envSpan);
+                tr.appendChild(tdName);
+                // 地址
+                const tdUrl = document.createElement('td');
+                if (ep.url) {
+                    const a = document.createElement('a');
+                    a.href = ep.url;
+                    a.target = '_blank';
+                    a.className = 'drawer-url';
+                    a.textContent = ep.url;
+                    tdUrl.appendChild(a);
+                } else {
+                    tdUrl.textContent = '-';
+                }
+                tr.appendChild(tdUrl);
+                // 状态
+                const tdStatus = document.createElement('td');
+                const badge = document.createElement('span');
+                badge.className = 'status-badge ' + (ep.status || 'pending');
+                badge.textContent = statusLabel(ep.status);
+                tdStatus.appendChild(badge);
+                tr.appendChild(tdStatus);
+
+                tbody.appendChild(tr);
+            });
+        }
+
+        function renderTestAgents(agents) {
+            const tbody = document.getElementById('testAgentBody');
+            tbody.textContent = '';
+            if (!agents || agents.length === 0) {
+                const tr = document.createElement('tr');
+                const td = document.createElement('td');
+                td.colSpan = 3;
+                td.className = 'drawer-empty';
+                td.textContent = '暂无 Agent 信息';
+                tr.appendChild(td);
+                tbody.appendChild(tr);
+                return;
+            }
+            agents.forEach(ag => {
+                const tr = document.createElement('tr');
+                // 名称 + 类型
+                const tdName = document.createElement('td');
+                const nameDiv = document.createElement('div');
+                nameDiv.style.cssText = 'font-weight:600;color:#e0e0e0;';
+                nameDiv.textContent = ag.name || '-';
+                tdName.appendChild(nameDiv);
+                const typeDiv = document.createElement('div');
+                typeDiv.style.cssText = 'font-size:0.7rem;color:#888;margin-top:2px;';
+                typeDiv.textContent = ag.type || '-';
+                tdName.appendChild(typeDiv);
+                tr.appendChild(tdName);
+                // 阶段
+                const tdStage = document.createElement('td');
+                tdStage.textContent = ag.stage || '-';
+                tr.appendChild(tdStage);
+                // 状态
+                const tdStatus = document.createElement('td');
+                const badge = document.createElement('span');
+                badge.className = 'status-badge ' + (ag.status || 'pending');
+                badge.textContent = statusLabel(ag.status);
+                tdStatus.appendChild(badge);
+                tr.appendChild(tdStatus);
+
+                tbody.appendChild(tr);
+            });
+        }
+
+        function statusLabel(status) {
+            const map = { success: '成功', running: '运行中', pending: '等待中', failed: '失败', skipped: '跳过' };
+            return map[status] || status || '未知';
+        }
+
+        // ============================================================
+        // 文档树 + 文件浏览
+        // ============================================================
+        async function loadDocsTree() {
+            try {
+                const resp = await fetch(`${API_BASE}/docs`);
+                if (!resp.ok) return;
+                const data = await resp.json();
+                appState.docsTree = data.tree || [];
+                renderDocsTree();
+            } catch (e) {
+                console.error('Failed to load docs tree:', e);
+                dom.docsTree.innerHTML = '<div class="no-data">无法加载文档目录</div>';
+            }
+        }
+
+        function renderDocsTree() {
+            dom.docsTree.innerHTML = '';
+            if (appState.docsTree.length === 0) {
+                dom.docsTree.innerHTML = '<div class="no-data" style="padding:1rem;font-size:0.82rem;">docs/ 目录为空</div>';
+                return;
+            }
+            const fragment = document.createDocumentFragment();
+            appState.docsTree.forEach(item => fragment.appendChild(buildTreeNode(item)));
+            dom.docsTree.appendChild(fragment);
+        }
+
+        function buildTreeNode(item) {
+            if (item.type === 'directory') {
+                const wrap = document.createElement('div');
+                const dirItem = document.createElement('div');
+                dirItem.className = 'tree-item';
+                dirItem.innerHTML = `<span class="icon">📂</span><span>${item.name}/</span>`;
+                const children = document.createElement('div');
+                children.className = 'tree-children';
+                (item.children || []).forEach(child => children.appendChild(buildTreeNode(child)));
+                dirItem.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    children.classList.toggle('collapsed');
+                    dirItem.querySelector('.icon').textContent = children.classList.contains('collapsed') ? '📁' : '📂';
+                });
+                wrap.appendChild(dirItem);
+                wrap.appendChild(children);
+                return wrap;
+            } else {
+                const fileItem = document.createElement('div');
+                fileItem.className = 'tree-item';
+                fileItem.dataset.path = item.path;
+                fileItem.innerHTML = `<span class="icon">${getFileIcon(item.ext)}</span><span>${item.name}</span>`;
+                fileItem.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    openDocFile(item.path, true);  // editable = true for md files
+                });
+                return fileItem;
+            }
+        }
+
+        function getFileIcon(ext) {
+            const map = {
+                '.md': '📄', '.txt': '📝', '.json': '🔧', '.yaml': '⚙️', '.yml': '⚙️',
+                '.py': '🐍', '.js': '📜', '.ts': '📜', '.html': '🌐', '.css': '🎨',
+                '.mermaid': '📊', '.sql': '🗃️', '.sh': '💻',
+            };
+            return map[ext] || '📄';
+        }
+
+        // 清除所有侧栏高亮
+        function clearDocHighlights() {
+            dom.docsTree.querySelectorAll('.tree-item').forEach(el => el.classList.remove('active'));
+            dom.docQuickEntries.querySelectorAll('.doc-category-entry').forEach(el => el.classList.remove('active'));
+        }
+
+        // ============================================================
+        // 通用文档打开/编辑/保存
+        // ============================================================
+
+        /**
+         * 打开一个 docs/ 下的文件，支持预览和在线编辑
+         * @param {string} path — 相对于 docs/ 的路径，如 "sdd/architecture.md"
+         * @param {boolean} editable — 是否显示编辑按钮
+         */
+        async function openDocFile(path, editable = false) {
+            appState.currentDocPath = path;
+            clearDocHighlights();
+
+            // 高亮对应的树节点
+            const treeItem = dom.docsTree.querySelector(`[data-path="${path}"]`);
+            if (treeItem) treeItem.classList.add('active');
+
+            // 面包屑
+            dom.docsBreadcrumb.innerHTML = `<span>docs</span> / ${path.replace(/\//g, ' / ')}`;
+
+            // 先显示阅读区，隐藏编辑器
+            dom.docEditorWrap.classList.remove('active');
+            dom.docsContent.style.display = 'block';
+            dom.docsContent.innerHTML = '<div class="no-data">加载中...</div>';
+
+            try {
+                const resp = await fetch(`${API_BASE}/docs/file?path=${encodeURIComponent(path)}`);
+                if (!resp.ok) {
+                    // 文件不存在 → 如果是 md 则直接进入编辑模式创建
+                    if (resp.status === 404 && path.endsWith('.md')) {
+                        openDocEditor(path, '', '文件不存在，可直接编辑创建');
+                        return;
+                    }
+                    dom.docsContent.innerHTML = `<div class="no-data">无法加载: ${resp.status}</div>`;
+                    return;
+                }
+                const data = await resp.json();
+                const ext = data.ext || '.md';
+
+                if (editable && ext === '.md') {
+                    // Markdown 文件 → 用编辑器打开（默认预览模式）
+                    openDocEditor(path, data.content, '');
+                } else {
+                    // 非 md / 不可编辑 → 只读渲染
+                    renderDocContent(data.content, ext);
+                }
+            } catch (e) {
+                dom.docsContent.innerHTML = `<div class="no-data">加载失败: ${e.message}</div>`;
+            }
+        }
+
+        /**
+         * 打开通用文档编辑器
+         */
+        function openDocEditor(path, content, hint) {
+            appState.editorDocPath = path;
+            appState.editorIsEditing = false;
+            dom.docsContent.style.display = 'none';
+            dom.docEditorWrap.classList.add('active');
+            dom.docTextarea.value = content;
+            dom.docStatusText.textContent = hint || '';
+
+            // 有内容 → 预览模式；空 → 编辑模式
+            if (content) {
+                showDocPreview();
+            } else {
+                showDocEdit();
+            }
+        }
+
+        function showDocEdit() {
+            appState.editorIsEditing = true;
+            dom.docTextarea.style.display = 'block';
+            dom.docPreview.style.display = 'none';
+            dom.docEditBtn.style.opacity = '1';
+            dom.docPreviewBtn.style.opacity = '0.5';
+        }
+
+        function showDocPreview() {
+            appState.editorIsEditing = false;
+            dom.docTextarea.style.display = 'none';
+            dom.docPreview.style.display = 'block';
+            dom.docPreview.innerHTML = `<div class="markdown-body">${marked.parse(dom.docTextarea.value || '*暂无内容*')}</div>`;
+            renderMermaidBlocks(dom.docPreview);
+            dom.docPreview.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
+            dom.docEditBtn.style.opacity = '0.5';
+            dom.docPreviewBtn.style.opacity = '1';
+        }
+
+        async function saveCurrentDoc() {
+            const path = appState.editorDocPath;
+            if (!path) return;
+            const content = dom.docTextarea.value;
+            dom.docStatusText.textContent = '保存中...';
+
+            try {
+                // 如果是 requirement.md 根文件，走专用 API
+                const isReq = (path === 'requirement.md');
+                const url = isReq ? `${API_BASE}/requirement` : `${API_BASE}/docs/file`;
+                const body = isReq ? { content } : { path, content };
+
+                const resp = await fetch(url, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                if (resp.ok) {
+                    dom.docStatusText.textContent = '✓ 已保存';
+                    setTimeout(() => { dom.docStatusText.textContent = ''; }, 2000);
+                    loadDocsTree();  // 刷新文件树
+                } else {
+                    const err = await resp.text();
+                    dom.docStatusText.textContent = '保存失败: ' + err;
+                }
+            } catch (e) {
+                dom.docStatusText.textContent = '保存失败: ' + e.message;
+            }
+        }
+
+        dom.docEditBtn.addEventListener('click', showDocEdit);
+        dom.docPreviewBtn.addEventListener('click', showDocPreview);
+        dom.docSaveBtn.addEventListener('click', saveCurrentDoc);
+
+        // 只读渲染（非编辑器）
+        function renderDocContent(content, ext) {
+            if (ext === '.md') {
+                dom.docsContent.innerHTML = `<div class="markdown-body">${marked.parse(content)}</div>`;
+                renderMermaidBlocks(dom.docsContent);
+                dom.docsContent.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
+            } else if (ext === '.mermaid') {
+                dom.docsContent.innerHTML = `<div class="mermaid">${escapeHtml(content)}</div>`;
+                renderMermaidBlocks(dom.docsContent);
+            } else {
+                const lang = ext.replace('.', '') || 'plaintext';
+                let highlighted;
+                try { highlighted = hljs.highlight(content, { language: lang }).value; }
+                catch { highlighted = escapeHtml(content); }
+                dom.docsContent.innerHTML = `<pre><code class="hljs">${highlighted}</code></pre>`;
+            }
+        }
+
+        function renderMermaidBlocks(container) {
+            container.querySelectorAll('pre code.language-mermaid, code.language-mermaid').forEach(block => {
+                const pre = block.closest('pre') || block;
+                const div = document.createElement('div');
+                div.className = 'mermaid';
+                div.textContent = block.textContent;
+                pre.replaceWith(div);
+            });
+            try { mermaid.run({ nodes: container.querySelectorAll('.mermaid') }); }
+            catch (e) { console.warn('Mermaid render error:', e); }
+        }
+
+        function escapeHtml(str) {
+            return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        // ============================================================
+        // 快捷入口：分类目录点击
+        // ============================================================
+        dom.docQuickEntries.querySelectorAll('.doc-category-entry').forEach(entry => {
+            entry.addEventListener('click', () => {
+                clearDocHighlights();
+                entry.classList.add('active');
+
+                const singlePath = entry.dataset.docPath;   // 单文件，如 requirement.md
+                const dirName = entry.dataset.docDir;        // 目录，如 sdd / deploy / test
+                const label = entry.dataset.docLabel;
+
+                if (singlePath) {
+                    // 单文件模式（需求文档）
+                    dom.docsBreadcrumb.innerHTML = `<span>📋 ${label}</span> — docs/${singlePath}`;
+                    openDocFile(singlePath, true);
+                } else if (dirName) {
+                    // 目录模式 → 查找该目录下的文件，展示文件列表或第一个 md 文件
+                    showCategoryDir(dirName, label);
+                }
+            });
+        });
+
+        /**
+         * 展示某个分类目录（如 sdd/、deploy/、test/）
+         * 如果目录下有 md 文件 → 打开第一个
+         * 如果目录不存在 → 创建默认文件模板
+         */
+        async function showCategoryDir(dirName, label) {
+            dom.docsBreadcrumb.innerHTML = `<span>${label}</span> — docs/${dirName}/`;
+            dom.docEditorWrap.classList.remove('active');
+            dom.docsContent.style.display = 'block';
+            dom.docsContent.innerHTML = '<div class="no-data">加载中...</div>';
+
+            // 从文档树中查找该目录
+            const dirNode = appState.docsTree.find(n => n.type === 'directory' && n.name === dirName);
+
+            if (dirNode && dirNode.children && dirNode.children.length > 0) {
+                // 目录存在且有文件 → 显示文件列表
+                const mdFiles = dirNode.children.filter(f => f.ext === '.md');
+                const allFiles = dirNode.children;
+
+                let html = `<div class="markdown-body"><h2>${label}</h2><p>docs/${dirName}/ 目录下共 ${allFiles.length} 个文件：</p><ul>`;
+                allFiles.forEach(f => {
+                    const icon = getFileIcon(f.ext);
+                    html += `<li><a href="javascript:void(0)" class="dir-file-link" data-path="${f.path}">${icon} ${f.name}</a></li>`;
+                });
+                html += '</ul></div>';
+                dom.docsContent.innerHTML = html;
+
+                // 绑定点击
+                dom.docsContent.querySelectorAll('.dir-file-link').forEach(link => {
+                    link.addEventListener('click', () => openDocFile(link.dataset.path, true));
+                });
+            } else {
+                // 目录不存在或为空 → 提示创建默认文件
+                const defaultFile = `${dirName}/README.md`;
+                const templates = {
+                    sdd: `# SDD 设计文档\n\n## 1. 架构概述\n\n## 2. 模块设计\n\n## 3. 数据库设计\n\n## 4. API 设计\n\n## 5. 部署架构\n`,
+                    deploy: `# 部署文档\n\n## 1. 环境要求\n\n## 2. 部署步骤\n\n## 3. 配置说明\n\n## 4. 回滚方案\n\n## 5. 监控告警\n`,
+                    test: `# 测试文档\n\n## 1. 测试策略\n\n## 2. 测试用例\n\n## 3. 自动化测试\n\n## 4. 人工测试清单\n\n## 5. 测试报告\n`,
+                };
+                const tmpl = templates[dirName] || `# ${label}\n\n在此编写内容...\n`;
+
+                dom.docsContent.innerHTML = `
+                    <div class="docs-empty">
+                        <div class="empty-icon">${dirName === 'sdd' ? '📐' : dirName === 'deploy' ? '🚀' : '🧪'}</div>
+                        <div class="empty-text">docs/${dirName}/ 目录尚无文件</div>
+                        <div class="empty-hint" style="margin-top:0.5rem">
+                            <button onclick="createDefaultDoc('${defaultFile}', \`${btoa(encodeURIComponent(tmpl))}\`)"
+                                style="padding:0.5rem 1.2rem;background:linear-gradient(135deg,#0099cc,#00d9ff);border:none;border-radius:4px;color:white;cursor:pointer;font-weight:600;font-size:0.85rem;">
+                                创建 ${defaultFile}
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        // 创建默认文档并打开编辑器
+        window.createDefaultDoc = async function(path, encodedContent) {
+            const content = decodeURIComponent(atob(encodedContent));
+            openDocEditor(path, content, '新文件，请编辑后保存');
+        };
+
+        // ============================================================
+        // Pipeline — Flowchart
+        // ============================================================
+        function renderFlowchart() {
+            const svg = dom.flowchart;
+            svg.innerHTML = '';
+            const NS = 'http://www.w3.org/2000/svg';
+
+            // Defs: 箭头 marker
+            const defs = document.createElementNS(NS, 'defs');
+            defs.innerHTML = `
+                <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+                    <polygon points="0 0, 10 3, 0 6" fill="rgba(100, 200, 255, 0.6)" />
+                </marker>
+                <marker id="arrowhead-red" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+                    <polygon points="0 0, 10 3, 0 6" fill="#f59e0b" />
+                </marker>
+                <marker id="arrowhead-green" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+                    <polygon points="0 0, 10 3, 0 6" fill="#22c55e" />
+                </marker>
+            `;
+            svg.appendChild(defs);
+
+            // 画连线
+            FLOWCHART_EDGES.forEach(edge => {
+                const from = FLOWCHART_NODES.find(n => n.id === edge.from);
+                const to   = FLOWCHART_NODES.find(n => n.id === edge.to);
+                if (!from || !to) return;
+
+                if (edge.isCurve) {
+                    // 测试不通过 → SDD 的回环曲线（从决策菱形左侧绕下方回到 SDD）
+                    const path = document.createElementNS(NS, 'path');
+                    const startX = from.x - 25, startY = from.y;
+                    const endX = to.x, endY = to.y + 30;
+                    const midY = 370; // 曲线最低点
+                    const d = `M ${startX} ${startY} C ${startX - 80} ${midY}, ${endX - 80} ${midY}, ${endX} ${endY}`;
+                    path.setAttribute('d', d);
+                    path.setAttribute('fill', 'none');
+                    path.setAttribute('stroke', '#f59e0b');
+                    path.setAttribute('stroke-width', '2');
+                    path.setAttribute('stroke-dasharray', '6,4');
+                    path.setAttribute('marker-end', 'url(#arrowhead-red)');
+                    svg.appendChild(path);
+
+                    // 标签
+                    if (edge.label) {
+                        const txt = document.createElementNS(NS, 'text');
+                        txt.setAttribute('x', (startX + endX) / 2 - 60);
+                        txt.setAttribute('y', midY + 5);
+                        txt.setAttribute('text-anchor', 'middle');
+                        txt.setAttribute('font-size', '12');
+                        txt.setAttribute('fill', '#f59e0b');
+                        txt.setAttribute('font-weight', '600');
+                        txt.textContent = edge.label;
+                        svg.appendChild(txt);
+                    }
+                } else {
+                    // 普通直线连接
+                    const line = document.createElementNS(NS, 'line');
+                    line.setAttribute('x1', from.x);
+                    line.setAttribute('y1', from.y);
+                    line.setAttribute('x2', to.x);
+                    line.setAttribute('y2', to.y);
+                    const isPass = edge.label === '通过';
+                    line.setAttribute('stroke', isPass ? '#22c55e' : 'rgba(100, 200, 255, 0.5)');
+                    line.setAttribute('stroke-width', '2');
+                    line.setAttribute('marker-end', isPass ? 'url(#arrowhead-green)' : 'url(#arrowhead)');
+                    if (!isPass) line.setAttribute('stroke-dasharray', '5,5');
+                    svg.appendChild(line);
+
+                    if (edge.label) {
+                        const txt = document.createElementNS(NS, 'text');
+                        const mx = (from.x + to.x) / 2, my = (from.y + to.y) / 2;
+                        txt.setAttribute('x', mx + 10);
+                        txt.setAttribute('y', my - 8);
+                        txt.setAttribute('text-anchor', 'middle');
+                        txt.setAttribute('font-size', '11');
+                        txt.setAttribute('fill', isPass ? '#22c55e' : 'rgba(100, 200, 255, 0.7)');
+                        txt.textContent = edge.label;
+                        svg.appendChild(txt);
+                    }
+                }
+            });
+
+            // 画节点
+            FLOWCHART_NODES.forEach(node => {
+                const status = appState.nodeStatus[node.id];
+                let bgColor = 'rgba(30,41,59,0.8)', textColor = '#b0c4de', strokeColor = 'rgba(100, 200, 255, 0.25)';
+                if (status === NODE_STATUS.RUNNING)  { bgColor = '#0066cc'; textColor = '#fff'; strokeColor = '#00d9ff'; }
+                else if (status === NODE_STATUS.SUCCESS) { bgColor = 'rgba(34,197,94,0.15)'; textColor = '#22c55e'; strokeColor = '#22c55e'; }
+                else if (status === NODE_STATUS.FAILED)  { bgColor = 'rgba(239,68,68,0.15)'; textColor = '#ef4444'; strokeColor = '#ef4444'; }
+
+                if (node.isDecision) {
+                    // 菱形决策节点
+                    const s = 22;
+                    const polygon = document.createElementNS(NS, 'polygon');
+                    polygon.setAttribute('points', `${node.x},${node.y-s} ${node.x+s},${node.y} ${node.x},${node.y+s} ${node.x-s},${node.y}`);
+                    polygon.setAttribute('fill', bgColor);
+                    polygon.setAttribute('stroke', strokeColor);
+                    polygon.setAttribute('stroke-width', '2');
+                    if (status === NODE_STATUS.RUNNING) polygon.setAttribute('class', 'node-running');
+                    svg.appendChild(polygon);
+                    // "?" 文字
+                    const txt = document.createElementNS(NS, 'text');
+                    txt.setAttribute('x', node.x);
+                    txt.setAttribute('y', node.y + 5);
+                    txt.setAttribute('text-anchor', 'middle');
+                    txt.setAttribute('font-size', '14');
+                    txt.setAttribute('fill', textColor);
+                    txt.setAttribute('font-weight', '700');
+                    txt.textContent = '?';
+                    svg.appendChild(txt);
+                } else if (node.isDone) {
+                    // 完成节点（圆形）
+                    const circle = document.createElementNS(NS, 'circle');
+                    circle.setAttribute('cx', node.x);
+                    circle.setAttribute('cy', node.y);
+                    circle.setAttribute('r', '24');
+                    circle.setAttribute('fill', status === NODE_STATUS.SUCCESS ? 'rgba(34,197,94,0.2)' : 'rgba(30,41,59,0.8)');
+                    circle.setAttribute('stroke', status === NODE_STATUS.SUCCESS ? '#22c55e' : 'rgba(100, 200, 255, 0.25)');
+                    circle.setAttribute('stroke-width', '2');
+                    svg.appendChild(circle);
+                    const txt = document.createElementNS(NS, 'text');
+                    txt.setAttribute('x', node.x);
+                    txt.setAttribute('y', node.y + 5);
+                    txt.setAttribute('text-anchor', 'middle');
+                    txt.setAttribute('font-size', '13');
+                    txt.setAttribute('fill', status === NODE_STATUS.SUCCESS ? '#22c55e' : '#888');
+                    txt.setAttribute('font-weight', '700');
+                    txt.textContent = node.label;
+                    svg.appendChild(txt);
+                } else {
+                    // 主流程节点（圆角矩形 + 副标题）
+                    const w = 130, h = 56, rx = 8;
+                    const rect = document.createElementNS(NS, 'rect');
+                    rect.setAttribute('x', node.x - w/2);
+                    rect.setAttribute('y', node.y - h/2);
+                    rect.setAttribute('width', w);
+                    rect.setAttribute('height', h);
+                    rect.setAttribute('rx', rx);
+                    rect.setAttribute('fill', bgColor);
+                    rect.setAttribute('stroke', strokeColor);
+                    rect.setAttribute('stroke-width', '2');
+                    if (status === NODE_STATUS.RUNNING) rect.setAttribute('class', 'node-running');
+                    svg.appendChild(rect);
+
+                    // 步骤编号 + 主标题
+                    const title = document.createElementNS(NS, 'text');
+                    title.setAttribute('x', node.x);
+                    title.setAttribute('y', node.y - 4);
+                    title.setAttribute('text-anchor', 'middle');
+                    title.setAttribute('font-size', '13');
+                    title.setAttribute('fill', textColor);
+                    title.setAttribute('font-weight', '700');
+                    title.textContent = (node.step || '') + ' ' + node.label;
+                    svg.appendChild(title);
+
+                    // 副标题（模式说明）
+                    if (node.sub) {
+                        const sub = document.createElementNS(NS, 'text');
+                        sub.setAttribute('x', node.x);
+                        sub.setAttribute('y', node.y + 14);
+                        sub.setAttribute('text-anchor', 'middle');
+                        sub.setAttribute('font-size', '10');
+                        sub.setAttribute('fill', 'rgba(160,180,200,0.6)');
+                        sub.textContent = node.sub;
+                        svg.appendChild(sub);
+                    }
+                }
+            });
+        }
+
+        // ============================================================
+        // WebSocket
+        // ============================================================
+        function connectWebSocket() {
+            try {
+                appState.ws = new WebSocket(WS_URL);
+
+                appState.ws.onopen = () => {
+                    appState.isConnected = true;
+                    appState.isDemoMode = false;
+                    updateConnectionStatus();
+                    dom.demoModeBanner.style.display = 'none';
+                    dom.apiInfo.textContent = 'API: Connected';
+                };
+
+                appState.ws.onmessage = (event) => {
+                    try { handleWebSocketMessage(JSON.parse(event.data)); }
+                    catch (e) { console.error('WS parse error:', e); }
+                };
+
+                appState.ws.onerror = () => {
+                    appState.isConnected = false;
+                    appState.isDemoMode = true;
+                    updateConnectionStatus();
+                };
+
+                appState.ws.onclose = () => {
+                    appState.isConnected = false;
+                    appState.isDemoMode = true;
+                    updateConnectionStatus();
+                    dom.demoModeBanner.style.display = 'block';
+                    dom.apiInfo.textContent = 'API: Demo Mode';
+                    setTimeout(connectWebSocket, 3000);
+                };
+            } catch (e) {
+                appState.isDemoMode = true;
+                updateConnectionStatus();
+            }
+        }
+
+        function handleWebSocketMessage(message) {
+            const { type, data } = message;
+
+            switch (type) {
+                case 'task_created': {
+                    const taskId = message.task_id;
+                    const desc = data.description || '未命名任务';
+                    if (!appState.tasks.find(t => t.id === taskId)) {
+                        appState.tasks.push({ id: taskId, description: desc, status: 'pending' });
+                    }
+                    appState.currentTaskId = taskId;
+                    renderTaskList();
+                    updateTaskCount();
+                    addLog('任务创建', `新任务: ${desc} [${taskId}]`, 'info');
+                    break;
+                }
+                case 'task_status_changed': {
+                    const task = appState.tasks.find(t => t.id === message.task_id);
+                    const newStatus = data.new_status || data.status || 'unknown';
+                    if (task) {
+                        task.status = newStatus;
+                        renderTaskList();
+                        addLog('任务状态', `${task.description}: ${newStatus}`, 'info');
+                    } else {
+                        appState.tasks.push({ id: message.task_id, description: '任务 ' + message.task_id, status: newStatus });
+                        appState.currentTaskId = message.task_id;
+                        renderTaskList();
+                        updateTaskCount();
+                        getTasks();
+                    }
+                    break;
+                }
+                case 'step_started':
+                    appState.nodeStatus[data.step_id] = NODE_STATUS.RUNNING;
+                    renderFlowchart();
+                    addLog('步骤启动', `${data.step_name} 开始执行`, 'info');
+                    break;
+                case 'step_completed':
+                    appState.nodeStatus[data.step_id] = NODE_STATUS.SUCCESS;
+                    renderFlowchart();
+                    addLog('步骤完成', `${data.step_name} 完成成功`, 'success');
+                    break;
+                case 'step_failed':
+                    appState.nodeStatus[data.step_id] = NODE_STATUS.FAILED;
+                    renderFlowchart();
+                    addLog('步骤失败', `${data.step_name} 执行失败: ${data.error}`, 'error');
+                    break;
+                case 'candidate_created':
+                    appState.candidates.push(data.candidate);
+                    renderCandidates();
+                    addLog('候选版本', `新候选版本: ${data.candidate.version_id}`, 'info');
+                    break;
+                case 'candidate_recommended':
+                    addLog('推荐版本', `推荐版本: ${data.version_id} (信心分数: ${data.confidence_score})`, 'success');
+                    break;
+                case 'review_requested':
+                    renderReviewPanel();
+                    addLog('审查请求', '等待人工审查', 'warning');
+                    break;
+                case 'candidate_approved':
+                    addLog('版本审批', `版本 ${data.version_id} 已批准`, 'success');
+                    break;
+                case 'candidate_rejected':
+                    addLog('版本拒绝', `版本 ${data.version_id} 已拒绝`, 'error');
+                    break;
+                case 'discussion_started':
+                    appState.discussion = { issues: data.issues || [], proposals: data.proposals || [] };
+                    renderDiscussion();
+                    addLog('讨论启动', '闭环讨论已启动', 'warning');
+                    break;
+                case 'discussion_proposals':
+                    if (appState.discussion) appState.discussion.proposals = data.proposals;
+                    renderDiscussion();
+                    addLog('讨论提案', `新提案数: ${data.proposals.length}`, 'info');
+                    break;
+                case 'discussion_waiting_human':
+                    switchTab('discussion');
+                    addLog('等待输入', '等待人工输入', 'warning');
+                    break;
+                case 'discussion_resolved':
+                    appState.discussion = null;
+                    renderDiscussion();
+                    addLog('讨论解决', '闭环讨论已解决', 'success');
+                    break;
+                case 'iteration_updated':
+                    appState.iterationCount = data.iteration_count;
+                    dom.iterationNumber.textContent = appState.iterationCount;
+                    addLog('迭代更新', `迭代计数: ${appState.iterationCount}`, 'info');
+                    break;
+                case 'replan_started':
+                    // 测试不通过 → 回到 SDD 修改
+                    appState.nodeStatus['test_decision'] = NODE_STATUS.FAILED;
+                    appState.nodeStatus['sdd'] = NODE_STATUS.RUNNING;
+                    // 重置后续节点
+                    appState.nodeStatus['coding'] = NODE_STATUS.PENDING;
+                    appState.nodeStatus['deploy'] = NODE_STATUS.PENDING;
+                    appState.nodeStatus['testing'] = NODE_STATUS.PENDING;
+                    renderFlowchart();
+                    addLog('回退修改', '测试不通过，回到 SDD 文档修改', 'warning');
+                    break;
+                case 'replan_completed':
+                    appState.nodeStatus['sdd'] = NODE_STATUS.SUCCESS;
+                    renderFlowchart();
+                    addLog('SDD 更新', 'SDD 文档修改完成，重新进入流程', 'success');
+                    break;
+            }
+        }
+
+        // ============================================================
+        // Task CRUD
+        // ============================================================
+        async function createTask(description) {
+            if (!description.trim()) return;
+            try {
+                const response = await fetch(`${API_BASE}/tasks`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ description, project_path: '/workspace' })
+                });
+                if (response.ok) {
+                    const data = await response.json();
+                    if (!appState.isDemoMode) {
+                        const newTask = {
+                            id: data.task_id,
+                            description: description,
+                            status: typeof data.status === 'string' ? data.status : (data.status?.value || 'pending'),
+                        };
+                        appState.tasks.push(newTask);
+                        appState.currentTaskId = newTask.id;
+                        renderTaskList();
+                        updateTaskCount();
+                        dom.taskInput.value = '';
+                        addLog('任务创建', `新任务: ${description} [${newTask.id}]`, 'success');
+                    } else {
+                        simulateTaskCreation(description);
+                    }
+                }
+            } catch (e) {
+                appState.isDemoMode = true;
+                simulateTaskCreation(description);
+            }
+        }
+
+        async function getTasks() {
+            try {
+                const response = await fetch(`${API_BASE}/tasks`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const taskArray = Array.isArray(data) ? data : (data.tasks || []);
+                    appState.tasks = taskArray.map(t => ({
+                        id: t.task_id || t.id,
+                        description: t.description || '未命名任务',
+                        status: typeof t.status === 'string' ? t.status : (t.status?.value || t.status || 'pending'),
+                        created_at: t.created_at,
+                    }));
+                    renderTaskList();
+                    updateTaskCount();
+                }
+            } catch (e) { console.error('Failed to fetch tasks:', e); }
+        }
+
+        async function approveCandidate(versionId, feedback = '') {
+            if (!appState.currentTaskId) return;
+            try {
+                const response = await fetch(`${API_BASE}/tasks/${appState.currentTaskId}/review`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ decision: 'approve', version_id: versionId, feedback })
+                });
+                if (response.ok) {
+                    addLog('版本批准', `版本 ${versionId} 已批准`, 'success');
+                    renderCandidates();
+                }
+            } catch (e) { console.error('Failed to approve:', e); }
+        }
+
+        async function rejectCandidate(versionId, feedback = '') {
+            if (!appState.currentTaskId) return;
+            try {
+                const response = await fetch(`${API_BASE}/tasks/${appState.currentTaskId}/review`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ decision: 'reject', version_id: versionId, feedback })
+                });
+                if (response.ok) {
+                    addLog('版本拒绝', `版本 ${versionId} 已拒绝`, 'error');
+                    renderCandidates();
+                }
+            } catch (e) { console.error('Failed to reject:', e); }
+        }
+
+        function simulateTaskCreation(description) {
+            const taskId = 'task_' + Date.now();
+            const task = { id: taskId, description, status: 'running', created_at: new Date().toISOString() };
+            appState.tasks.push(task);
+            appState.currentTaskId = taskId;
+            renderTaskList();
+            updateTaskCount();
+            dom.taskInput.value = '';
+            addLog('任务创建', `新任务: ${description}`, 'success');
+            dom.demoModeBanner.style.display = 'block';
+            simulateWorkflow();
+        }
+
+        function simulateWorkflow() {
+            const steps = [
+                { id: 'requirement', name: '① 需求提出',   delay: 500 },
+                { id: 'sdd',         name: '② SDD 文档生成', delay: 1500 },
+                { id: 'coding',      name: '③ 代码生成',    delay: 2500 },
+                { id: 'deploy',      name: '④ 部署',       delay: 1500 },
+                { id: 'testing',     name: '⑤ 测试',       delay: 2000 },
+            ];
+            let currentDelay = 0;
+            steps.forEach((step, idx) => {
+                setTimeout(() => {
+                    appState.nodeStatus[step.id] = NODE_STATUS.RUNNING;
+                    renderFlowchart();
+                    addLog('步骤启动', `${step.name} 开始执行`, 'info');
+                    setTimeout(() => {
+                        appState.nodeStatus[step.id] = NODE_STATUS.SUCCESS;
+                        renderFlowchart();
+                        addLog('步骤完成', `${step.name} 完成`, 'success');
+                        // 测试完成后 → 通过决策 → 完成
+                        if (step.id === 'testing') {
+                            setTimeout(() => {
+                                appState.nodeStatus['test_decision'] = NODE_STATUS.SUCCESS;
+                                appState.nodeStatus['done'] = NODE_STATUS.SUCCESS;
+                                renderFlowchart();
+                                addLog('流程完成', '所有步骤通过，任务完成', 'success');
+                            }, 800);
+                        }
+                    }, 1500);
+                }, currentDelay + step.delay);
+                currentDelay += step.delay + 1500;
+            });
+        }
+
+        // ============================================================
+        // Render functions
+        // ============================================================
+        function renderTaskList() {
+            dom.taskList.innerHTML = '';
+            if (appState.tasks.length === 0) {
+                dom.taskList.innerHTML = '<div class="no-data">暂无任务</div>';
+                return;
+            }
+            appState.tasks.forEach(task => {
+                const el = document.createElement('div');
+                el.className = `task-item ${task.id === appState.currentTaskId ? 'active' : ''}`;
+                el.innerHTML = `<div class="task-item-title">${task.description}</div><div class="task-item-status">状态: ${task.status}</div>`;
+                el.addEventListener('click', () => {
+                    appState.currentTaskId = task.id;
+                    renderTaskList();
+                    renderReviewPanel();
+                });
+                dom.taskList.appendChild(el);
+            });
+        }
+
+        function renderCandidates() {
+            dom.candidatesList.innerHTML = '';
+            if (appState.candidates.length === 0) {
+                dom.candidatesList.innerHTML = '<div class="no-data">暂无候选版本</div>';
+                return;
+            }
+            appState.candidates.forEach(c => {
+                const el = document.createElement('div');
+                el.className = 'candidate-version fade-in';
+                el.innerHTML = `
+                    <div class="version-header">
+                        <div class="version-name">${c.version_id}</div>
+                        <div class="confidence-badge">${(c.confidence_score * 100).toFixed(0)}%</div>
+                    </div>
+                    <div class="version-details">变更行数: ${c.lines_changed}<br>通过测试: ${c.tests_passed}</div>
+                    <div class="version-actions">
+                        <button class="btn-approve" onclick="approveCandidate('${c.version_id}')">批准</button>
+                        <button class="btn-reject" onclick="rejectCandidate('${c.version_id}')">拒绝</button>
+                    </div>
+                `;
+                dom.candidatesList.appendChild(el);
+            });
+        }
+
+        function renderReviewPanel() { renderCandidates(); }
+
+        function renderDiscussion() {
+            dom.discussionContent.innerHTML = '';
+            if (!appState.discussion) {
+                dom.discussionContent.innerHTML = '<div class="no-data">暂无讨论</div>';
+                return;
+            }
+            if (appState.discussion.issues && appState.discussion.issues.length > 0) {
+                const title = document.createElement('div');
+                title.className = 'sidebar-title';
+                title.style.padding = '0.5rem 0';
+                title.textContent = '问题列表';
+                dom.discussionContent.appendChild(title);
+                appState.discussion.issues.forEach(issue => {
+                    const el = document.createElement('div');
+                    el.className = 'discussion-item fade-in';
+                    el.innerHTML = `<div class="issue-title">${issue.title}</div><div>${issue.description}</div>`;
+                    dom.discussionContent.appendChild(el);
+                });
+            }
+            if (appState.discussion.proposals && appState.discussion.proposals.length > 0) {
+                const title = document.createElement('div');
+                title.className = 'sidebar-title';
+                title.style.padding = '1rem 0 0.5rem 0';
+                title.textContent = '解决方案';
+                dom.discussionContent.appendChild(title);
+                appState.discussion.proposals.forEach(p => {
+                    const el = document.createElement('div');
+                    el.className = 'proposal-item fade-in';
+                    el.innerHTML = `<div style="font-weight:600;color:#0099cc;">${p.title}</div><div class="proposal-text">${p.description}</div>`;
+                    dom.discussionContent.appendChild(el);
+                });
+            }
+        }
+
+        function updateTaskCount() { dom.taskCount.textContent = appState.tasks.length; }
+
+        function updateConnectionStatus() {
+            const ind = dom.connectionStatus;
+            const txt = dom.connectionText;
+            if (appState.isConnected && !appState.isDemoMode) {
+                ind.className = 'status-indicator';
+                txt.textContent = '已连接';
+            } else if (appState.isDemoMode) {
+                ind.className = 'status-indicator disconnected';
+                txt.textContent = '演示模式';
+            } else {
+                ind.className = 'status-indicator disconnected';
+                txt.textContent = '未连接';
+            }
+        }
+
+        function addLog(type, message, severity = 'info') {
+            appState.logs.unshift({ timestamp: new Date().toLocaleTimeString(), type, message, severity });
+            if (appState.logs.length > appState.maxLogs) appState.logs.pop();
+            renderLogs();
+        }
+
+        function renderLogs() {
+            dom.logsList.innerHTML = '';
+            if (appState.logs.length === 0) {
+                dom.logsList.innerHTML = '<div class="no-data">暂无日志</div>';
+                return;
+            }
+            appState.logs.forEach(log => {
+                const el = document.createElement('div');
+                el.className = `log-entry ${log.severity}`;
+                el.innerHTML = `<span class="log-timestamp">${log.timestamp}</span><span class="log-type">${log.type}</span><span>${log.message}</span>`;
+                dom.logsList.appendChild(el);
+            });
+        }
+
+        function switchTab(tabName) {
+            dom.panelTabs.forEach(tab => {
+                tab.classList.toggle('active', tab.dataset.tab === tabName);
+            });
+            dom.panelContents.forEach(c => {
+                c.classList.toggle('active', c.id === `${tabName}-panel`);
+            });
+        }
+
+        // ============================================================
+        // Event bindings
+        // ============================================================
+        dom.createTaskBtn.addEventListener('click', () => createTask(dom.taskInput.value));
+        dom.taskInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') createTask(dom.taskInput.value); });
+        dom.panelTabs.forEach(tab => { tab.addEventListener('click', () => switchTab(tab.dataset.tab)); });
+
+        // ============================================================
+        // Init
+        // ============================================================
+        function init() {
+            renderFlowchart();
+            renderTaskList();
+            renderLogs();
+            renderCandidates();
+            renderDiscussion();
+            connectWebSocket();
+            getTasks();
+            dom.footerStatus.textContent = '待机';
+            addLog('系统启动', 'Kedo 仪表板已启动', 'success');
+        }
+
+        init();
+
+        window.approveCandidate = approveCandidate;
+        window.rejectCandidate = rejectCandidate;
+    </script>
+</body>
+</html>

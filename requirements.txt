@@ -1,0 +1,28 @@
+# kedo — AI 开发助手依赖
+#
+# 安装: pip install -r requirements.txt
+# 安装为命令行工具: pip install -e .
+
+# Web Framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+websockets>=12.0
+
+# Data Validation
+pydantic>=2.5.0
+
+# LLM Clients
+anthropic>=0.39.0
+httpx>=0.25.0
+# openai>=1.6.0       # 可选: OpenAI 支持
+
+# Configuration
+pyyaml>=6.0
+
+# System Monitoring
+psutil>=5.9.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0

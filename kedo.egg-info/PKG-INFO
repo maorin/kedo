@@ -1,9 +1,26 @@
+Metadata-Version: 2.4
+Name: kedo
+Version: 0.1.0
+Summary: kedo — AI 开发助手：从需求到部署的全流程自动化
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi>=0.104.0
+Requires-Dist: uvicorn[standard]>=0.24.0
+Requires-Dist: pydantic>=2.0
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: websockets>=12.0
+Requires-Dist: httpx>=0.25.0
+Requires-Dist: anthropic>=0.39.0
+Provides-Extra: openai
+Requires-Dist: openai>=1.0; extra == "openai"
+Provides-Extra: all
+Requires-Dist: openai>=1.0; extra == "all"
+Requires-Dist: anthropic>=0.39.0; extra == "all"
+
 # kedo — AI 开发助手
 
-从需求到部署的全流程自动化开发工具。输入自然语言需求，kedo 自动完成需求分析、任务拆解、代码生成、测试、评估、人工审查，直到部署上线。只是针对软件开发的自动化工具，非通用 AI 助手。
-
-代码参考：
-可以参考 calude代码 位置 /Users/maojj/project/claude-code-source 不能修改 /Users/maojj/project/claude-code-source 只能参考 /Users/maojj/project/claude-code-source 代码结构和实现细节，来设计 kedo 的架构和功能。 
+从需求到部署的全流程自动化开发工具。输入自然语言需求，kedo 自动完成需求分析、任务拆解、代码生成、测试、评估、人工审查，直到部署上线。
 
 ## 核心特性
 

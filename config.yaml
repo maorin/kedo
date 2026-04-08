@@ -1,0 +1,46 @@
+# ============================================================
+# kedo — 配置文件
+# ============================================================
+
+# LLM 配置
+# 可选: anthropic | openai | kimi-code | kimi | ollama | mock
+#   kimi-code: Kimi Code 2.5 编程专用端点 (推荐编程任务)
+#   kimi:      Kimi K2.5 通用端点 (Moonshot API)
+#   mock:      模拟模式，不需要 API Key，用于测试和演示
+llm_provider: "kimi-code"
+# model 留空则自动使用 provider 的默认模型（kimi-code → kimi-k2.5）
+# model: "kimi-k2.5"
+
+# API Keys (优先读取环境变量，其次使用这里的值)
+# 环境变量: ANTHROPIC_API_KEY, OPENAI_API_KEY, KIMI_API_KEY
+anthropic_api_key: ""           # 从 https://console.anthropic.com 获取
+openai_api_key: ""
+kimi_api_key: "sk-kimi-mX9jJ0uNc5kNQs89c6j6uog5IxDs5t3OaX0QenTzWwMbFZu00lvGOT6pHkGhKJpG"
+ollama_url: "http://localhost:11434"
+
+
+# 项目配置
+project_path: "."               # 目标项目路径
+storage_dir: ".kedo/state"          # 状态存储目录
+
+# Agent 配置
+max_retries: 3                  # 子任务最大重试次数
+auto_fix: true                  # 是否启用自动修复
+review_gate: true               # 是否启用人工审查门
+min_eval_score: 70              # 最低评估通过分数 (0-100)
+
+# 文档配置
+doc_language: "zh"              # SDD 文档语言: zh (中文) | en (English) | ja (日本語) 等
+
+# 模式配置
+strict_mode: false              # 严格模式: 缺少 API Key 时报错而非回退到 Mock
+
+# 安全配置
+sandbox_mode: true              # Shell 沙箱模式
+max_context_chars: 120000       # LLM 最大上下文字符数
+# 权限模式: interactive (每次确认) | auto (仅危险操作确认) | sandbox (禁止写操作)
+permission_mode: "auto"
+
+# 服务配置
+host: "0.0.0.0"
+port: 8000
