@@ -1631,7 +1631,23 @@
                 td.textContent = '暂无代码生成记录';
                 tr.appendChild(td);
                 tbody.appendChild(tr);
-                renderCodeFileList([]);
+                // ★ 没有 checkpoint 记录时，回退到磁盘扫描的项目文件
+                if (data.project_files && data.project_files.length > 0) {
+                    const diskFiles = data.project_files.map(f => ({
+                        path: f.abs_path,
+                        rel_path: f.path,
+                        name: f.name,
+                        action: 'disk',
+                        lines: f.lines || 0,
+                        size: f.size || 0,
+                        task_id: '',
+                    }));
+                    renderCodeFileList(diskFiles);
+                    document.getElementById('codeTotal').textContent = diskFiles.length;
+                    document.getElementById('codeSuccess').textContent = diskFiles.length;
+                } else {
+                    renderCodeFileList([]);
+                }
                 return;
             }
 
