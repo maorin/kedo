@@ -770,48 +770,139 @@ async def get_code_file(task_id: str = "", file_path: str = ""):
 @router.get("/build/status")
 async def get_build_status():
     """获取打包监控状态汇总"""
+    from api.schemas import StepType
+
     tasks = _state_manager.list_tasks()
     records = []
     total = success = failed = running = 0
+
     for t in tasks:
-        status = _state_manager.get_task_status(t.get("task_id", t.get("id", "")))
+        task_id = t.get("task_id", t.get("id", ""))
+        status = _state_manager.get_task_status(task_id)
         if not status:
             continue
-        logs = getattr(status, "logs", []) or []
+
+        # 从 checkpoint plan 中找 BUILD 步骤
         has_build = False
-        for log in logs:
-            log_text = log if isinstance(log, str) else str(log)
-            if "build" in log_text.lower() or "pack" in log_text.lower() or "打包" in log_text:
-                has_build = True
-                break
-        if has_build or getattr(status, "current_step", "") in ("build", "打包"):
-            total += 1
-            task_status_val = getattr(status, "status", None)
-            if task_status_val:
-                s = task_status_val.value if hasattr(task_status_val, "value") else str(task_status_val)
-            else:
-                s = "pending"
-            if s in ("completed", "success"):
-                success += 1
-                badge = "success"
-            elif s in ("failed", "error"):
-                failed += 1
-                badge = "failed"
-            elif s in ("in_progress", "running"):
-                running += 1
-                badge = "running"
-            else:
-                badge = "pending"
-            records.append({
-                "id": t.get("task_id", t.get("id", "")),
-                "task": t.get("description", t.get("task_id", "")),
-                "artifact": "-",
-                "size": "-",
-                "status": badge,
-                "start_time": t.get("created_at", "-"),
-                "duration": "-",
-            })
-    return {"total": total, "success": success, "failed": failed, "running": running, "records": records}
+        if status.plan and status.plan.subtasks:
+            has_build = any(s.step_type == StepType.BUILD for s in status.plan.subtasks)
+
+        # 也检查日志
+        if not has_build:
+            logs = getattr(status, "logs", []) or []
+            for log in logs:
+                log_text = log if isinstance(log, str) else str(log)
+                if "build" in log_text.lower() or "pack" in log_text.lower() or "打包" in log_text:
+                    has_build = True
+                    break
+
+        if not has_build:
+            continue
+
+        total += 1
+        task_status_val = getattr(status, "status", None)
+        s = task_status_val.value if task_status_val and hasattr(task_status_val, "value") else str(task_status_val or "pending")
+        if s in ("completed", "success"):
+            success += 1
+            badge = "success"
+        elif s in ("failed", "error"):
+            failed += 1
+            badge = "failed"
+        elif s in ("in_progress", "running"):
+            running += 1
+            badge = "running"
+        else:
+            badge = "pending"
+
+        records.append({
+            "id": task_id,
+            "task": t.get("description", task_id),
+            "artifact": "-",
+            "size": "-",
+            "status": badge,
+            "start_time": t.get("created_at", "-"),
+            "duration": "-",
+        })
+
+    # ★ 扫描磁盘上的构建产物
+    artifacts = _scan_build_artifacts()
+
+    # ★ 收集候选版本
+    candidates = []
+    if _agent_loop:
+        for t in tasks:
+            task_id = t.get("task_id", t.get("id", ""))
+            task_candidates = _agent_loop.versions.get_candidates(task_id)
+            for c in task_candidates:
+                candidates.append({
+                    "version_id": c.version_id,
+                    "version_number": c.version_number,
+                    "task_id": task_id,
+                    "ai_confidence": c.ai_confidence,
+                    "ai_summary": c.ai_summary,
+                    "status": c.status.value,
+                    "build_success": c.build_success,
+                    "created_at": c.created_at.isoformat() if hasattr(c, "created_at") and c.created_at else "-",
+                })
+
+    return {
+        "total": total, "success": success, "failed": failed, "running": running,
+        "records": records,
+        "artifacts": artifacts,
+        "candidates": candidates,
+    }
+
+
+def _scan_build_artifacts() -> list[dict]:
+    """扫描项目目录中的构建产物"""
+    project = Path(_project_path)
+    if not project.is_dir():
+        return []
+
+    # 常见构建产物扩展名
+    artifact_patterns = [
+        "*.nro", "*.nso", "*.elf", "*.bin", "*.hex",  # Switch / embedded
+        "*.exe", "*.dll", "*.so", "*.dylib", "*.a",    # native
+        "*.jar", "*.war",                               # Java
+        "*.whl", "*.egg",                               # Python
+        "*.zip", "*.tar.gz", "*.tgz",                   # archives
+        "*.deb", "*.rpm", "*.apk",                      # packages
+        "*.wasm",                                       # WebAssembly
+    ]
+    skip_dirs = {".kedo", ".git", ".venv", "node_modules", "__pycache__"}
+
+    artifacts = []
+    for pattern in artifact_patterns:
+        for item in project.rglob(pattern):
+            parts = item.relative_to(project).parts
+            if any(p in skip_dirs for p in parts):
+                continue
+            try:
+                stat = item.stat()
+                size_bytes = stat.st_size
+                # 格式化大小
+                if size_bytes < 1024:
+                    size_str = f"{size_bytes} B"
+                elif size_bytes < 1024 * 1024:
+                    size_str = f"{size_bytes / 1024:.1f} KB"
+                else:
+                    size_str = f"{size_bytes / (1024*1024):.1f} MB"
+
+                from datetime import datetime
+                mtime = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+                artifacts.append({
+                    "name": item.name,
+                    "path": str(item.relative_to(project)),
+                    "size": size_str,
+                    "size_bytes": size_bytes,
+                    "modified": mtime,
+                })
+            except (OSError, PermissionError):
+                continue
+
+    artifacts.sort(key=lambda a: a.get("modified", ""), reverse=True)
+    return artifacts
 
 @router.get("/deploy/status")
 async def get_deploy_status():

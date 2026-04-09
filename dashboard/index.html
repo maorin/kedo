@@ -1210,6 +1210,42 @@
                         </tbody>
                     </table>
                 </div>
+                <!-- 构建产物 -->
+                <div class="monitor-table-wrap">
+                    <div class="monitor-table-title">构建产物</div>
+                    <table class="monitor-table">
+                        <thead>
+                            <tr>
+                                <th>文件名</th>
+                                <th>路径</th>
+                                <th>大小</th>
+                                <th>修改时间</th>
+                            </tr>
+                        </thead>
+                        <tbody id="buildArtifactBody">
+                            <tr><td colspan="4" style="text-align:center;color:#888;padding:2rem;">暂无构建产物</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <!-- 候选版本 -->
+                <div class="monitor-table-wrap">
+                    <div class="monitor-table-title">候选版本</div>
+                    <table class="monitor-table">
+                        <thead>
+                            <tr>
+                                <th>版本</th>
+                                <th>任务</th>
+                                <th>信心分</th>
+                                <th>构建</th>
+                                <th>状态</th>
+                                <th>摘要</th>
+                            </tr>
+                        </thead>
+                        <tbody id="buildCandidateBody">
+                            <tr><td colspan="6" style="text-align:center;color:#888;padding:2rem;">暂无候选版本</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
 
             <!-- ====== 部署监控视图 ====== -->
@@ -1962,42 +1998,113 @@
             document.getElementById('buildFailed').textContent = data.failed || 0;
             document.getElementById('buildRunning').textContent = data.running || 0;
 
-            const tbody = document.getElementById('buildTableBody');
+            // 打包记录
+            var tbody = document.getElementById('buildTableBody');
             tbody.textContent = '';
             if (!data.records || data.records.length === 0) {
-                const tr = document.createElement('tr');
-                const td = document.createElement('td');
+                var tr = document.createElement('tr');
+                var td = document.createElement('td');
                 td.colSpan = 6;
                 td.style.cssText = 'text-align:center;color:#888;padding:2rem;';
-                td.textContent = '暂无打包记录';
+                td.textContent = '\u6682\u65E0\u6253\u5305\u8BB0\u5F55';
                 tr.appendChild(td);
                 tbody.appendChild(tr);
-                return;
-            }
-            data.records.forEach(r => {
-                const tr = document.createElement('tr');
-                const cells = [
-                    { text: r.task || '-' },
-                    { text: r.artifact || '-' },
-                    { text: r.size || '-' },
-                    { badge: true, status: r.status },
-                    { text: r.start_time || '-' },
-                    { text: r.duration || '-' }
-                ];
-                cells.forEach(c => {
-                    const td = document.createElement('td');
-                    if (c.badge) {
-                        const badge = document.createElement('span');
-                        badge.className = 'status-badge ' + (c.status || 'pending');
-                        badge.textContent = statusLabel(c.status);
-                        td.appendChild(badge);
-                    } else {
-                        td.textContent = c.text;
-                    }
-                    tr.appendChild(td);
+            } else {
+                data.records.forEach(function(r) {
+                    var tr = document.createElement('tr');
+                    [r.task || '-', r.artifact || '-', r.size || '-'].forEach(function(text) {
+                        var td = document.createElement('td'); td.textContent = text; tr.appendChild(td);
+                    });
+                    var tdBadge = document.createElement('td');
+                    var badge = document.createElement('span');
+                    badge.className = 'status-badge ' + (r.status || 'pending');
+                    badge.textContent = statusLabel(r.status);
+                    tdBadge.appendChild(badge);
+                    tr.appendChild(tdBadge);
+                    [r.start_time || '-', r.duration || '-'].forEach(function(text) {
+                        var td = document.createElement('td'); td.textContent = text; tr.appendChild(td);
+                    });
+                    tbody.appendChild(tr);
                 });
-                tbody.appendChild(tr);
-            });
+            }
+
+            // ★ 构建产物
+            var artBody = document.getElementById('buildArtifactBody');
+            artBody.textContent = '';
+            var artifacts = data.artifacts || [];
+            if (artifacts.length === 0) {
+                var tr = document.createElement('tr');
+                var td = document.createElement('td');
+                td.colSpan = 4;
+                td.style.cssText = 'text-align:center;color:#888;padding:1.5rem;';
+                td.textContent = '\u6682\u65E0\u6784\u5EFA\u4EA7\u7269';
+                tr.appendChild(td);
+                artBody.appendChild(tr);
+            } else {
+                artifacts.forEach(function(a) {
+                    var tr = document.createElement('tr');
+                    var tdName = document.createElement('td');
+                    tdName.style.cssText = 'font-weight:600;color:#22c55e;';
+                    tdName.textContent = a.name;
+                    tr.appendChild(tdName);
+                    [a.path, a.size, a.modified].forEach(function(text) {
+                        var td = document.createElement('td'); td.textContent = text || '-'; tr.appendChild(td);
+                    });
+                    artBody.appendChild(tr);
+                });
+            }
+
+            // ★ 候选版本
+            var canBody = document.getElementById('buildCandidateBody');
+            canBody.textContent = '';
+            var candidates = data.candidates || [];
+            if (candidates.length === 0) {
+                var tr = document.createElement('tr');
+                var td = document.createElement('td');
+                td.colSpan = 6;
+                td.style.cssText = 'text-align:center;color:#888;padding:1.5rem;';
+                td.textContent = '\u6682\u65E0\u5019\u9009\u7248\u672C';
+                tr.appendChild(td);
+                canBody.appendChild(tr);
+            } else {
+                candidates.forEach(function(c) {
+                    var tr = document.createElement('tr');
+                    // 版本号
+                    var tdVer = document.createElement('td');
+                    tdVer.style.cssText = 'font-weight:600;color:#58a6ff;';
+                    tdVer.textContent = 'v' + (c.version_number || '?') + ' [' + (c.version_id || '').substring(0, 8) + ']';
+                    tr.appendChild(tdVer);
+                    // 任务
+                    var tdTask = document.createElement('td');
+                    tdTask.textContent = (c.task_id || '').substring(0, 8);
+                    tr.appendChild(tdTask);
+                    // 信心分
+                    var tdConf = document.createElement('td');
+                    var conf = c.ai_confidence || 0;
+                    tdConf.style.color = conf >= 70 ? '#22c55e' : conf >= 50 ? '#f59e0b' : '#ef4444';
+                    tdConf.style.fontWeight = '600';
+                    tdConf.textContent = conf;
+                    tr.appendChild(tdConf);
+                    // 构建
+                    var tdBuild = document.createElement('td');
+                    tdBuild.textContent = c.build_success ? '\u2705' : '\u274C';
+                    tr.appendChild(tdBuild);
+                    // 状态
+                    var tdStatus = document.createElement('td');
+                    var sBadge = document.createElement('span');
+                    sBadge.className = 'status-badge ' + (c.status === 'ai_recommended' ? 'success' : 'pending');
+                    sBadge.textContent = c.status || '-';
+                    tdStatus.appendChild(sBadge);
+                    tr.appendChild(tdStatus);
+                    // 摘要
+                    var tdSummary = document.createElement('td');
+                    tdSummary.style.cssText = 'font-size:0.78rem;color:#888;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+                    tdSummary.textContent = c.ai_summary || '-';
+                    tdSummary.title = c.ai_summary || '';
+                    tr.appendChild(tdSummary);
+                    canBody.appendChild(tr);
+                });
+            }
         }
 
         // ============================================================
