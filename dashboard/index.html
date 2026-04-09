@@ -3509,8 +3509,15 @@
                 if (r.ok) {
                     const data = await r.json();
                     appState.currentTaskId = taskId;
+                    // 立即更新本地任务状态
+                    var task = appState.tasks.find(function(t) { return t.id === taskId; });
+                    if (task) {
+                        task.status = 'in_progress';
+                        renderTaskList();
+                    }
                     addLog('智能续接', '已恢复任务 [' + taskId + '] 从步骤 ' + (data.resumed_from_step || 0) + ' 继续', 'success');
-                    getTasks();
+                    // 延迟刷新确保后端状态已更新
+                    setTimeout(function() { getTasks(); }, 2000);
                 } else {
                     const err = await r.json().catch(function() { return {}; });
                     addLog('续接失败', (err.detail || '未知错误'), 'error');
