@@ -1155,27 +1155,59 @@ class AgentLoop:
         return f"{name}.py"
 
     def _infer_build_command(self, project_path: str, description: str) -> str:
-        """根据项目类型智能推断构建命令"""
+        """根据项目类型智能推断构建命令（按优先级排列）"""
         p = Path(project_path)
 
-        # Python 项目 — 语法检查
-        if list(p.glob("*.py")) or (p / "setup.py").exists() or (p / "pyproject.toml").exists():
-            py_files = " ".join(str(f) for f in p.glob("*.py"))
-            if py_files:
-                return f"python -m py_compile {list(p.glob('*.py'))[0]}"
-            return "python -c \"print('Build: OK (Python project)')\""
+        # devkitPro Switch 项目（检测 devkitPro 环境）
+        devkitpro = Path(os.environ.get("DEVKITPRO", "/opt/devkitpro"))
+        if (p / "CMakeLists.txt").exists() and devkitpro.exists():
+            # 检查 CMakeLists 或项目是否是 Switch 项目
+            cmake_content = ""
+            try:
+                cmake_content = (p / "CMakeLists.txt").read_text(encoding="utf-8", errors="replace").lower()
+            except Exception:
+                pass
+            is_switch = "switch" in cmake_content or "nx" in cmake_content or (p / "source").is_dir() or any(p.rglob("*.nro"))
+            # 也检查项目描述
+            desc_lower = description.lower()
+            if is_switch or "switch" in desc_lower or "nro" in desc_lower:
+                toolchain = devkitpro / "cmake" / "Switch.cmake"
+                if toolchain.exists():
+                    return (
+                        f"mkdir -p build && cd build && "
+                        f"cmake -DCMAKE_TOOLCHAIN_FILE={toolchain} .. && "
+                        f"make -j$(nproc)"
+                    )
 
-        # Node.js
-        if (p / "package.json").exists():
-            return "npm run build"
+        # CMake 项目（通用）
+        if (p / "CMakeLists.txt").exists():
+            return "mkdir -p build && cd build && cmake .. && make -j$(nproc)"
+
+        # Makefile 项目
+        if (p / "Makefile").exists():
+            return "make -j$(nproc)"
+
+        # Rust
+        if (p / "Cargo.toml").exists():
+            return "cargo build"
 
         # Go
         if (p / "go.mod").exists():
             return "go build ./..."
 
-        # Rust
-        if (p / "Cargo.toml").exists():
-            return "cargo build"
+        # Node.js
+        if (p / "package.json").exists():
+            return "npm run build"
+
+        # Python 项目 — 只在有 setup.py/pyproject.toml 时检测（避免误匹配散落的 .py）
+        if (p / "setup.py").exists() or (p / "pyproject.toml").exists():
+            return "python -m build 2>/dev/null || python setup.py build"
+
+        # Docker
+        if (p / "docker-compose.yml").exists():
+            return "docker-compose build"
+        if (p / "Dockerfile").exists():
+            return "docker build -t $(basename $(pwd)) ."
 
         # 默认 — 没有构建系统，返回失败命令
         return "echo 'ERROR: No build system detected (Makefile, CMakeLists.txt, package.json, etc.)' && exit 1"
