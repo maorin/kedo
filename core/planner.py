@@ -67,32 +67,23 @@ step_type guidelines:
 
 === 计划生成步骤 ===
 
-你生成的 subtask 列表**必须**按以下顺序包含：
+根据项目现状决定生成哪些步骤：
 
-**步骤 ① 需求文档（docs/requirement/）**
-  - subtask_0: 创建 docs/requirement/requirement.md（需求概述）
-  - subtask_1: 创建 docs/requirement/user-stories.md（用户故事）
+**如果项目为空（无源码、无文档）→ 执行完整五步流程：**
+  ① docs/requirement/requirement.md + user-stories.md
+  ② docs/sdd/architecture.md + api-design.md + database-design.md + module-design.md
+  ③ 所有代码文件
+  ④ docs/deploy/deployment.md
+  ⑤ docs/test/ 文档 + build + test + evaluate
 
-**步骤 ② SDD 设计文档（docs/sdd/）**
-  - subtask_2: 创建 docs/sdd/architecture.md（系统架构设计）
-  - subtask_3: 创建 docs/sdd/api-design.md（API 设计）
-  - subtask_4: 创建 docs/sdd/database-design.md（数据库设计）
-  - subtask_5: 创建 docs/sdd/module-design.md（模块设计）
+**如果项目已有代码和文档 → 只做缺失/需要修复的部分：**
+  - 已有的文档：跳过，不重新生成
+  - 已有的代码文件：跳过，除非需要修改
+  - 缺少的构建脚本：生成 Makefile/CMakeLists.txt
+  - 缺少的功能：只生成该功能的代码
+  - 无论什么情况，末尾都必须有 build + test + evaluate
 
-**步骤 ③ 代码生成**
-  - subtask_6+: 根据设计文档生成所有代码文件（数量由需求决定）
-  - 包含：项目入口、数据模型、路由、业务逻辑、配置文件、Dockerfile、docker-compose.yml、README.md 等
-
-**步骤 ④ 部署文档（docs/deploy/）**
-  - subtask_N: 创建 docs/deploy/deployment.md（部署方案）
-
-**步骤 ⑤ 测试文档 + 验证（docs/test/）**
-  - subtask_N+1: 创建 docs/test/test-plan.md（测试计划）
-  - subtask_N+2: 创建 docs/test/test-cases.md（测试用例）
-  - subtask_N+3: 创建 docs/test/automation.md（自动化测试方案）
-  - subtask_N+4: build（构建项目）
-  - subtask_N+5: test（运行测试）
-  - subtask_N+6: evaluate（质量评估）
+**绝对禁止在已有项目上重新生成需求文档和设计文档。**
 
 === 标准项目目录结构（必须遵守） ===
 
@@ -117,16 +108,15 @@ step_type guidelines:
 
 === 重要规则 ===
 
-1. **文档先行**：步骤①②的文档必须在步骤③代码生成之前完成
-2. **固化结构**：每个文档必须严格按照上面定义的大纲结构生成，不可省略或修改章节
-3. **内容详实**：文档内容必须根据用户的提示词需求充分展开，不能只写标题
-4. **Mermaid 图表**：架构图、ER 图、时序图、状态图必须使用 mermaid 语法
-5. **代码依赖设计**：步骤③的代码生成必须引用步骤②的设计文档内容
-6. **部署文档**：必须包含 Docker 配置、环境变量、部署流程
-7. **测试完整**：测试文档必须覆盖所有 API 接口的正常和异常用例
-8. **文件路径明确**：每个 code_generate subtask 的 description 中必须指定完整文件路径
-9. 对于每个文档 subtask，description 中必须包含该文档的完整大纲结构（从上面的固化模板复制）
-10. **目录规范**：源代码路径必须用 `src/`，构建产物必须输出到 `build/`
+1. **项目现状优先**：如果项目上下文显示已有文件，禁止重新生成这些文件
+2. **最小化原则**：只生成用户需求中缺失的部分，不做多余的工作
+3. **文档先行**：新项目时，步骤①②必须在步骤③之前；已有项目不需要重新生成文档
+4. **固化结构**：新建文档时必须按照上面定义的大纲结构生成
+5. **内容详实**：文档内容必须根据用户的提示词需求充分展开，不能只写标题
+6. **Mermaid 图表**：架构图、ER 图、时序图、状态图必须使用 mermaid 语法
+7. **文件路径明确**：每个 code_generate subtask 的 description 中必须指定完整文件路径
+8. **目录规范**：源代码路径必须用 `src/`，构建产物必须输出到 `build/`
+9. **末尾必有**：无论什么情况，计划末尾必须包含 build + test + evaluate 三个步骤
 
 Output a JSON array of subtasks.
 
