@@ -1185,6 +1185,28 @@ def _parse_deploy_guide(deploy_doc: str, req_doc: str, project_files: list, proj
     }
 
 
+@router.get("/deploy/auto-env")
+async def get_auto_detected_env():
+    """获取自动检测到的环境变量"""
+    env_path = Path(_project_path) / ".kedo" / "env_auto_detected.json"
+    if env_path.exists():
+        try:
+            return json.loads(env_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+@router.post("/server/restart")
+async def restart_server():
+    """重启 kedo server（通过退出进程，依赖外部 supervisor 重启）"""
+    import signal
+    # 发送信号给自身进程，让 uvicorn 优雅退出
+    # 外部的 nohup 或 systemd 会自动重启
+    os.kill(os.getpid(), signal.SIGTERM)
+    return {"status": "restarting"}
+
+
 @router.get("/deploy/environment")
 async def get_deploy_environment():
     """检测部署环境依赖状态，标记哪些需要人工准备"""

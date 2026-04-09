@@ -88,6 +88,32 @@ class AgentLoop:
         self.max_iterations = self.config.get("max_iterations", 5)
         self.auto_discussion = self.config.get("auto_discussion", True)  # AI自动选方案 vs 等人工
 
+        # ★ 启动时加载之前自动检测到的环境变量
+        self._load_auto_detected_env()
+
+    def _load_auto_detected_env(self):
+        """启动时从 .kedo/env_auto_detected.json 加载之前发现的环境变量"""
+        import json as _json
+        project_path = self.config.get("project_path", ".")
+        env_path = Path(project_path) / ".kedo" / "env_auto_detected.json"
+        if env_path.exists():
+            try:
+                detected = _json.loads(env_path.read_text())
+                for key, value in detected.items():
+                    if not os.environ.get(key):
+                        os.environ[key] = value
+                        logger.info(f"Restored auto-detected env: {key}={value}")
+                        # devkitPro 衍生变量
+                        if key == "DEVKITPRO":
+                            devkita64 = Path(value) / "devkitA64"
+                            if devkita64.exists() and not os.environ.get("DEVKITA64"):
+                                os.environ["DEVKITA64"] = str(devkita64)
+                            for bin_dir in [Path(value) / "tools" / "bin", devkita64 / "bin"]:
+                                if bin_dir.exists() and str(bin_dir) not in os.environ.get("PATH", ""):
+                                    os.environ["PATH"] = str(bin_dir) + ":" + os.environ.get("PATH", "")
+            except Exception as e:
+                logger.warning(f"Failed to load auto-detected env: {e}")
+
     # ==========================================================
     # 主入口
     # ==========================================================
@@ -1033,13 +1059,29 @@ class AgentLoop:
             )
 
         elif step_type == StepType.BUILD:
-            # 智能推断构建命令（不直接用 description 当命令）
+            # 智能推断构建命令
             build_cmd = self._infer_build_command(project_path, subtask.description)
-            return await self.tools.execute(
+            result = await self.tools.execute(
                 "shell_execute",
                 command=build_cmd,
                 working_dir=project_path,
             )
+
+            # ★ build 失败时自动诊断并修复环境
+            if not result.success:
+                stderr = result.error or result.data.get("stderr", "") if result.data else ""
+                env_fixed = self._auto_fix_build_env(stderr, project_path)
+                if env_fixed:
+                    logger.info(f"Auto-fixed build env: {env_fixed}, retrying build...")
+                    # 重新推断构建命令（环境变量可能影响路径）
+                    build_cmd = self._infer_build_command(project_path, subtask.description)
+                    result = await self.tools.execute(
+                        "shell_execute",
+                        command=build_cmd,
+                        working_dir=project_path,
+                    )
+
+            return result
 
         elif step_type == StepType.TEST:
             # 尝试运行测试，如果没有测试框架则跳过（视为成功）
@@ -1153,6 +1195,94 @@ class AgentLoop:
             name = f"step_{subtask.id or 'unknown'}"
 
         return f"{name}.py"
+
+    # 已知的环境变量 → 路径探测规则
+    _ENV_AUTO_DETECT = {
+        "DEVKITPRO": {
+            "search_paths": ["/opt/devkitpro", "/usr/local/devkitpro", Path.home() / "devkitpro"],
+            "verify_file": "cmake/Switch.cmake",
+            "triggers": ["switch.h", "libnx", "devkitpro", "devkitA64"],
+            "description": "Nintendo Switch 交叉编译工具链",
+        },
+        "ANDROID_HOME": {
+            "search_paths": ["/usr/local/android-sdk", Path.home() / "Android" / "Sdk", "/opt/android-sdk"],
+            "verify_file": "platform-tools/adb",
+            "triggers": ["android.h", "ndk-build", "gradle"],
+            "description": "Android SDK",
+        },
+        "JAVA_HOME": {
+            "search_paths": ["/usr/lib/jvm/java-17-openjdk-amd64", "/usr/lib/jvm/java-11-openjdk-amd64"],
+            "verify_file": "bin/javac",
+            "triggers": ["javac", "javax", "java.lang"],
+            "description": "Java Development Kit",
+        },
+    }
+
+    def _auto_fix_build_env(self, stderr: str, project_path: str) -> dict:
+        """
+        分析 build 错误，自动检测并设置缺失的环境变量。
+        返回 {env_var: path} 表示修复了哪些环境变量，空 dict 表示无法修复。
+        """
+        fixed = {}
+        stderr_lower = stderr.lower()
+
+        for env_var, config in self._ENV_AUTO_DETECT.items():
+            # 跳过已设置的环境变量
+            if os.environ.get(env_var):
+                continue
+
+            # 检查 stderr 是否包含触发关键词
+            triggered = any(trigger in stderr_lower for trigger in config["triggers"])
+            if not triggered:
+                continue
+
+            # 在已知路径中搜索
+            for search_path in config["search_paths"]:
+                search_path = Path(search_path)
+                if not search_path.exists():
+                    continue
+                verify = search_path / config["verify_file"]
+                if verify.exists():
+                    # 找到了！设置环境变量
+                    path_str = str(search_path)
+                    os.environ[env_var] = path_str
+                    fixed[env_var] = path_str
+                    logger.info(f"Auto-detected {env_var}={path_str} ({config['description']})")
+
+                    # 同时设置衍生环境变量
+                    if env_var == "DEVKITPRO":
+                        devkita64 = search_path / "devkitA64"
+                        if devkita64.exists():
+                            os.environ["DEVKITA64"] = str(devkita64)
+                            # 把工具链路径加入 PATH
+                            tools_bin = search_path / "tools" / "bin"
+                            a64_bin = devkita64 / "bin"
+                            path_dirs = [str(tools_bin), str(a64_bin)]
+                            current_path = os.environ.get("PATH", "")
+                            for d in path_dirs:
+                                if d not in current_path:
+                                    os.environ["PATH"] = d + ":" + current_path
+                                    current_path = os.environ["PATH"]
+                    break
+
+        if fixed:
+            # 保存到 .kedo/env_auto_detected.json 供下次启动参考
+            env_path = Path(project_path) / ".kedo" / "env_auto_detected.json"
+            try:
+                import json as _json
+                existing = {}
+                if env_path.exists():
+                    existing = _json.loads(env_path.read_text())
+                existing.update(fixed)
+                env_path.parent.mkdir(parents=True, exist_ok=True)
+                env_path.write_text(_json.dumps(existing, indent=2))
+            except Exception:
+                pass
+
+            # 发事件通知 Dashboard
+            logger.warning(f"Auto-fixed environment: {fixed}. Recommend restart for full effect.")
+
+        return fixed
 
     def _infer_build_command(self, project_path: str, description: str) -> str:
         """根据项目类型智能推断构建命令（按优先级排列）"""
