@@ -3602,8 +3602,10 @@
                         updateTaskCount();
                         getTasks();
                     }
-                    // 刷新右侧计划列表
-                    if (appState.currentTaskId) renderPlanSubtasks(appState.currentTaskId);
+                    // 只在事件属于当前选中任务时刷新右侧
+                    if (message.task_id && message.task_id === appState.currentTaskId) {
+                        renderPlanSubtasks(appState.currentTaskId);
+                    }
                     break;
                 }
                 case 'step_started':
@@ -3615,7 +3617,10 @@
                     appState.nodeStatus[data.step_id] = NODE_STATUS.SUCCESS;
                     renderFlowchart();
                     addLog('步骤完成', `${data.step_name} 完成成功`, 'success');
-                    if (appState.currentTaskId) renderPlanSubtasks(appState.currentTaskId);
+                    // 只刷新当前事件所属任务的计划（不影响用户切换查看其他任务）
+                    if (message.task_id && message.task_id === appState.currentTaskId) {
+                        renderPlanSubtasks(appState.currentTaskId);
+                    }
                     break;
                 case 'step_failed':
                     appState.nodeStatus[data.step_id] = NODE_STATUS.FAILED;
