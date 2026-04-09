@@ -94,6 +94,27 @@ step_type guidelines:
   - subtask_N+5: test（运行测试）
   - subtask_N+6: evaluate（质量评估）
 
+=== 标准项目目录结构（必须遵守） ===
+
+所有代码和构建产物必须使用以下标准目录结构：
+
+```
+项目根目录/
+├── src/              ← 所有源代码（不要用 source/、lib/、app/ 等）
+├── tests/            ← 测试代码
+├── build/            ← 构建产物输出目录（.nro、.exe、.bin 等）
+├── docs/             ← 文档（requirement/、sdd/、deploy/、test/）
+├── config/           ← 配置文件（可选，简单项目可放根目录）
+├── Makefile / CMakeLists.txt  ← 构建脚本（输出目录必须指向 build/）
+├── Dockerfile / docker-compose.yml  ← 容器化构建（可选）
+└── README.md
+```
+
+**强制规则：**
+- 源代码目录必须是 `src/`（不是 source/、lib/、app/）
+- 构建产物必须输出到 `build/` 目录（不要输出到项目根目录）
+- 构建脚本（Makefile/CMakeLists.txt）中必须配置 `BUILD_DIR=build` 或等价设置
+
 === 重要规则 ===
 
 1. **文档先行**：步骤①②的文档必须在步骤③代码生成之前完成
@@ -105,6 +126,7 @@ step_type guidelines:
 7. **测试完整**：测试文档必须覆盖所有 API 接口的正常和异常用例
 8. **文件路径明确**：每个 code_generate subtask 的 description 中必须指定完整文件路径
 9. 对于每个文档 subtask，description 中必须包含该文档的完整大纲结构（从上面的固化模板复制）
+10. **目录规范**：源代码路径必须用 `src/`，构建产物必须输出到 `build/`
 
 Output a JSON array of subtasks.
 
@@ -357,12 +379,28 @@ class Planner:
 - step_type: "code_generate" | "build" | "test" | "evaluate"
 - dependencies: 依赖的 subtask id 列表
 
+## 标准目录结构
+
+源代码必须在 `src/`，构建产物输出到 `build/`：
+```
+项目根目录/
+├── src/          ← 所有源代码
+├── tests/        ← 测试代码
+├── build/        ← 构建产物
+├── docs/         ← 文档
+├── Makefile / CMakeLists.txt
+└── README.md
+```
+
+如果续接上下文中标记了"目录结构不规范"，必须在计划最前面加入重构步骤。
+
 ## 计划结构
 
+0. **目录结构重构**（如果有不规范的目录）— step_type: "code_generate"
 1. **重新生成不完整的文档**（如果有）— step_type: "code_generate"
 2. **修改已有代码文件**（补充缺失功能的实现）— step_type: "code_generate"
-3. **新增代码文件**（如果需要全新模块）— step_type: "code_generate"
-4. **更新构建文件**（如果新增了文件需要加入编译）— step_type: "code_generate"
+3. **新增代码文件**（如果需要全新模块，放在 `src/`）— step_type: "code_generate"
+4. **更新构建文件**（输出目录指向 `build/`）— step_type: "code_generate"
 5. **build** — step_type: "build"
 6. **test** — step_type: "test"
 7. **evaluate** — step_type: "evaluate"
@@ -371,6 +409,8 @@ class Planner:
 
 - ❌ 不要重新生成内容完整的文档（只重新生成被标记为"不完整"的）
 - ❌ 不要重新生成内容完整的代码文件的全部内容，只修改需要补充的部分
+- ❌ 不要把源代码放在 `source/`、`lib/`、`app/` 等非标准目录
+- ❌ 不要把构建产物输出到项目根目录
 
 文档语言: {self._config.get("doc_language", "zh")}
 """

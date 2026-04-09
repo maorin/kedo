@@ -355,6 +355,9 @@ class AgentLoop:
             # 扫描不完整的文档（需要重新生成）
             incomplete_docs = self._scan_incomplete_docs(project_path)
 
+            # 检测目录结构是否规范
+            dir_issues = self._check_directory_structure(project_path)
+
             # 从 checkpoint 提取历史信息
             prev_eval = checkpoint.eval_report
             prev_plan = checkpoint.plan
@@ -373,6 +376,7 @@ class AgentLoop:
                 prev_eval=prev_eval,
                 prev_code_changes=prev_code_changes,
                 incomplete_docs=incomplete_docs,
+                dir_issues=dir_issues,
             )
 
             await self._emit(task_id, EventType.STEP_COMPLETED,
@@ -498,6 +502,7 @@ class AgentLoop:
         prev_eval: Optional[EvalReport],
         prev_code_changes: list[CodeChange],
         incomplete_docs: list[dict] = None,
+        dir_issues: list[dict] = None,
     ) -> str:
         """构建续接上下文文本，供 Planner 使用"""
         parts = []
@@ -506,6 +511,13 @@ class AgentLoop:
 
         if additional_context:
             parts.append(f"## 用户补充说明\n{additional_context}")
+
+        if dir_issues:
+            issue_list = "\n".join(f"- {d['issue']}: {d['detail']}" for d in dir_issues)
+            parts.append(
+                f"## 目录结构不规范（需要重构）\n"
+                f"以下目录不符合 kedo 标准（src/ + build/），请在续接计划的最前面加入重构步骤：\n{issue_list}"
+            )
 
         if completed_steps:
             parts.append(f"## 上次已完成的步骤\n" + "\n".join(completed_steps))
@@ -657,6 +669,59 @@ class AgentLoop:
                 continue
 
         return incomplete
+
+    def _check_directory_structure(self, project_path: str) -> list[dict]:
+        """检测项目目录结构是否符合 kedo 标准（src/ + build/）"""
+        from pathlib import Path as _Path
+        project = _Path(project_path)
+        issues = []
+
+        # 标准源码目录应该是 src/
+        non_standard_src_dirs = ["source", "lib", "app", "code"]
+        for d in non_standard_src_dirs:
+            dir_path = project / d
+            if dir_path.is_dir():
+                # 检查里面确实有源码文件
+                src_exts = {".cpp", ".c", ".h", ".hpp", ".py", ".js", ".ts", ".java", ".go", ".rs"}
+                has_code = any(f.suffix.lower() in src_exts for f in dir_path.rglob("*") if f.is_file())
+                if has_code:
+                    file_count = sum(1 for f in dir_path.rglob("*") if f.is_file() and f.suffix.lower() in src_exts)
+                    issues.append({
+                        "issue": f"源代码目录 `{d}/` 不规范",
+                        "detail": f"应将 `{d}/`（含 {file_count} 个源码文件）重命名为 `src/`，"
+                                  f"并更新构建脚本中的源码路径引用",
+                        "from_dir": d,
+                        "to_dir": "src",
+                    })
+
+        # 检查 src/ 是否存在
+        if not (project / "src").is_dir() and not issues:
+            # 没有 src/ 也没有非标准目录 — 可能源码在根目录
+            src_exts = {".cpp", ".c", ".h", ".hpp", ".py", ".js", ".ts", ".java", ".go", ".rs"}
+            root_src = [f for f in project.iterdir() if f.is_file() and f.suffix.lower() in src_exts]
+            if root_src:
+                issues.append({
+                    "issue": "源代码散落在项目根目录",
+                    "detail": f"有 {len(root_src)} 个源码文件在根目录，应移入 `src/` 目录",
+                    "from_dir": ".",
+                    "to_dir": "src",
+                })
+
+        # 检查构建产物是否在根目录
+        build_exts = {".nro", ".nso", ".elf", ".exe", ".bin", ".so", ".dll", ".a", ".o",
+                      ".jar", ".war", ".whl"}
+        root_artifacts = [f for f in project.iterdir() if f.is_file() and f.suffix.lower() in build_exts]
+        if root_artifacts:
+            names = ", ".join(f.name for f in root_artifacts[:5])
+            issues.append({
+                "issue": "构建产物在项目根目录",
+                "detail": f"构建产物（{names}）应输出到 `build/` 目录，"
+                          f"需修改 Makefile/CMakeLists.txt 的输出路径配置",
+                "from_dir": ".",
+                "to_dir": "build",
+            })
+
+        return issues
 
     # ==========================================================
     # 子任务执行
