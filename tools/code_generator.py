@@ -59,6 +59,11 @@ class CodeGeneratorTool(BaseTool):
                 response = await self._call_llm(messages)
                 generated_code = self._extract_code(response)
 
+            # ★ 验证生成的代码质量（关键文件）
+            generated_code = await self._validate_and_retry(
+                generated_code, instruction, file_path, existing_content, context_files, target
+            )
+
             # 写入文件
             if not target.is_absolute():
                 target = (Path.cwd() / target).resolve()
@@ -272,6 +277,101 @@ class CodeGeneratorTool(BaseTool):
                     code = code[first_newline + 1:]
                 return code.strip()
         return response.strip()
+
+    # 关键文件的验证规则
+    _VALIDATION_RULES = {
+        "CMakeLists.txt": {
+            "required": ["cmake_minimum_required", "project(", "add_executable"],
+            "forbidden_prefix": ["#", "##", "flowchart", "```"],
+            "min_lines": 10,
+            "description": "CMake 构建脚本",
+        },
+        "Makefile": {
+            "required": [":", "\t"],  # Makefile 必须有 target: 和 tab 缩进
+            "forbidden_prefix": ["##", "flowchart", "```"],
+            "min_lines": 5,
+            "description": "Make 构建脚本",
+        },
+        "docker-compose.yml": {
+            "required": ["services:", "version:"],
+            "forbidden_prefix": ["FROM "],  # Dockerfile 内容不能出现在 docker-compose 里
+            "min_lines": 5,
+            "description": "Docker Compose 配置",
+        },
+        "Dockerfile": {
+            "required": ["FROM"],
+            "forbidden_prefix": ["services:", "version:"],
+            "min_lines": 3,
+            "description": "Dockerfile",
+        },
+    }
+
+    async def _validate_and_retry(
+        self, content: str, instruction: str, file_path: str,
+        existing_content: str, context_files: dict, target: Path,
+        max_retries: int = 2,
+    ) -> str:
+        """
+        验证生成的关键文件是否有效。
+        如果不合格（如 CMakeLists.txt 是 Markdown 而非 CMake），自动重新生成。
+        """
+        file_name = Path(file_path).name
+        rules = self._VALIDATION_RULES.get(file_name)
+        if not rules:
+            return content  # 非关键文件不验证
+
+        for attempt in range(max_retries):
+            issues = self._check_content(content, rules)
+            if not issues:
+                return content  # 验证通过
+
+            logger.warning(f"Validation failed for {file_name} (attempt {attempt + 1}): {issues}")
+            if self._on_token:
+                await self._on_token(f"\n[验证失败] {file_name}: {'; '.join(issues)}，重新生成...\n")
+
+            # 重新生成，在指令中加入验证失败的原因
+            fix_instruction = (
+                f"{instruction}\n\n"
+                f"重要：上次生成的 {file_name} 有以下问题：\n"
+                + "\n".join(f"- {i}" for i in issues) + "\n\n"
+                f"请生成正确的 {rules['description']}，不要输出 Markdown 文档格式。\n"
+                f"只输出纯代码内容，不要任何 markdown 标题或说明文字。"
+            )
+            messages = self._build_messages(fix_instruction, file_path, existing_content, context_files)
+            response = await self._call_llm(messages)
+            content = self._extract_code(response)
+
+        # 最后一次验证
+        issues = self._check_content(content, rules)
+        if issues:
+            logger.error(f"Validation still failing for {file_name} after {max_retries} retries: {issues}")
+        return content
+
+    def _check_content(self, content: str, rules: dict) -> list[str]:
+        """检查内容是否符合规则，返回问题列表"""
+        issues = []
+        lines = content.strip().splitlines()
+
+        # 检查最少行数
+        min_lines = rules.get("min_lines", 0)
+        if len(lines) < min_lines:
+            issues.append(f"内容过短（{len(lines)}行 < {min_lines}行）")
+
+        # 检查必须包含的关键字
+        content_lower = content.lower()
+        for kw in rules.get("required", []):
+            if kw.lower() not in content_lower:
+                issues.append(f"缺少必要内容: '{kw}'")
+
+        # 检查不应出现的前缀（说明是 Markdown 而非代码）
+        first_lines = lines[:5] if lines else []
+        for prefix in rules.get("forbidden_prefix", []):
+            for line in first_lines:
+                if line.strip().startswith(prefix):
+                    issues.append(f"文件开头包含非法内容: '{line.strip()[:40]}'（这不是有效的代码文件）")
+                    break
+
+        return issues
 
     def _generate_diff(self, old: str, new: str, path: str) -> str:
         """生成 unified diff"""
