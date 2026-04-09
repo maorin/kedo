@@ -311,8 +311,12 @@ class StateManager:
                     "current_step": t.get("current_step"),
                     "progress_percent": t.get("progress_percent", 0),
                 })
-        # 按创建时间倒序
-        resumable.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        # 排序：进度高的优先，进度相同按时间倒序。进度 0% 的 failed 任务排最后。
+        resumable.sort(key=lambda x: (
+            x.get("progress_percent", 0) > 0,   # 有进度的排前面
+            x.get("progress_percent", 0),         # 进度高的优先
+            x.get("created_at", ""),              # 同进度按时间倒序
+        ), reverse=True)
         return resumable
 
     def find_matching_task(self, description: str) -> Optional[str]:
