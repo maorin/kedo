@@ -3602,6 +3602,8 @@
                         updateTaskCount();
                         getTasks();
                     }
+                    // 刷新右侧计划列表
+                    if (appState.currentTaskId) renderPlanSubtasks(appState.currentTaskId);
                     break;
                 }
                 case 'step_started':
@@ -3827,6 +3829,8 @@
                         updateTaskCount();
                         dom.taskInput.value = '';
                         addLog('\u4EFB\u52A1\u521B\u5EFA', '\u65B0\u4EFB\u52A1: ' + description + ' [' + newTask.id + ']', 'success');
+                        // 延迟加载计划（等后端生成）
+                        setTimeout(function() { renderPlanSubtasks(newTask.id); }, 3000);
                     } else {
                         simulateTaskCreation(description);
                     }
@@ -3852,6 +3856,14 @@
                     }));
                     renderTaskList();
                     updateTaskCount();
+                    // 自动选中最新任务并加载计划
+                    if (!appState.currentTaskId && appState.tasks.length > 0) {
+                        appState.currentTaskId = appState.tasks[appState.tasks.length - 1].id;
+                        renderTaskList();
+                    }
+                    if (appState.currentTaskId) {
+                        renderPlanSubtasks(appState.currentTaskId);
+                    }
                     // 异步加载每个任务的评估报告
                     taskArray.forEach(function(t) {
                         var taskId = t.task_id || t.id;
