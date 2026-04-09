@@ -1669,7 +1669,24 @@
                 }
             });
 
-            renderCodeFileList(allFiles);
+            // ★ 如果 checkpoint 中没有文件，使用磁盘扫描的项目文件
+            if (allFiles.length === 0 && data.project_files && data.project_files.length > 0) {
+                const diskFiles = data.project_files.map(f => ({
+                    path: f.abs_path,
+                    rel_path: f.path,
+                    name: f.name,
+                    action: 'disk',
+                    lines: f.lines || 0,
+                    size: f.size || 0,
+                    task_id: '',
+                }));
+                renderCodeFileList(diskFiles);
+                // 更新统计卡片
+                document.getElementById('codeTotal').textContent = diskFiles.length;
+                document.getElementById('codeSuccess').textContent = diskFiles.length;
+            } else {
+                renderCodeFileList(allFiles);
+            }
         }
 
         function renderCodeFileList(files) {
@@ -1684,17 +1701,18 @@
             }
             files.forEach(f => {
                 const item = document.createElement('div');
-                const fileName = f.path.split('/').pop();
-                const actionIcon = f.action === 'create' ? '+' : '~';
-                const actionColor = f.action === 'create' ? '#3fb950' : '#d29922';
+                const displayName = f.rel_path || f.path.split('/').pop();
+                const isDisk = f.action === 'disk';
+                const actionIcon = isDisk ? '📄' : (f.action === 'create' ? '+' : '~');
+                const actionColor = isDisk ? '#58a6ff' : (f.action === 'create' ? '#3fb950' : '#d29922');
                 item.style.cssText = 'padding:0.4rem 0.6rem;cursor:pointer;border-radius:4px;display:flex;justify-content:space-between;align-items:center;';
 
                 const nameSpan = document.createElement('span');
                 const iconSpan = document.createElement('span');
-                iconSpan.style.cssText = `color:${actionColor};font-weight:bold;margin-right:4px;`;
+                iconSpan.style.cssText = `color:${actionColor};font-weight:bold;margin-right:4px;font-size:0.8rem;`;
                 iconSpan.textContent = actionIcon;
                 nameSpan.appendChild(iconSpan);
-                nameSpan.appendChild(document.createTextNode(fileName));
+                nameSpan.appendChild(document.createTextNode(displayName));
 
                 const lineSpan = document.createElement('span');
                 lineSpan.style.cssText = 'color:#888;font-size:0.75rem;';

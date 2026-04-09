@@ -661,28 +661,89 @@ async def get_code_status():
             "duration": "-",
             "generated_files": generated_files,
         })
-    return {"total": total, "success": success, "failed": failed, "running": running, "records": records}
+
+    # ★ 回退：如果 checkpoint 中没有文件记录，扫描项目磁盘上的源码文件
+    project_files = _scan_project_source_files()
+    return {
+        "total": total, "success": success, "failed": failed, "running": running,
+        "records": records,
+        "project_files": project_files,
+    }
+
+
+def _scan_project_source_files() -> list[dict]:
+    """扫描项目目录中的源码文件（排除 docs/.kedo/.git 等）"""
+    project = Path(_project_path)
+    if not project.is_dir():
+        return []
+
+    source_extensions = {
+        ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".rs", ".c", ".cpp", ".h", ".hpp",
+        ".cs", ".rb", ".php", ".swift", ".kt", ".scala", ".sh", ".bash",
+        ".html", ".css", ".scss", ".less", ".vue", ".svelte",
+        ".json", ".yaml", ".yml", ".toml", ".xml", ".sql",
+        ".dockerfile", ".makefile", ".cmake",
+        ".md", ".txt", ".cfg", ".ini", ".conf", ".env",
+    }
+    skip_dirs = {".kedo", ".git", ".venv", "node_modules", "__pycache__", ".cache", "build", "dist"}
+
+    files = []
+    for item in project.rglob("*"):
+        if item.is_dir():
+            continue
+        # 跳过排除目录下的文件
+        parts = item.relative_to(project).parts
+        if any(p in skip_dirs for p in parts):
+            continue
+        # 匹配源码扩展名（或无扩展名但名字匹配如 Makefile, Dockerfile）
+        ext = item.suffix.lower()
+        name_lower = item.name.lower()
+        if ext in source_extensions or name_lower in ("makefile", "dockerfile", "cmakelists.txt", "rakefile", "gemfile"):
+            try:
+                stat = item.stat()
+                files.append({
+                    "path": str(item.relative_to(project)),
+                    "abs_path": str(item),
+                    "name": item.name,
+                    "ext": ext,
+                    "size": stat.st_size,
+                    "lines": _count_lines(item),
+                })
+            except (OSError, PermissionError):
+                continue
+
+    # 按路径排序
+    files.sort(key=lambda f: f["path"])
+    return files
+
+
+def _count_lines(file_path: Path) -> int:
+    """快速统计文件行数"""
+    try:
+        return sum(1 for _ in file_path.open("rb"))
+    except Exception:
+        return 0
 
 
 @router.get("/code/file")
-async def get_code_file(task_id: str, file_path: str):
-    """获取指定任务中生成的代码文件内容"""
-    status = _state_manager.get_task_status(task_id)
-    if not status:
-        raise HTTPException(404, f"Task not found: {task_id}")
+async def get_code_file(task_id: str = "", file_path: str = ""):
+    """获取指定任务中生成的代码文件内容（支持 checkpoint 和磁盘读取）"""
+    # 先尝试从 checkpoint 读取
+    if task_id:
+        status = _state_manager.get_task_status(task_id)
+        if status:
+            code_changes = getattr(status, "code_changes", []) or []
+            for c in code_changes:
+                if c.file_path == file_path:
+                    return {
+                        "file_path": c.file_path,
+                        "action": c.action,
+                        "content": c.content or "",
+                        "diff": c.diff or "",
+                        "lines": len((c.content or "").splitlines()),
+                    }
 
-    code_changes = getattr(status, "code_changes", []) or []
-    for c in code_changes:
-        if c.file_path == file_path:
-            return {
-                "file_path": c.file_path,
-                "action": c.action,
-                "content": c.content or "",
-                "diff": c.diff or "",
-                "lines": len((c.content or "").splitlines()),
-            }
-
-    # 如果 checkpoint 中没有，尝试从磁盘读取
+    # 从磁盘读取
     from pathlib import Path as _Path
     fp = _Path(file_path)
     if fp.is_file():
