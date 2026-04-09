@@ -374,7 +374,7 @@ class Planner:
 - ❌ 不要重新生成已经存在的代码文件的全部内容，只修改需要补充的部分
 - ❌ 不要生成 README.md、docker-compose.yml 等已有文件
 
-文档语言: {self.doc_language}
+文档语言: {self._config.get("doc_language", "zh")}
 """
 
         messages = [
