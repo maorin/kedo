@@ -113,11 +113,13 @@ class AgentLoop:
 
     async def resume_from_checkpoint(self, task_id: str, additional_context: str = ""):
         """
-        从检查点恢复执行
+        智能续接：扫描项目现状 + 加载历史评估 → 重新规划缺失部分 → 执行
 
-        Args:
-            task_id: 要恢复的任务 ID
-            additional_context: 用户的补充说明（如"我修改了XX，请继续"）
+        不是机械地从旧计划第 N 步继续，而是：
+        1. 扫描磁盘上已有的文件和代码
+        2. 加载上次的评估报告（哪些需求满足/缺失）
+        3. 让 Planner 基于 (现状 + 评估反馈 + 用户补充) 生成新计划
+        4. 执行新计划，只做缺失的部分
         """
         checkpoint = await self.state.load_checkpoint(task_id)
         if not checkpoint:
@@ -125,12 +127,10 @@ class AgentLoop:
 
         # 恢复记忆
         self.memory.restore(checkpoint.memory_snapshot)
-
-        # 如果用户有补充说明，注入到记忆中
         if additional_context:
             self.memory.add("user_continuation_context", additional_context)
 
-        # 确保任务有 pause_event（跨会话恢复时可能没有）
+        # 确保任务有 pause_event
         if task_id not in self.state._pause_events:
             self.state._pause_events[task_id] = asyncio.Event()
             self.state._pause_events[task_id].set()
@@ -139,18 +139,27 @@ class AgentLoop:
         if task_id in self.state._tasks:
             await self.state.update_status(task_id, TaskStatus.IN_PROGRESS)
         else:
-            # 跨会话恢复：任务可能只有索引没有完整状态
             task_desc = checkpoint.plan.subtasks[0].description if checkpoint.plan and checkpoint.plan.subtasks else ""
             await self.state.create_task(task_id, task_desc)
             await self.state.update_status(task_id, TaskStatus.IN_PROGRESS)
 
-        # 从检查点位置继续执行
+        # 获取原始任务描述
+        original_desc = self.state._tasks.get(task_id, {}).get("description", "")
+        project_path = self.state._tasks.get(task_id, {}).get("config", {}).get("project_path", ".")
+
+        # ★ 智能续接：走新的 _run_smart_continuation
         loop_task = asyncio.create_task(
-            self._run_loop_from_checkpoint(task_id, checkpoint)
+            self._run_smart_continuation(
+                task_id=task_id,
+                checkpoint=checkpoint,
+                original_description=original_desc,
+                additional_context=additional_context,
+                project_path=project_path,
+            )
         )
         self._running_tasks[task_id] = loop_task
 
-        logger.info(f"Agent Loop resumed from checkpoint for task {task_id}"
+        logger.info(f"Smart continuation started for task {task_id}"
                      + (f" with context: {additional_context[:80]}" if additional_context else ""))
 
     async def submit_discussion_input(
@@ -316,49 +325,239 @@ class AgentLoop:
                              error_type=type(e).__name__)
             await self.state.update_status(task_id, TaskStatus.FAILED, current_step=f"Error: {e}")
 
-    async def _run_loop_from_checkpoint(self, task_id: str, checkpoint: AgentCheckpoint):
-        """从检查点恢复执行"""
-        plan = checkpoint.plan
-        start_index = checkpoint.current_step_index + 1
-        code_changes = checkpoint.code_changes
-        test_results = checkpoint.test_results
+    async def _run_smart_continuation(
+        self,
+        task_id: str,
+        checkpoint: AgentCheckpoint,
+        original_description: str,
+        additional_context: str,
+        project_path: str,
+    ):
+        """
+        智能续接核心逻辑：
 
-        project_path = self.state._tasks.get(task_id, {}).get("config", {}).get("project_path", ".")
+        1. 扫描项目现状（磁盘文件 + 已有代码摘要）
+        2. 构建续接上下文（上次完成了什么、评估反馈、缺失什么）
+        3. 调用 Planner 生成增量计划（只做缺失部分）
+        4. 执行新计划（复用 _run_loop 的主流程）
+        """
+        try:
+            # ---- Phase 1: 分析项目现状 ----
+            await self.state.update_status(task_id, TaskStatus.PLANNING, current_step="Analyzing current state")
+            await self._emit(task_id, EventType.STEP_STARTED, step="smart_continuation_analysis")
 
-        await self.state.update_status(task_id, TaskStatus.IN_PROGRESS)
+            # 扫描项目文件
+            project_context = await self._gather_project_context(project_path)
 
-        for i in range(start_index, len(plan.subtasks)):
-            subtask = plan.subtasks[i]
-            await self.state.wait_if_paused(task_id)
+            # 读取已有源码文件的摘要（文件名 + 前几行）
+            existing_code_summary = await self._summarize_existing_code(project_path)
 
-            progress = (i / len(plan.subtasks)) * 100
-            await self.state.update_status(
-                task_id, TaskStatus.IN_PROGRESS,
-                current_step=subtask.title,
-                progress_percent=progress,
+            # 从 checkpoint 提取历史信息
+            prev_eval = checkpoint.eval_report
+            prev_plan = checkpoint.plan
+            prev_code_changes = checkpoint.code_changes
+            completed_steps = []
+            for i in range(min(checkpoint.current_step_index + 1, len(prev_plan.subtasks))):
+                s = prev_plan.subtasks[i]
+                completed_steps.append(f"- [{s.step_type.value}] {s.title}")
+
+            # ---- Phase 2: 构建续接上下文 ----
+            continuation_context = self._build_continuation_context(
+                original_description=original_description,
+                additional_context=additional_context,
+                completed_steps=completed_steps,
+                existing_code_summary=existing_code_summary,
+                prev_eval=prev_eval,
+                prev_code_changes=prev_code_changes,
             )
 
-            result = await self._execute_subtask(task_id, subtask, project_path, code_changes)
+            await self._emit(task_id, EventType.STEP_COMPLETED,
+                             step="smart_continuation_analysis",
+                             output=f"已分析项目现状: {len(existing_code_summary)} 个源码文件")
 
-            if subtask.step_type == StepType.CODE_GENERATE and result.success:
-                code_changes.append(CodeChange(
-                    file_path=result.data.get("file_path", ""),
-                    action=result.data.get("action", "modify"),
-                    diff=result.data.get("diff", ""),
-                ))
-            elif subtask.step_type == StepType.TEST:
-                test_results = TestResult(**result.data.get("test_result", {}))
+            # ---- Phase 3: 生成增量计划 ----
+            await self.state.update_status(task_id, TaskStatus.PLANNING, current_step="Planning continuation")
+            await self._emit(task_id, EventType.STEP_STARTED, step="planning")
+            await self._emit(task_id, EventType.LLM_REQUEST,
+                             phase="planning", prompt_summary=f"智能续接: {original_description[:60]}",
+                             model=self._get_model_name())
 
-            await self.state.save_checkpoint(AgentCheckpoint(
+            async def _on_token(token):
+                await self._emit(task_id, EventType.LLM_TOKEN, token=token, phase="planning")
+
+            plan = await self.planner.create_continuation_plan(
                 task_id=task_id,
-                current_step_index=i,
-                plan=plan,
-                memory_snapshot=self.memory.snapshot(),
-                code_changes=code_changes,
-                test_results=test_results,
-            ))
+                continuation_context=continuation_context,
+                project_context=project_context,
+                on_token=_on_token,
+            )
 
-        await self.state.update_status(task_id, TaskStatus.COMPLETED, progress_percent=100)
+            plan_detail = " → ".join(s.title for s in plan.subtasks)
+            await self._emit(task_id, EventType.LLM_RESPONSE,
+                             phase="planning", summary=f"续接计划: {len(plan.subtasks)} 个子任务: {plan_detail}")
+            await self._emit(task_id, EventType.STEP_COMPLETED, step="planning", subtask_count=len(plan.subtasks))
+
+            # ---- Phase 4: 执行新计划（复用主循环逻辑）----
+            await self.state.wait_if_paused(task_id)
+            await self.state.update_status(task_id, TaskStatus.IN_PROGRESS)
+
+            code_changes: list[CodeChange] = list(checkpoint.code_changes)  # 保留历史
+            test_results: Optional[TestResult] = None
+            eval_report_data: Optional[dict] = None
+            build_success = False
+
+            for i, subtask in enumerate(plan.subtasks):
+                await self.state.wait_if_paused(task_id)
+
+                progress = (i / len(plan.subtasks)) * 100
+                await self.state.update_status(
+                    task_id, TaskStatus.IN_PROGRESS,
+                    current_step=subtask.title,
+                    progress_percent=progress,
+                )
+
+                result = await self._execute_subtask(task_id, subtask, project_path, code_changes)
+
+                if subtask.step_type == StepType.CODE_GENERATE and result.success:
+                    code_changes.append(CodeChange(
+                        file_path=result.data.get("file_path", ""),
+                        action=result.data.get("action", "modify"),
+                        diff=result.data.get("diff", ""),
+                        content=result.data.get("content"),
+                    ))
+                elif subtask.step_type == StepType.BUILD:
+                    build_success = result.success
+                elif subtask.step_type == StepType.TEST:
+                    test_results = TestResult(**result.data.get("test_result", {}))
+                    if result.success and build_success:
+                        eval_score = eval_report_data.get("score", 70) if eval_report_data else 70
+                        await self.versions.create_candidate(
+                            task_id=task_id,
+                            code_changes=code_changes,
+                            test_results=test_results,
+                            build_success=build_success,
+                            ai_confidence=eval_score,
+                            ai_summary=f"Continuation: Build OK + Tests passed",
+                            project_path=project_path,
+                        )
+                elif subtask.step_type == StepType.EVALUATE:
+                    eval_report_data = result.data.get("eval_report")
+                    if eval_report_data:
+                        score = eval_report_data.get("score", 0)
+                        eval_report_obj = EvalReport(**eval_report_data)
+                        await self.versions.create_candidate(
+                            task_id=task_id,
+                            code_changes=code_changes,
+                            test_results=test_results,
+                            eval_report=eval_report_obj,
+                            build_success=build_success,
+                            ai_confidence=score,
+                            ai_summary=f"Continuation eval: {score}",
+                            project_path=project_path,
+                        )
+                        if score < self.min_eval_score:
+                            plan = await self._handle_eval_failure_loop(
+                                task_id=task_id, plan=plan, eval_report=eval_report_obj,
+                                code_changes=code_changes, test_results=test_results,
+                                description=original_description, project_path=project_path,
+                            )
+                            continue
+
+                await self.state.save_checkpoint(AgentCheckpoint(
+                    task_id=task_id,
+                    current_step_index=i,
+                    plan=plan,
+                    memory_snapshot=self.memory.snapshot(),
+                    code_changes=code_changes,
+                    test_results=test_results,
+                    eval_report=eval_report_obj if eval_report_data else None,
+                ))
+
+            # ---- Phase 5: 完成 ----
+            await self.state.update_status(task_id, TaskStatus.COMPLETED, progress_percent=100, current_step="Completed")
+            logger.info(f"Smart continuation completed for task {task_id}")
+
+        except asyncio.CancelledError:
+            logger.info(f"Task {task_id} was cancelled")
+            await self.state.update_status(task_id, TaskStatus.PAUSED)
+        except Exception as e:
+            logger.error(f"Smart continuation failed for task {task_id}: {e}", exc_info=True)
+            await self._emit(task_id, EventType.STEP_FAILED, step="smart_continuation", error=str(e), error_type=type(e).__name__)
+            await self.state.update_status(task_id, TaskStatus.FAILED, current_step=f"Error: {e}")
+
+    def _build_continuation_context(
+        self,
+        original_description: str,
+        additional_context: str,
+        completed_steps: list[str],
+        existing_code_summary: list[dict],
+        prev_eval: Optional[EvalReport],
+        prev_code_changes: list[CodeChange],
+    ) -> str:
+        """构建续接上下文文本，供 Planner 使用"""
+        parts = []
+
+        parts.append(f"## 原始需求\n{original_description}")
+
+        if additional_context:
+            parts.append(f"## 用户补充说明\n{additional_context}")
+
+        if completed_steps:
+            parts.append(f"## 上次已完成的步骤\n" + "\n".join(completed_steps))
+
+        if existing_code_summary:
+            file_list = "\n".join(
+                f"- {f['path']} ({f['lines']}行): {f['summary']}"
+                for f in existing_code_summary[:30]
+            )
+            parts.append(f"## 项目中已有的源码文件\n{file_list}")
+
+        if prev_eval:
+            parts.append(f"## 上次评估结果 (评分: {prev_eval.score}/100)")
+            if prev_eval.requirements_met:
+                parts.append("### 已满足的需求\n" + "\n".join(f"- {r}" for r in prev_eval.requirements_met))
+            if prev_eval.requirements_missed:
+                parts.append("### 缺失的需求（本次需要重点实现）\n" + "\n".join(f"- {r}" for r in prev_eval.requirements_missed))
+            if prev_eval.suggestions:
+                parts.append("### 改进建议\n" + "\n".join(f"- {s}" for s in prev_eval.suggestions[:5]))
+
+        return "\n\n".join(parts)
+
+    async def _summarize_existing_code(self, project_path: str) -> list[dict]:
+        """扫描项目中已有的源码文件，提取文件名和首行摘要"""
+        from pathlib import Path as _Path
+        project = _Path(project_path)
+        if not project.is_dir():
+            return []
+
+        source_exts = {".cpp", ".c", ".h", ".hpp", ".py", ".js", ".ts", ".jsx", ".tsx",
+                       ".java", ".go", ".rs", ".cs", ".rb", ".swift", ".kt"}
+        skip_dirs = {".kedo", ".git", ".venv", "node_modules", "__pycache__", "build", "dist"}
+
+        results = []
+        for item in sorted(project.rglob("*")):
+            if item.is_dir():
+                continue
+            parts = item.relative_to(project).parts
+            if any(p in skip_dirs for p in parts):
+                continue
+            if item.suffix.lower() not in source_exts:
+                continue
+            try:
+                lines = item.read_text(encoding="utf-8", errors="replace").splitlines()
+                line_count = len(lines)
+                # 提取前5行非空行作为摘要
+                summary_lines = [l.strip() for l in lines[:10] if l.strip()][:3]
+                summary = " | ".join(summary_lines)[:120]
+                results.append({
+                    "path": str(item.relative_to(project)),
+                    "lines": line_count,
+                    "summary": summary,
+                })
+            except Exception:
+                continue
+
+        return results
 
     # ==========================================================
     # 子任务执行

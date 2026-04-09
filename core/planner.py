@@ -327,6 +327,96 @@ class Planner:
 
         return result
 
+    async def create_continuation_plan(
+        self,
+        task_id: str,
+        continuation_context: str,
+        project_context: Optional[dict] = None,
+        on_token=None,
+    ) -> TaskPlan:
+        """
+        智能续接计划：基于项目现状和历史评估生成增量计划
+
+        与 create_plan 的区别：
+        - 不从零开始，而是分析已有文件和上次评估
+        - 只生成缺失部分的步骤
+        - 已有的文档和代码不重新生成
+        """
+        system_prompt = self._get_system_prompt() + """
+
+=== 续接模式特别规则 ===
+
+你现在处于**续接模式**，不是从零开始。用户已经有一个半完成的项目。
+
+**关键原则：**
+1. **不要重新生成已有的文件** — 如果文件已经存在，除非需要修改，否则跳过
+2. **聚焦缺失功能** — 根据上次评估的"缺失需求"列表，优先实现这些功能
+3. **在现有代码基础上扩展** — 新代码应该 import/引用已有的模块，而不是重写
+4. **保留已有文档** — 如果 docs/ 已经有文档，只更新需要修改的部分
+5. **仍然需要 build → test → evaluate 步骤** — 确保新代码能编译和通过测试
+
+**续接计划的结构：**
+1. (可选) 修改需要更新的 SDD 文档
+2. 生成缺失的代码文件 / 修改已有代码文件
+3. build（构建）
+4. test（测试）
+5. evaluate（评估）
+
+**不需要：**
+- 不需要重新生成 requirement 文档（已有）
+- 不需要重新生成未变更的 SDD 文档
+- 不需要重新生成已有且无需修改的代码文件
+"""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+        ]
+
+        if project_context:
+            context_str = json.dumps(project_context, indent=2, ensure_ascii=False)
+            messages.append({
+                "role": "user",
+                "content": f"Project context (current files on disk):\n{context_str}",
+            })
+
+        # 添加相关经验
+        experiences = self._memory.get_relevant_experience(continuation_context[:200])
+        if experiences:
+            exp_str = "\n".join(
+                f"- {e['summary']}: {', '.join(e['learnings'])}"
+                for e in experiences
+            )
+            messages.append({
+                "role": "user",
+                "content": f"Relevant past experiences:\n{exp_str}",
+            })
+
+        messages.append({
+            "role": "user",
+            "content": (
+                f"=== 续接上下文 ===\n\n{continuation_context}\n\n"
+                f"=== 任务 ===\n"
+                f"请根据以上续接上下文，生成一个**增量计划**。\n"
+                f"只包含需要新增或修改的步骤，不要重复已完成的工作。\n"
+                f"重点实现上次评估中「缺失的需求」。\n\n"
+                f"Generate the continuation plan as JSON."
+            ),
+        })
+
+        if on_token:
+            response = await self._llm.chat_stream(messages, on_token=on_token)
+        else:
+            response = await self._llm.chat(messages)
+
+        subtasks = self._parse_plan(response)
+
+        # 确保有 build/test/evaluate 步骤
+        result = self._ensure_pipeline_steps(subtasks)
+        for i, st in enumerate(result):
+            st.id = f"subtask_{i}"
+
+        return TaskPlan(task_id=task_id, subtasks=result)
+
     async def replan(
         self,
         task_id: str,
