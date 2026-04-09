@@ -1248,38 +1248,51 @@
                 </div>
             </div>
 
-            <!-- ====== 部署监控视图 ====== -->
+            <!-- ====== 部署环境视图 ====== -->
             <div class="monitor-view" id="deployView" style="padding:0;overflow:hidden;">
-                <div class="deploy-layout">
-                    <!-- 左侧主内容 -->
-                    <div class="deploy-main">
-                        <div class="monitor-header">
-                            <h2>部署监控</h2>
-                            <div style="display:flex;gap:0.5rem;">
-                                <button class="monitor-refresh-btn" onclick="toggleDeployDrawer()" id="deployDrawerBtn">部署指南</button>
-                                <button class="monitor-refresh-btn" onclick="refreshDeployData()">刷新</button>
+                <div style="display:flex;flex:1;height:100%;overflow:hidden;">
+                    <!-- 左侧：环境列表 -->
+                    <div style="width:320px;flex-shrink:0;border-right:1px solid rgba(100,200,255,0.1);display:flex;flex-direction:column;overflow:hidden;">
+                        <div style="padding:1rem 1.2rem;border-bottom:1px solid rgba(100,200,255,0.1);flex-shrink:0;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;">
+                                <h2 style="font-size:1.1rem;color:#e0e0e0;font-weight:600;margin:0;">部署环境</h2>
+                                <button class="monitor-refresh-btn" onclick="refreshDeployData();refreshDeployGuide();refreshDeployEnvDrawer();" style="font-size:0.72rem;padding:0.2rem 0.6rem;">刷新</button>
                             </div>
                         </div>
-                        <div class="monitor-cards">
-                            <div class="monitor-card">
-                                <div class="monitor-card-title">总部署次数</div>
-                                <div class="monitor-card-value info" id="deployTotal">0</div>
-                            </div>
-                            <div class="monitor-card">
-                                <div class="monitor-card-title">成功</div>
-                                <div class="monitor-card-value success" id="deploySuccess">0</div>
-                            </div>
-                            <div class="monitor-card">
-                                <div class="monitor-card-title">失败</div>
-                                <div class="monitor-card-value error" id="deployFailed">0</div>
-                            </div>
-                            <div class="monitor-card">
-                                <div class="monitor-card-title">进行中</div>
-                                <div class="monitor-card-value warning" id="deployRunning">0</div>
+                        <div id="deployEnvCards" style="flex:1;overflow-y:auto;padding:0.75rem;display:flex;flex-direction:column;gap:0.75rem;min-height:0;">
+                            <div style="color:#888;padding:2rem 1rem;text-align:center;">加载中...</div>
+                        </div>
+                    </div>
+
+                    <!-- 右侧：选中环境的详情 -->
+                    <div style="flex:1;overflow-y:auto;padding:1.5rem 2rem;" id="deployDetailPanel">
+                        <!-- 部署目标 & 指南 -->
+                        <div id="deployGuideTarget" style="font-size:0.85rem;color:#c9d1d9;line-height:1.6;margin-bottom:1.5rem;">
+                            <div style="color:#888;">选择左侧环境查看详情</div>
+                        </div>
+
+                        <!-- 分步指南 -->
+                        <div style="margin-bottom:1.5rem;">
+                            <div class="monitor-table-title" style="margin-bottom:0.5rem;">准备步骤</div>
+                            <div id="deployGuideSteps" style="font-size:0.85rem;">
+                                <div style="color:#888;">加载中...</div>
                             </div>
                         </div>
-                        <div class="monitor-table-wrap">
-                            <div class="monitor-table-title">部署记录</div>
+
+                        <!-- 环境检测 -->
+                        <div style="margin-bottom:1.5rem;">
+                            <div class="monitor-table-title" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
+                                <span>环境检测</span>
+                                <button class="monitor-refresh-btn" onclick="refreshDeployEnvDrawer()" style="font-size:0.72rem;padding:0.2rem 0.6rem;">检测</button>
+                            </div>
+                            <div id="deployEnvDrawerList" style="font-size:0.85rem;">
+                                <div style="color:#888;padding:0.5rem;">点击检测</div>
+                            </div>
+                        </div>
+
+                        <!-- 部署记录 -->
+                        <div style="margin-bottom:1.5rem;">
+                            <div class="monitor-table-title" style="margin-bottom:0.5rem;">部署记录</div>
                             <table class="monitor-table">
                                 <thead>
                                     <tr>
@@ -1292,68 +1305,20 @@
                                     </tr>
                                 </thead>
                                 <tbody id="deployTableBody">
-                                    <tr><td colspan="6" style="text-align:center;color:#888;padding:2rem;">暂无部署记录</td></tr>
+                                    <tr><td colspan="6" style="text-align:center;color:#888;padding:1.5rem;">暂无部署记录</td></tr>
                                 </tbody>
                             </table>
                         </div>
-                        <!-- 部署环境检查 -->
-                        <div class="monitor-table-wrap">
-                            <div class="monitor-table-title" style="display:flex;justify-content:space-between;align-items:center;">
-                                <span>部署环境检查</span>
-                                <button class="monitor-refresh-btn" onclick="refreshDeployEnv()" style="font-size:0.72rem;padding:0.2rem 0.6rem;">检测</button>
-                            </div>
-                            <div id="deployEnvList" style="font-size:0.85rem;">
-                                <div style="color:#888;padding:1rem;text-align:center;">点击「检测」扫描部署环境</div>
-                            </div>
-                        </div>
-                    </div>
 
-                    <!-- 右侧抽拉面板：部署指南 -->
-                    <div class="deploy-drawer" id="deployDrawer">
-                        <button class="deploy-drawer-toggle" onclick="toggleDeployDrawer()" title="展开/收起">◀</button>
-                        <div class="deploy-drawer-inner">
-                            <div class="drawer-header">
-                                <h3>部署指南</h3>
-                                <button class="drawer-close-btn" onclick="toggleDeployDrawer()">✕</button>
-                            </div>
-
-                            <!-- 部署目标 -->
-                            <div class="drawer-section">
-                                <div class="drawer-section-title">部署目标</div>
-                                <div id="deployGuideTarget" style="padding:0 0.5rem;font-size:0.82rem;color:#c9d1d9;line-height:1.6;">
-                                    <div style="color:#888;">加载中...</div>
-                                </div>
-                            </div>
-
-                            <!-- 分步指南 -->
-                            <div class="drawer-section">
-                                <div class="drawer-section-title">准备步骤</div>
-                                <div id="deployGuideSteps" style="padding:0 0.3rem;font-size:0.82rem;">
-                                    <div style="color:#888;padding:0.5rem;">加载中...</div>
-                                </div>
-                            </div>
-
-                            <!-- 环境检测结果 -->
-                            <div class="drawer-section" style="border-bottom:none;">
-                                <div class="drawer-section-title" style="display:flex;justify-content:space-between;align-items:center;">
-                                    <span>环境检测</span>
-                                    <button class="monitor-refresh-btn" onclick="refreshDeployEnvDrawer()" style="font-size:0.68rem;padding:0.15rem 0.5rem;">检测</button>
-                                </div>
-                                <div id="deployEnvDrawerList" style="font-size:0.8rem;">
-                                    <div style="color:#888;padding:0.5rem;text-align:center;">点击检测</div>
-                                </div>
-                            </div>
-
-                            <!-- 部署地址 -->
-                            <div class="drawer-section" style="border-bottom:none;">
-                                <div class="drawer-section-title">部署地址</div>
-                                <table class="drawer-table">
-                                    <thead><tr><th>服务</th><th>地址</th><th>状态</th></tr></thead>
-                                    <tbody id="deployEndpointBody">
-                                        <tr><td colspan="3" class="drawer-empty">暂无部署地址</td></tr>
-                                    </tbody>
-                                </table>
-                            </div>
+                        <!-- 部署地址 -->
+                        <div>
+                            <div class="monitor-table-title" style="margin-bottom:0.5rem;">服务地址</div>
+                            <table class="monitor-table">
+                                <thead><tr><th>服务</th><th>地址</th><th>状态</th></tr></thead>
+                                <tbody id="deployEndpointBody">
+                                    <tr><td colspan="3" style="text-align:center;color:#888;padding:1rem;">暂无部署地址</td></tr>
+                                </tbody>
+                            </table>
                         </div>
                     </div>
                 </div>
@@ -1700,7 +1665,6 @@
                 dom.deployView.classList.add('active');
                 dom.deployView.style.display = 'flex';
                 refreshDeployData();
-                refreshDeployEnv();
                 refreshDeployGuide();
                 refreshDeployEnvDrawer();
             } else if (viewName === 'test') {
@@ -2129,14 +2093,100 @@
         // ============================================================
         async function refreshDeployGuide() {
             try {
-                var resp = await fetch(API_BASE + '/deploy/guide');
-                if (!resp.ok) return;
-                var data = await resp.json();
+                var guideResp = await fetch(API_BASE + '/deploy/guide');
+                var envResp = await fetch(API_BASE + '/deploy/environment');
+                if (!guideResp.ok) return;
+                var data = await guideResp.json();
+                var envData = envResp.ok ? await envResp.json() : { ready: 0, missing: 0, checks: [] };
 
-                // 渲染部署目标
+                // ★ 渲染左侧环境卡片列表
+                var cardsEl = document.getElementById('deployEnvCards');
+                cardsEl.textContent = '';
+                var t = data.target;
+
+                // 主部署环境卡片
+                var card = document.createElement('div');
+                card.style.cssText = 'background:rgba(15,23,42,0.8);border:1px solid rgba(0,217,255,0.3);border-radius:8px;padding:1rem;cursor:pointer;transition:all 0.2s;';
+                card.addEventListener('mouseenter', function() { card.style.borderColor = '#00d9ff'; card.style.boxShadow = '0 4px 12px rgba(0,217,255,0.15)'; });
+                card.addEventListener('mouseleave', function() { card.style.borderColor = 'rgba(0,217,255,0.3)'; card.style.boxShadow = 'none'; });
+
+                var cardIcon = document.createElement('div');
+                cardIcon.style.cssText = 'font-size:1.8rem;margin-bottom:0.5rem;';
+                cardIcon.textContent = t.icon || '\u{1F4E6}';
+                card.appendChild(cardIcon);
+
+                var cardTitle = document.createElement('div');
+                cardTitle.style.cssText = 'font-weight:600;color:#00d9ff;font-size:0.95rem;margin-bottom:0.3rem;';
+                cardTitle.textContent = t.platform || 'Unknown';
+                card.appendChild(cardTitle);
+
+                var cardDesc = document.createElement('div');
+                cardDesc.style.cssText = 'font-size:0.78rem;color:#888;margin-bottom:0.75rem;line-height:1.4;';
+                cardDesc.textContent = t.description || '';
+                card.appendChild(cardDesc);
+
+                // 准备进度条
+                var totalChecks = envData.ready + envData.missing;
+                var pct = totalChecks > 0 ? Math.round(envData.ready / totalChecks * 100) : 0;
+                var progressWrap = document.createElement('div');
+                progressWrap.style.cssText = 'background:rgba(255,255,255,0.05);border-radius:4px;height:6px;overflow:hidden;margin-bottom:0.4rem;';
+                var progressBar = document.createElement('div');
+                progressBar.style.cssText = 'height:100%;border-radius:4px;transition:width 0.3s;background:' + (pct === 100 ? '#22c55e' : pct > 50 ? '#f59e0b' : '#ef4444') + ';width:' + pct + '%;';
+                progressWrap.appendChild(progressBar);
+                card.appendChild(progressWrap);
+
+                var cardMeta = document.createElement('div');
+                cardMeta.style.cssText = 'display:flex;justify-content:space-between;font-size:0.72rem;';
+                var readySpan = document.createElement('span');
+                readySpan.style.color = '#22c55e';
+                readySpan.textContent = '\u2705 ' + envData.ready + ' \u5C31\u7EEA';
+                var missSpan = document.createElement('span');
+                missSpan.style.color = envData.missing > 0 ? '#ef4444' : '#22c55e';
+                missSpan.textContent = envData.missing > 0 ? ('\u274C ' + envData.missing + ' \u7F3A\u5931') : '\u5168\u90E8\u5C31\u7EEA';
+                cardMeta.appendChild(readySpan);
+                cardMeta.appendChild(missSpan);
+                card.appendChild(cardMeta);
+
+                // 步骤摘要
+                var stepsTotal = (data.steps || []).length;
+                var stepsReady = (data.steps || []).filter(function(s) { return s.status === 'ready'; }).length;
+                var stepsManual = (data.steps || []).filter(function(s) { return s.manual; }).length;
+                var stepsSummary = document.createElement('div');
+                stepsSummary.style.cssText = 'margin-top:0.5rem;font-size:0.72rem;color:#666;';
+                stepsSummary.textContent = stepsTotal + ' \u6B65\u9AA4 | ' + stepsReady + ' \u5C31\u7EEA | ' + stepsManual + ' \u9700\u4EBA\u5DE5';
+                card.appendChild(stepsSummary);
+
+                cardsEl.appendChild(card);
+
+                // 编译服务器卡片
+                var serverCard = document.createElement('div');
+                serverCard.style.cssText = 'background:rgba(15,23,42,0.6);border:1px solid rgba(100,200,255,0.1);border-radius:8px;padding:1rem;';
+                var sIcon = document.createElement('div');
+                sIcon.style.cssText = 'font-size:1.3rem;margin-bottom:0.4rem;';
+                sIcon.textContent = '\u{1F5A5}';
+                serverCard.appendChild(sIcon);
+                var sTitle = document.createElement('div');
+                sTitle.style.cssText = 'font-weight:600;color:#aaa;font-size:0.85rem;margin-bottom:0.2rem;';
+                sTitle.textContent = '\u7F16\u8BD1\u670D\u52A1\u5668';
+                serverCard.appendChild(sTitle);
+                var sDesc = document.createElement('div');
+                sDesc.style.cssText = 'font-size:0.75rem;color:#666;';
+                sDesc.textContent = data.project_path || '.';
+                serverCard.appendChild(sDesc);
+
+                // Docker 状态
+                var dockerCheck = (envData.checks || []).find(function(c) { return c.name === 'Docker'; });
+                var dockerLine = document.createElement('div');
+                dockerLine.style.cssText = 'margin-top:0.5rem;font-size:0.72rem;';
+                dockerLine.textContent = dockerCheck && dockerCheck.status === 'ready' ? ('\u2705 Docker: ' + (dockerCheck.version || '').substring(0, 30)) : '\u274C Docker \u672A\u5B89\u88C5';
+                dockerLine.style.color = dockerCheck && dockerCheck.status === 'ready' ? '#22c55e' : '#ef4444';
+                serverCard.appendChild(dockerLine);
+
+                cardsEl.appendChild(serverCard);
+
+                // ★ 渲染右侧目标详情
                 var targetEl = document.getElementById('deployGuideTarget');
                 targetEl.textContent = '';
-                var t = data.target;
 
                 var iconLine = document.createElement('div');
                 iconLine.style.cssText = 'font-size:1.5rem;margin-bottom:0.5rem;';
@@ -2282,82 +2332,6 @@
             }
         }
 
-        async function refreshDeployEnv() {
-            var list = document.getElementById('deployEnvList');
-            list.textContent = '';
-            var loading = document.createElement('div');
-            loading.style.cssText = 'color:#888;padding:1rem;text-align:center;';
-            loading.textContent = '\u68C0\u6D4B\u4E2D...';
-            list.appendChild(loading);
-
-            try {
-                var resp = await fetch(API_BASE + '/deploy/environment');
-                if (!resp.ok) throw new Error('API error');
-                var data = await resp.json();
-                list.textContent = '';
-
-                // 摘要
-                var summary = document.createElement('div');
-                summary.style.cssText = 'padding:0.5rem 1rem;display:flex;gap:1rem;font-size:0.8rem;margin-bottom:0.5rem;';
-                var readySpan = document.createElement('span');
-                readySpan.style.color = '#22c55e';
-                readySpan.textContent = '\u2705 \u5C31\u7EEA: ' + data.ready;
-                var missingSpan = document.createElement('span');
-                missingSpan.style.color = data.missing > 0 ? '#ef4444' : '#888';
-                missingSpan.textContent = (data.missing > 0 ? '\u274C' : '\u2705') + ' \u7F3A\u5931: ' + data.missing;
-                summary.appendChild(readySpan);
-                summary.appendChild(missingSpan);
-                if (data.manual_required > 0) {
-                    var manualSpan = document.createElement('span');
-                    manualSpan.style.color = '#f59e0b';
-                    manualSpan.textContent = '\u{1F6A7} \u9700\u4EBA\u5DE5\u51C6\u5907: ' + data.manual_required;
-                    summary.appendChild(manualSpan);
-                }
-                list.appendChild(summary);
-
-                // 每项检查
-                (data.checks || []).forEach(function(c) {
-                    var item = document.createElement('div');
-                    item.style.cssText = 'padding:0.5rem 1rem;border-bottom:1px solid rgba(100,200,255,0.05);display:flex;align-items:flex-start;gap:0.5rem;';
-
-                    var icon = document.createElement('span');
-                    icon.style.cssText = 'flex-shrink:0;font-size:0.9rem;';
-                    icon.textContent = c.status === 'ready' ? '\u2705' : '\u274C';
-
-                    var content = document.createElement('div');
-                    content.style.cssText = 'flex:1;min-width:0;';
-
-                    var title = document.createElement('div');
-                    title.style.cssText = 'font-weight:600;color:' + (c.status === 'ready' ? '#c9d1d9' : '#ef4444') + ';';
-                    title.textContent = c.name;
-                    content.appendChild(title);
-
-                    var desc = document.createElement('div');
-                    desc.style.cssText = 'font-size:0.75rem;color:#666;';
-                    desc.textContent = c.description + (c.version ? ' \u2014 ' + c.version : '');
-                    content.appendChild(desc);
-
-                    if (c.status === 'missing' && c.install_hint) {
-                        var hint = document.createElement('div');
-                        hint.style.cssText = 'margin-top:0.3rem;padding:0.4rem 0.6rem;background:rgba(239,68,68,0.1);border-left:3px solid #ef4444;border-radius:3px;font-size:0.72rem;color:#f59e0b;font-family:monospace;white-space:pre-wrap;';
-                        hint.textContent = '\u{1F4A1} ' + c.install_hint;
-                        content.appendChild(hint);
-                    }
-
-                    item.appendChild(icon);
-                    item.appendChild(content);
-                    list.appendChild(item);
-                });
-
-            } catch (e) {
-                list.textContent = '';
-                var err = document.createElement('div');
-                err.style.cssText = 'color:#ef4444;padding:1rem;text-align:center;';
-                err.textContent = '\u68C0\u6D4B\u5931\u8D25: ' + e;
-                list.appendChild(err);
-            }
-        }
-
         async function refreshDeployData() {
             try {
                 const resp = await fetch(`${API_BASE}/deploy/status`);
@@ -2428,12 +2402,7 @@
         }
 
         // ---- 抽拉面板开关 ----
-        function toggleDeployDrawer() {
-            const drawer = document.getElementById('deployDrawer');
-            const toggle = drawer.querySelector('.deploy-drawer-toggle');
-            drawer.classList.toggle('open');
-            toggle.textContent = drawer.classList.contains('open') ? '\u25B6' : '\u25C0';
-        }
+        function toggleDeployDrawer() { /* removed - deploy uses two-panel layout now */ }
 
         function toggleCodeDrawer() {
             const drawer = document.getElementById('codeDrawer');
@@ -2495,6 +2464,7 @@
 
         function renderDeployAgents(agents) {
             const tbody = document.getElementById('deployAgentBody');
+            if (!tbody) return;
             tbody.textContent = '';
             if (!agents || agents.length === 0) {
                 const tr = document.createElement('tr');
