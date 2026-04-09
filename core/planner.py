@@ -251,6 +251,7 @@ JSON 数组，每个元素:
         # ★ 根据项目状态选择系统 prompt
         project_state = project_context.get("project_state", {}) if project_context else {}
         is_existing_project = project_state.get("has_source_code") or project_state.get("has_docs")
+        logger.info(f"Planner: project_state={project_state}, is_existing={is_existing_project}")
 
         if is_existing_project:
             # 已有项目 → 使用续接模式的 prompt（不包含固化文档步骤）
@@ -308,8 +309,9 @@ JSON 数组，每个元素:
             response = await self._llm.chat(messages)
         subtasks = self._parse_plan(response)
 
-        # 验证计划是否包含必要的文档步骤
-        subtasks = self._ensure_doc_steps(subtasks, description)
+        # 验证计划是否包含必要的文档步骤（仅空项目时）
+        if not is_existing_project:
+            subtasks = self._ensure_doc_steps(subtasks, description)
 
         plan = TaskPlan(
             task_id=task_id,
