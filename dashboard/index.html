@@ -1748,8 +1748,9 @@
                 return;
             }
 
-            // 收集所有生成文件
+            // 收集所有生成文件（用 seenRelPaths 去重）
             const allFiles = [];
+            const seenRelPaths = new Set();
             const projectPath = data.project_path || '';
 
             // 绝对路径转相对路径的辅助函数
@@ -1783,26 +1784,30 @@
                 });
                 tbody.appendChild(tr);
 
-                // 收集生成文件（绝对路径转相对路径）
+                // 收集生成文件（绝对路径转相对路径，去重）
                 if (r.generated_files) {
                     r.generated_files.forEach(f => {
-                        allFiles.push({
-                            path: f.path,
-                            rel_path: toRelPath(f.path),
-                            name: f.path.split('/').pop(),
-                            action: f.action || 'create',
-                            lines: f.lines || 0,
-                            task_id: r.id,
-                        });
+                        var relPath = toRelPath(f.path);
+                        if (!seenRelPaths.has(relPath)) {
+                            seenRelPaths.add(relPath);
+                            allFiles.push({
+                                path: f.path,
+                                rel_path: relPath,
+                                name: f.path.split('/').pop(),
+                                action: f.action || 'create',
+                                lines: f.lines || 0,
+                                task_id: r.id,
+                            });
+                        }
                     });
                 }
             });
 
-            // ★ 始终合并磁盘扫描的项目文件（去重）
+            // ★ 合并磁盘扫描的项目文件（去重）
             if (data.project_files && data.project_files.length > 0) {
-                const existingRelPaths = new Set(allFiles.map(f => f.rel_path));
                 data.project_files.forEach(f => {
-                    if (!existingRelPaths.has(f.path)) {
+                    if (!seenRelPaths.has(f.path)) {
+                        seenRelPaths.add(f.path);
                         allFiles.push({
                             path: f.abs_path,
                             rel_path: f.path,
