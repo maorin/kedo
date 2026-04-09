@@ -86,7 +86,7 @@ class AgentLoop:
 
         self.max_retries = self.config.get("max_retries", 3)
         self.auto_fix_enabled = self.config.get("auto_fix", True)
-        self.review_gate_enabled = self.config.get("review_gate", True)
+        self.review_gate_enabled = self.config.get("review_gate", False)
         self.min_eval_score = self.config.get("min_eval_score", 70)
         self.max_iterations = self.config.get("max_iterations", 5)
         self.auto_discussion = self.config.get("auto_discussion", True)  # AI自动选方案 vs 等人工
