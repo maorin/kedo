@@ -19,6 +19,8 @@ from api.schemas import (
     DiscussionInputRequest,
     DiscussionResponse,
     PauseResumeResponse,
+    ResumeCheckpointRequest,
+    ResumeCheckpointResponse,
     ReviewRequest,
     SelectCandidateRequest,
     TaskStatus,
@@ -144,6 +146,38 @@ async def resume_task(task_id: str):
         status=TaskStatus.IN_PROGRESS,
         message="Task resumed.",
     )
+
+
+@router.post("/tasks/{task_id}/resume-checkpoint", response_model=ResumeCheckpointResponse)
+async def resume_from_checkpoint(task_id: str, req: ResumeCheckpointRequest = ResumeCheckpointRequest()):
+    """从检查点恢复任务执行（支持跨会话续接）"""
+    # 检查 checkpoint 是否存在
+    checkpoint = await _state_manager.load_checkpoint(task_id)
+    if not checkpoint:
+        raise HTTPException(404, f"No checkpoint found for task {task_id}")
+
+    try:
+        await _agent_loop.resume_from_checkpoint(
+            task_id=task_id,
+            additional_context=req.additional_context,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Failed to resume: {e}")
+
+    return ResumeCheckpointResponse(
+        task_id=task_id,
+        status=TaskStatus.IN_PROGRESS,
+        resumed_from_step=checkpoint.current_step_index + 1,
+        total_steps=len(checkpoint.plan.subtasks) if checkpoint.plan else 0,
+        message=f"Resumed from step {checkpoint.current_step_index + 1}"
+                + (f", context: {req.additional_context[:50]}" if req.additional_context else ""),
+    )
+
+
+@router.get("/tasks/resumable")
+async def list_resumable_tasks():
+    """列出所有可续接的历史任务（有 checkpoint 的失败/暂停任务）"""
+    return _state_manager.find_resumable_tasks()
 
 
 @router.post("/tasks/{task_id}/review")

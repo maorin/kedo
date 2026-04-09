@@ -483,6 +483,12 @@ class KedoREPL:
             if user_input.startswith("/"):
                 self._handle_command(user_input)
             else:
+                # 检测续接意图
+                if self._detect_continuation(user_input):
+                    matched_task = self._find_resumable_task(user_input)
+                    if matched_task:
+                        self._prompt_and_resume(matched_task, user_input)
+                        continue
                 # 自然语言输入 → 创建开发任务
                 self._create_task(user_input)
 
@@ -515,6 +521,8 @@ class KedoREPL:
             "/login": self._cmd_login,
             "/l": self._cmd_login,
             "/config": self._cmd_config,
+            "/continue": self._cmd_continue,
+            "/cont": self._cmd_continue,
             "/clear": self._cmd_clear,
             "/quit": self._cmd_quit,
             "/q": self._cmd_quit,
@@ -539,7 +547,8 @@ class KedoREPL:
             ("/status, /s", "查看当前任务状态"),
             ("/flow, /f", "显示流程图（实时状态）"),
             ("/pause", "暂停当前任务"),
-            ("/resume", "恢复执行"),
+            ("/resume", "恢复暂停的任务"),
+            ("/continue, /cont", "从检查点续接历史任务"),
             ("/review, /r", "查看待审查的候选版本"),
             ("/approve [反馈]", "批准当前候选版本"),
             ("/reject [反馈]", "驳回并给出反馈"),
@@ -554,7 +563,7 @@ class KedoREPL:
         for cmd, desc in cmds:
             print(f"  {ACCENT}{cmd:<24}{C.RESET} {desc}")
         print()
-        print(f"  {MUTED}直接输入自然语言即可创建开发任务{C.RESET}")
+        print(f"  {MUTED}直接输入自然语言即可创建开发任务（含\"继续\"等关键词时自动检测续接）{C.RESET}")
         print()
 
     def _cmd_status(self, _=""):
@@ -936,6 +945,166 @@ class KedoREPL:
 
     def _cmd_quit(self, _=""):
         self._shutdown()
+
+    # ─── 续接检测 & 恢复 ──────────────────────────────────────
+
+    # 续接意图关键词（中英文）
+    _CONTINUE_KEYWORDS = [
+        "继续", "接着", "上次", "之前的", "按之前", "接着做", "继续做",
+        "重新来", "再试", "上一个", "刚才的", "恢复之前",
+        "continue", "resume", "previous", "last time", "pick up",
+    ]
+
+    def _detect_continuation(self, text: str) -> bool:
+        """检测用户输入是否包含续接意图"""
+        text_lower = text.lower()
+        return any(kw in text_lower for kw in self._CONTINUE_KEYWORDS)
+
+    def _find_resumable_task(self, description: str) -> Optional[dict]:
+        """查找与描述最匹配的可续接任务"""
+        # 先尝试关键词匹配
+        data = self._api_get("/tasks/resumable")
+        if not data or not isinstance(data, list) or len(data) == 0:
+            return None
+
+        # 提取用户输入中的关键词做匹配
+        import re
+        stop_words = {"的", "了", "在", "是", "我", "有", "和", "就", "不", "都",
+                      "一", "上", "也", "很", "到", "说", "要", "去", "你", "会",
+                      "吧", "被", "还", "等", "能", "做", "再", "之前", "按", "继续",
+                      "接着", "重新", "上次", "写一个", "一个",
+                      "continue", "resume", "previous", "last", "before"}
+        words = set(re.findall(r'[\u4e00-\u9fff]+|[a-zA-Z]+', description.lower()))
+        keywords = words - stop_words
+
+        best_match = None
+        best_score = 0
+
+        for task in data:
+            task_words = set(re.findall(r'[\u4e00-\u9fff]+|[a-zA-Z]+', task["description"].lower()))
+            overlap = len(keywords & task_words)
+            for kw in keywords:
+                if len(kw) >= 2 and kw in task["description"].lower():
+                    overlap += 1
+            if overlap > best_score:
+                best_score = overlap
+                best_match = task
+
+        # 如果没有关键词匹配，返回最近的可续接任务
+        if best_match is None and len(data) > 0:
+            best_match = data[0]  # 已按时间倒序
+
+        return best_match
+
+    def _prompt_and_resume(self, task: dict, user_input: str):
+        """提示用户确认并恢复历史任务"""
+        task_id = task["task_id"]
+        desc = task["description"]
+        status = task.get("status", "?")
+        progress = task.get("progress_percent", 0)
+
+        print()
+        self._safe_print(f"  {ACCENT}检测到续接意图，找到历史任务:{C.RESET}")
+        self._safe_print(f"  {HIGHLIGHT}[{task_id}]{C.RESET} {desc}")
+        self._safe_print(f"  {MUTED}状态: {status}  进度: {progress:.0f}%{C.RESET}")
+        print()
+
+        try:
+            confirm = input(f"  {ACCENT}是否续接该任务? [Y/n]: {C.RESET}").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            self._safe_print(f"\n  {MUTED}已取消{C.RESET}")
+            return
+
+        if confirm in ("n", "no"):
+            self._safe_print(f"  {MUTED}已跳过续接，创建新任务...{C.RESET}")
+            self._create_task(user_input)
+            return
+
+        self._resume_from_checkpoint(task_id, user_input)
+
+    def _resume_from_checkpoint(self, task_id: str, additional_context: str = ""):
+        """通过 API 触发 checkpoint 恢复"""
+        self._safe_print(f"  {BRAND}⟳ 正在从检查点恢复任务 [{task_id}]...{C.RESET}")
+
+        # 重置 UI 状态
+        self.current_task_id = task_id
+        self._sb["task_id"] = task_id
+        self._sb["status"] = "resuming"
+        self._sb["step"] = "恢复中"
+        self._sb["progress"] = 0
+        self._sb["iteration"] = 0
+
+        # 重置流程图
+        for key in self.flow_state:
+            self.flow_state[key] = "pending"
+        self.flow_state["需求输入"] = "success"
+
+        data = self._api_post(f"/tasks/{task_id}/resume-checkpoint", {
+            "additional_context": additional_context,
+        })
+
+        if data and data.get("task_id"):
+            resumed_step = data.get("resumed_from_step", 0)
+            total = data.get("total_steps", 0)
+            self._safe_print(f"  {SUCCESS}✓ 已恢复{C.RESET}  从步骤 {resumed_step}/{total} 继续")
+            self._sb["status"] = "in_progress"
+        else:
+            err = data.get("error", "未知错误") if data else "服务无响应"
+            self._safe_print(f"  {ERROR}✗ 恢复失败: {err}{C.RESET}")
+            self._sb["status"] = "failed"
+
+    def _cmd_continue(self, arg=""):
+        """从检查点续接历史任务"""
+        # 如果指定了 task_id
+        if arg.strip():
+            task_id = arg.strip()
+            self._resume_from_checkpoint(task_id)
+            return
+
+        # 否则列出可续接的任务供选择
+        data = self._api_get("/tasks/resumable")
+        if not data or not isinstance(data, list) or len(data) == 0:
+            self._safe_print(f"  {MUTED}没有找到可续接的历史任务{C.RESET}")
+            self._safe_print(f"  {MUTED}(需要有 checkpoint 的失败/暂停任务){C.RESET}")
+            return
+
+        print()
+        self._safe_print(f"  {HIGHLIGHT}{C.BOLD}可续接的历史任务{C.RESET}  ({len(data)} 个)")
+        print(divider())
+
+        for i, task in enumerate(data[:10], 1):
+            status = task.get("status", "?")
+            progress = task.get("progress_percent", 0)
+            color = WARN if status == "paused" else ERROR
+            desc = task.get("description", "")
+            if len(desc) > 60:
+                desc = desc[:57] + "..."
+            self._safe_print(f"  {ACCENT}{C.BOLD}{i}{C.RESET}  [{task['task_id']}]  {color}{status}{C.RESET}  {progress:.0f}%  {desc}")
+
+        print()
+        try:
+            choice = input(f"  {ACCENT}选择任务 (编号或 task_id, 直接回车选最近的): {C.RESET}").strip()
+        except (KeyboardInterrupt, EOFError):
+            self._safe_print(f"\n  {MUTED}已取消{C.RESET}")
+            return
+
+        # 解析选择
+        if not choice:
+            selected = data[0]
+        elif choice.isdigit() and 1 <= int(choice) <= len(data):
+            selected = data[int(choice) - 1]
+        else:
+            # 当作 task_id
+            self._resume_from_checkpoint(choice)
+            return
+
+        # 可选补充说明
+        try:
+            ctx = input(f"  {ACCENT}补充说明 (可选, 直接回车跳过): {C.RESET}").strip()
+        except (KeyboardInterrupt, EOFError):
+            ctx = ""
+
+        self._resume_from_checkpoint(selected["task_id"], ctx)
 
     # ─── 任务创建 ────────────────────────────────────────────
 

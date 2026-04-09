@@ -362,6 +362,20 @@ class PauseResumeResponse(BaseModel):
     message: str
 
 
+class ResumeCheckpointRequest(BaseModel):
+    """从检查点恢复任务的请求"""
+    additional_context: str = ""   # 用户的补充说明
+
+
+class ResumeCheckpointResponse(BaseModel):
+    """从检查点恢复任务的响应"""
+    task_id: str
+    status: TaskStatus
+    resumed_from_step: int = 0
+    total_steps: int = 0
+    message: str
+
+
 class AgentEvent(BaseModel):
     """实时推送事件"""
     event_type: EventType

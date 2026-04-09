@@ -115,8 +115,14 @@ class AgentLoop:
 
         logger.info(f"Agent Loop started for task {task_id}")
 
-    async def resume_from_checkpoint(self, task_id: str):
-        """从检查点恢复执行"""
+    async def resume_from_checkpoint(self, task_id: str, additional_context: str = ""):
+        """
+        从检查点恢复执行
+
+        Args:
+            task_id: 要恢复的任务 ID
+            additional_context: 用户的补充说明（如"我修改了XX，请继续"）
+        """
         checkpoint = await self.state.load_checkpoint(task_id)
         if not checkpoint:
             raise ValueError(f"No checkpoint found for task {task_id}")
@@ -124,14 +130,34 @@ class AgentLoop:
         # 恢复记忆
         self.memory.restore(checkpoint.memory_snapshot)
 
-        # 恢复暂停状态
-        await self.state.resume_task(task_id)
+        # 如果用户有补充说明，注入到记忆中
+        if additional_context:
+            self.memory.add("user_continuation_context", additional_context)
+
+        # 确保任务有 pause_event（跨会话恢复时可能没有）
+        if task_id not in self.state._pause_events:
+            self.state._pause_events[task_id] = asyncio.Event()
+            self.state._pause_events[task_id].set()
+
+        # 确保任务状态可恢复
+        if task_id in self.state._tasks:
+            await self.state.update_status(task_id, TaskStatus.IN_PROGRESS)
+        else:
+            # 跨会话恢复：任务可能只有索引没有完整状态
+            task_desc = checkpoint.plan.subtasks[0].description if checkpoint.plan and checkpoint.plan.subtasks else ""
+            await self.state.create_task(task_id, task_desc)
+            await self.state.update_status(task_id, TaskStatus.IN_PROGRESS)
+
+        self._review_queues.setdefault(task_id, asyncio.Queue())
 
         # 从检查点位置继续执行
         loop_task = asyncio.create_task(
             self._run_loop_from_checkpoint(task_id, checkpoint)
         )
         self._running_tasks[task_id] = loop_task
+
+        logger.info(f"Agent Loop resumed from checkpoint for task {task_id}"
+                     + (f" with context: {additional_context[:80]}" if additional_context else ""))
 
     async def submit_review(
         self,
