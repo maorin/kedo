@@ -160,6 +160,7 @@ class Planner:
         task_id: str,
         description: str,
         project_context: Optional[dict] = None,
+        on_token=None,
     ) -> TaskPlan:
         """
         根据需求描述生成执行计划
@@ -204,8 +205,19 @@ class Planner:
             ),
         })
 
-        # 调用 LLM
-        response = await self._llm.chat(messages)
+        # 调用 LLM（优先流式，支持 token 回调；失败时回退到非流式）
+        if on_token and hasattr(self._llm, 'stream_chat'):
+            try:
+                chunks = []
+                async for token in self._llm.stream_chat(messages):
+                    chunks.append(token)
+                    await on_token(token)
+                response = "".join(chunks)
+            except Exception as e:
+                logger.warning(f"Stream call failed ({e}), falling back to non-stream")
+                response = await self._llm.chat(messages)
+        else:
+            response = await self._llm.chat(messages)
         subtasks = self._parse_plan(response)
 
         # 验证计划是否包含必要的文档步骤

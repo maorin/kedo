@@ -86,7 +86,7 @@ class TestRunnerTool(BaseTool):
         pkg_json = p / "package.json"
         if pkg_json.exists():
             try:
-                pkg = json.loads(pkg_json.read_text())
+                pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
                 scripts = pkg.get("scripts", {})
                 if "test" in scripts:
                     return "npm test"

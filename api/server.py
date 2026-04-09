@@ -544,7 +544,7 @@ class KimiClient(BaseLLMClient):
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            "User-Agent": "kedo/0.1.0",
+            "User-Agent": "claude-code/0.1.0",
         }
         timeout = httpx.Timeout(
             connect=self.CONNECT_TIMEOUT,
@@ -570,8 +570,8 @@ class KimiClient(BaseLLMClient):
                     line = line.strip()
                     if not line:
                         continue
-                    if line.startswith("data: "):
-                        data_str = line[6:].strip()
+                    if line.startswith("data:"):
+                        data_str = line[5:].strip()
                         if data_str == "[DONE]":
                             break
                         try:
@@ -631,9 +631,9 @@ class KimiClient(BaseLLMClient):
                     if len(raw_lines_sample) < 5:
                         raw_lines_sample.append(line[:200])
 
-                    # 标准 SSE: "data: {...}"
-                    if line.startswith("data: "):
-                        data_str = line[6:].strip()
+                    # 标准 SSE: "data: {...}" 或 "data:{...}"（Kimi 无空格）
+                    if line.startswith("data:"):
+                        data_str = line[5:].strip()
                         if data_str == "[DONE]":
                             break
                         try:
@@ -674,7 +674,8 @@ class KimiClient(BaseLLMClient):
         兼容多种格式：
         - OpenAI 标准: choices[0].delta.content
         - 某些 API:   choices[0].message.content
-        - Kimi Code:   choices[0].delta.content 或 text 字段
+        - Kimi Code 2.5: choices[0].delta.reasoning_content (思考) + delta.content (正文)
+          reasoning_content 是模型的思考过程，跳过；只提取 content 正文。
         """
         choices = chunk.get("choices", [])
         if not choices:
@@ -682,8 +683,14 @@ class KimiClient(BaseLLMClient):
         choice = choices[0]
         # 标准 delta 格式
         delta = choice.get("delta", {})
-        if delta and "content" in delta:
-            return delta["content"] or ""
+        if delta:
+            # Kimi Code 2.5: 跳过 reasoning_content（思考过程），只取 content
+            content = delta.get("content")
+            if content:
+                return content
+            # 如果只有 reasoning_content 而没有 content，跳过（返回空）
+            if "reasoning_content" in delta:
+                return ""
         # message 格式（某些非标准实现）
         message = choice.get("message", {})
         if message and "content" in message:

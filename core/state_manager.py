@@ -175,7 +175,7 @@ class StateManager:
 
         # 持久化到磁盘
         cp_path = self.storage_path / f"{checkpoint.task_id}_checkpoint.json"
-        cp_path.write_text(checkpoint.model_dump_json(indent=2))
+        cp_path.write_text(checkpoint.model_dump_json(indent=2), encoding="utf-8")
         self._append_log(checkpoint.task_id, f"Checkpoint saved at step {checkpoint.current_step_index}")
 
     async def load_checkpoint(self, task_id: str) -> Optional[AgentCheckpoint]:
@@ -185,7 +185,7 @@ class StateManager:
 
         cp_path = self.storage_path / f"{task_id}_checkpoint.json"
         if cp_path.exists():
-            data = json.loads(cp_path.read_text())
+            data = json.loads(cp_path.read_text(encoding="utf-8"))
             cp = AgentCheckpoint(**data)
             self._checkpoints[task_id] = cp
             return cp

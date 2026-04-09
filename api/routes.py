@@ -51,10 +51,14 @@ def set_dependencies(agent_loop, state_manager, create_llm_client_fn=None, proje
 async def create_task(req: CreateTaskRequest):
     """创建新的开发任务"""
     task_id = str(uuid.uuid4())[:8]
+    # 如果请求没指定 project_path（或为默认 "."），使用 server 配置的项目路径
+    project_path = req.project_path
+    if project_path == ".":
+        project_path = _project_path
     await _agent_loop.start_task(
         task_id=task_id,
         description=req.description,
-        project_path=req.project_path,
+        project_path=project_path,
     )
     return CreateTaskResponse(
         task_id=task_id,
@@ -76,6 +80,44 @@ async def get_task(task_id: str):
     if not status:
         raise HTTPException(404, f"Task {task_id} not found")
     return status
+
+
+# ============================================================
+# 项目管理 API
+# ============================================================
+
+@router.post("/project/clean")
+async def clean_project():
+    """清空项目：删除生成的文件和任务状态"""
+    import shutil
+    project = Path(_project_path)
+
+    # 删除生成的 docs 目录
+    docs_dir = project / "docs"
+    if docs_dir.exists():
+        shutil.rmtree(docs_dir)
+
+    # 删除生成的代码文件（排除 .kedo 和 .git）
+    for item in project.iterdir():
+        if item.name in ('.kedo', '.git', '.gitignore', '.venv', 'node_modules'):
+            continue
+        if item.is_file():
+            item.unlink()
+        elif item.is_dir():
+            shutil.rmtree(item)
+
+    # 清空状态
+    state_dir = project / ".kedo" / "state"
+    if state_dir.exists():
+        for f in state_dir.iterdir():
+            if f.suffix == '.json':
+                f.unlink()
+
+    # 重置内存中的任务状态
+    _state_manager._tasks.clear()
+    _state_manager._checkpoints.clear()
+
+    return {"status": "ok", "message": "Project cleaned"}
 
 
 # ============================================================

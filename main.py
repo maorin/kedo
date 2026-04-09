@@ -28,7 +28,7 @@ def load_config(config_path: str = "config.yaml") -> dict:
     """加载配置文件"""
     path = Path(config_path)
     if path.exists():
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
     logger.warning(f"Config file not found: {config_path}, using defaults")
     return {}

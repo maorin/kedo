@@ -213,7 +213,7 @@
             cursor: pointer;
             transition: all 0.3s;
             font-size: 0.85rem;
-            max-height: 72px;
+            max-height: 110px;
             overflow: hidden;
         }
 
@@ -236,6 +236,47 @@
         .task-item-status {
             font-size: 0.78rem;
             color: #888;
+        }
+
+        .task-item-actions {
+            display: flex;
+            gap: 0.4rem;
+            margin-top: 0.4rem;
+        }
+
+        .task-action-btn {
+            padding: 0.2rem 0.5rem;
+            font-size: 0.7rem;
+            font-weight: 600;
+            border: 1px solid;
+            border-radius: 3px;
+            cursor: pointer;
+            transition: all 0.2s;
+            background: transparent;
+        }
+
+        .task-action-btn.pause {
+            color: #f59e0b;
+            border-color: rgba(245, 158, 11, 0.4);
+        }
+        .task-action-btn.pause:hover {
+            background: rgba(245, 158, 11, 0.15);
+        }
+
+        .task-action-btn.resume {
+            color: #22c55e;
+            border-color: rgba(34, 197, 94, 0.4);
+        }
+        .task-action-btn.resume:hover {
+            background: rgba(34, 197, 94, 0.15);
+        }
+
+        .task-action-btn.stop {
+            color: #ef4444;
+            border-color: rgba(239, 68, 68, 0.4);
+        }
+        .task-action-btn.stop:hover {
+            background: rgba(239, 68, 68, 0.15);
         }
 
         .center-content {
@@ -264,11 +305,29 @@
 
         .right-panel {
             width: 350px;
+            min-width: 250px;
+            max-width: 900px;
             background: rgba(15, 23, 42, 0.8);
             border-left: 1px solid rgba(100, 200, 255, 0.1);
             display: flex;
             flex-direction: column;
             overflow: hidden;
+            position: relative;
+        }
+
+        .resize-handle {
+            position: absolute;
+            left: -3px;
+            top: 0;
+            width: 6px;
+            height: 100%;
+            cursor: col-resize;
+            z-index: 10;
+            background: transparent;
+        }
+        .resize-handle:hover,
+        .resize-handle.active {
+            background: rgba(0, 217, 255, 0.3);
         }
 
         .panel-tabs {
@@ -328,6 +387,57 @@
             font-weight: 600;
             margin-right: 0.4rem;
         }
+
+        /* Console (LLM streaming output) */
+        .console-wrap {
+            font-family: 'Menlo', 'Consolas', 'DejaVu Sans Mono', monospace;
+            font-size: 0.78rem;
+            line-height: 1.5;
+            background: #0d1117;
+            color: #c9d1d9;
+            padding: 0.75rem;
+            border-radius: 4px;
+            height: 100%;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .console-phase {
+            display: block;
+            color: #58a6ff;
+            font-weight: 700;
+            margin-top: 0.6rem;
+            padding: 0.3rem 0;
+            border-bottom: 1px solid rgba(88,166,255,0.2);
+        }
+        .console-phase:first-child { margin-top: 0; }
+        .console-tool {
+            display: block;
+            color: #f0883e;
+            font-weight: 600;
+            margin-top: 0.4rem;
+        }
+        .console-token { color: #c9d1d9; }
+        .console-done {
+            display: block;
+            color: #3fb950;
+            font-weight: 600;
+            margin-top: 0.2rem;
+        }
+        .console-error {
+            display: block;
+            color: #f85149;
+            font-weight: 600;
+        }
+        .console-cursor {
+            display: inline-block;
+            width: 7px;
+            height: 14px;
+            background: #58a6ff;
+            animation: blink 1s step-end infinite;
+            vertical-align: text-bottom;
+        }
+        @keyframes blink { 50% { opacity: 0; } }
 
         .candidate-version {
             padding: 1rem;
@@ -910,6 +1020,9 @@
                             <input type="text" class="task-input" id="taskInput" placeholder="输入任务描述...">
                             <button class="task-button" id="createTaskBtn">创建</button>
                         </div>
+                        <div style="margin-top: 0.5rem; text-align: right;">
+                            <button class="task-action-btn stop" style="font-size: 0.72rem; padding: 0.25rem 0.6rem;" onclick="clearProject()">清空项目</button>
+                        </div>
                     </div>
                     <div class="sidebar-section" style="flex: 1; display: flex; flex-direction: column; padding: 0;">
                         <div style="padding: 1rem; border-bottom: 1px solid rgba(100, 200, 255, 0.1);">
@@ -925,13 +1038,18 @@
                     </div>
                 </div>
 
-                <div class="right-panel">
+                <div class="right-panel" id="rightPanel">
+                    <div class="resize-handle" id="resizeHandle"></div>
                     <div class="panel-tabs">
-                        <div class="panel-tab active" data-tab="logs">日志</div>
+                        <div class="panel-tab active" data-tab="console">控制台</div>
+                        <div class="panel-tab" data-tab="logs">日志</div>
                         <div class="panel-tab" data-tab="review">审查</div>
                         <div class="panel-tab" data-tab="discussion">讨论</div>
                     </div>
-                    <div class="panel-content active" id="logs-panel">
+                    <div class="panel-content active" id="console-panel">
+                        <div class="console-wrap" id="consoleOutput"><span class="console-phase">Waiting for task...</span></div>
+                    </div>
+                    <div class="panel-content" id="logs-panel">
                         <div id="logsList"></div>
                     </div>
                     <div class="panel-content" id="review-panel">
@@ -1394,6 +1512,7 @@
             connectionStatus: document.getElementById('connectionStatus'),
             connectionText: document.getElementById('connectionText'),
             logsList: document.getElementById('logsList'),
+            consoleOutput: document.getElementById('consoleOutput'),
             candidatesList: document.getElementById('candidatesList'),
             discussionContent: document.getElementById('discussionContent'),
             footerStatus: document.getElementById('footerStatus'),
@@ -2572,7 +2691,81 @@
                     renderFlowchart();
                     addLog('SDD 更新', 'SDD 文档修改完成，重新进入流程', 'success');
                     break;
+                case 'llm_request':
+                    consoleAppendPhase(data.phase || 'LLM', data.prompt_summary || '', data.model || '');
+                    break;
+                case 'llm_response':
+                    consoleAppendDone(data.phase || 'LLM', data.summary || '');
+                    break;
+                case 'llm_token':
+                    consoleAppendToken(data.token || '');
+                    break;
+                case 'tool_execute':
+                    consoleAppendTool(data.step || '', data.tool_type || '', data.description || '');
+                    break;
             }
+        }
+
+        // ============================================================
+        // Console — real-time LLM streaming display
+        // ============================================================
+        function consoleAppendPhase(phase, summary, model) {
+            const el = dom.consoleOutput;
+            removeCursor();
+            const span = document.createElement('span');
+            span.className = 'console-phase';
+            const modelTag = model ? ` [${model}]` : '';
+            span.textContent = `>>> ${phase}${modelTag}: ${summary}`;
+            el.appendChild(span);
+            addCursor();
+            scrollConsole();
+        }
+
+        function consoleAppendToken(token) {
+            const el = dom.consoleOutput;
+            removeCursor();
+            const span = document.createElement('span');
+            span.className = 'console-token';
+            span.textContent = token;
+            el.appendChild(span);
+            addCursor();
+            scrollConsole();
+        }
+
+        function consoleAppendDone(phase, summary) {
+            const el = dom.consoleOutput;
+            removeCursor();
+            const span = document.createElement('span');
+            span.className = 'console-done';
+            span.textContent = `<<< ${phase} done` + (summary ? `: ${summary.substring(0, 120)}` : '');
+            el.appendChild(span);
+            scrollConsole();
+        }
+
+        function consoleAppendTool(step, toolType, description) {
+            const el = dom.consoleOutput;
+            removeCursor();
+            const span = document.createElement('span');
+            span.className = 'console-tool';
+            span.textContent = `[${toolType}] ${step}: ${description}`;
+            el.appendChild(span);
+            addCursor();
+            scrollConsole();
+        }
+
+        function removeCursor() {
+            const cur = dom.consoleOutput.querySelector('.console-cursor');
+            if (cur) cur.remove();
+        }
+
+        function addCursor() {
+            const cur = document.createElement('span');
+            cur.className = 'console-cursor';
+            dom.consoleOutput.appendChild(cur);
+        }
+
+        function scrollConsole() {
+            dom.consoleOutput.scrollTop = dom.consoleOutput.scrollHeight;
         }
 
         // ============================================================
@@ -2584,7 +2777,7 @@
                 const response = await fetch(`${API_BASE}/tasks`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ description, project_path: '/workspace' })
+                    body: JSON.stringify({ description })
                 });
                 if (response.ok) {
                     const data = await response.json();
@@ -2658,6 +2851,57 @@
             } catch (e) { console.error('Failed to reject:', e); }
         }
 
+        async function pauseTask(taskId) {
+            try {
+                const r = await fetch(`${API_BASE}/tasks/${taskId}/pause`, { method: 'POST' });
+                if (r.ok) { addLog('任务暂停', `任务 ${taskId} 已暂停`, 'warning'); getTasks(); }
+            } catch (e) { addLog('错误', '暂停失败: ' + e, 'error'); }
+        }
+
+        async function resumeTask(taskId) {
+            try {
+                const r = await fetch(`${API_BASE}/tasks/${taskId}/resume`, { method: 'POST' });
+                if (r.ok) { addLog('任务恢复', `任务 ${taskId} 已恢复`, 'success'); getTasks(); }
+            } catch (e) { addLog('错误', '恢复失败: ' + e, 'error'); }
+        }
+
+        async function stopTask(taskId) {
+            if (!confirm('确定停止此任务？')) return;
+            try {
+                const r = await fetch(`${API_BASE}/tasks/${taskId}/pause`, { method: 'POST' });
+                if (r.ok) {
+                    const task = appState.tasks.find(t => t.id === taskId);
+                    if (task) task.status = 'stopped';
+                    renderTaskList();
+                    addLog('任务停止', `任务 ${taskId} 已停止`, 'error');
+                }
+            } catch (e) { addLog('错误', '停止失败: ' + e, 'error'); }
+        }
+
+        async function clearProject() {
+            if (!confirm('确定清空项目？将删除所有生成的文件和任务状态。')) return;
+            try {
+                const r = await fetch(`${API_BASE}/project/clean`, { method: 'POST' });
+                if (r.ok) {
+                    appState.tasks = [];
+                    appState.logs = [];
+                    appState.candidates = [];
+                    appState.discussion = null;
+                    dom.consoleOutput.textContent = '';
+                    Object.keys(appState.nodeStatus).forEach(k => appState.nodeStatus[k] = NODE_STATUS.PENDING);
+                    renderTaskList();
+                    renderLogs();
+                    renderFlowchart();
+                    renderCandidates();
+                    renderDiscussion();
+                    updateTaskCount();
+                    addLog('项目清空', '所有生成文件和状态已清空', 'success');
+                } else {
+                    addLog('错误', '清空失败', 'error');
+                }
+            } catch (e) { addLog('错误', '清空失败: ' + e, 'error'); }
+        }
+
         function simulateTaskCreation(description) {
             const taskId = 'task_' + Date.now();
             const task = { id: taskId, description, status: 'running', created_at: new Date().toISOString() };
@@ -2716,7 +2960,44 @@
             appState.tasks.forEach(task => {
                 const el = document.createElement('div');
                 el.className = `task-item ${task.id === appState.currentTaskId ? 'active' : ''}`;
-                el.innerHTML = `<div class="task-item-title">${task.description}</div><div class="task-item-status">状态: ${task.status}</div>`;
+
+                const titleDiv = document.createElement('div');
+                titleDiv.className = 'task-item-title';
+                titleDiv.textContent = task.description;
+                el.appendChild(titleDiv);
+
+                const statusDiv = document.createElement('div');
+                statusDiv.className = 'task-item-status';
+                statusDiv.textContent = '\u72B6\u6001: ' + task.status;
+                el.appendChild(statusDiv);
+
+                const isRunning = ['pending', 'planning', 'in_progress'].includes(task.status);
+                const isPaused = task.status === 'paused';
+                if (isRunning || isPaused) {
+                    const actionsDiv = document.createElement('div');
+                    actionsDiv.className = 'task-item-actions';
+                    if (isRunning) {
+                        const pauseBtn = document.createElement('button');
+                        pauseBtn.className = 'task-action-btn pause';
+                        pauseBtn.textContent = '\u6682\u505C';
+                        pauseBtn.addEventListener('click', (e) => { e.stopPropagation(); pauseTask(task.id); });
+                        actionsDiv.appendChild(pauseBtn);
+                    }
+                    if (isPaused) {
+                        const resumeBtn = document.createElement('button');
+                        resumeBtn.className = 'task-action-btn resume';
+                        resumeBtn.textContent = '\u6062\u590D';
+                        resumeBtn.addEventListener('click', (e) => { e.stopPropagation(); resumeTask(task.id); });
+                        actionsDiv.appendChild(resumeBtn);
+                    }
+                    const stopBtn = document.createElement('button');
+                    stopBtn.className = 'task-action-btn stop';
+                    stopBtn.textContent = '\u505C\u6B62';
+                    stopBtn.addEventListener('click', (e) => { e.stopPropagation(); stopTask(task.id); });
+                    actionsDiv.appendChild(stopBtn);
+                    el.appendChild(actionsDiv);
+                }
+
                 el.addEventListener('click', () => {
                     appState.currentTaskId = task.id;
                     renderTaskList();
@@ -2838,6 +3119,34 @@
         dom.createTaskBtn.addEventListener('click', () => createTask(dom.taskInput.value));
         dom.taskInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') createTask(dom.taskInput.value); });
         dom.panelTabs.forEach(tab => { tab.addEventListener('click', () => switchTab(tab.dataset.tab)); });
+
+        // Right panel resize
+        (function initResize() {
+            const handle = document.getElementById('resizeHandle');
+            const panel = document.getElementById('rightPanel');
+            let startX, startW;
+            handle.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                startX = e.clientX;
+                startW = panel.offsetWidth;
+                handle.classList.add('active');
+                document.body.style.cursor = 'col-resize';
+                document.body.style.userSelect = 'none';
+                function onMove(e) {
+                    const newW = startW - (e.clientX - startX);
+                    panel.style.width = Math.max(250, Math.min(900, newW)) + 'px';
+                }
+                function onUp() {
+                    handle.classList.remove('active');
+                    document.body.style.cursor = '';
+                    document.body.style.userSelect = '';
+                    document.removeEventListener('mousemove', onMove);
+                    document.removeEventListener('mouseup', onUp);
+                }
+                document.addEventListener('mousemove', onMove);
+                document.addEventListener('mouseup', onUp);
+            });
+        })();
 
         // ============================================================
         // Init

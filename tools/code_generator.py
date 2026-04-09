@@ -109,7 +109,7 @@ class CodeGeneratorTool(BaseTool):
             else:
                 target = target.resolve()
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(generated_code)
+            target.write_text(generated_code, encoding="utf-8")
 
             # 生成 diff
             diff = self._generate_diff(existing_content, generated_code, file_path)

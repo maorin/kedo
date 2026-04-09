@@ -83,7 +83,7 @@ def load_config(config_path: str = None) -> dict:
 
     for p in paths_to_try:
         if p and Path(p).exists():
-            with open(p) as f:
+            with open(p, encoding="utf-8") as f:
                 config = yaml.safe_load(f) or {}
             break
 

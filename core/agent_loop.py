@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from pathlib import Path
 from typing import Any, Optional
 
 from api.schemas import (
@@ -188,7 +189,9 @@ class AgentLoop:
             await self._emit(task_id, EventType.LLM_REQUEST,
                              phase="planning", prompt_summary=f"需求: {description[:100]}",
                              model=self._get_model_name())
-            plan = await self.planner.create_plan(task_id, description, project_context)
+            async def _on_plan_token(token):
+                await self._emit(task_id, EventType.LLM_TOKEN, token=token, phase="planning")
+            plan = await self.planner.create_plan(task_id, description, project_context, on_token=_on_plan_token)
             # 输出计划详情
             plan_detail = " → ".join(s.title for s in plan.subtasks)
             await self._emit(task_id, EventType.LLM_RESPONSE,
@@ -474,6 +477,13 @@ class AgentLoop:
             file_name = self._infer_file_name(subtask, project_path)
             # file_name 始终为相对路径，拼接到 project_path 下
             file_path = str(Path(project_path) / file_name)
+            # 注入 token 回调以便流式推送到前端
+            task_id = self._find_task_id_for_subtask(subtask)
+            code_gen_tool = self.tools.get("code_generate")
+            if code_gen_tool:
+                async def _on_code_token(token):
+                    await self._emit(task_id, EventType.LLM_TOKEN, token=token, phase="code_generate")
+                code_gen_tool._on_token = _on_code_token
             return await self.tools.execute(
                 "code_generate",
                 instruction=subtask.description,
@@ -518,11 +528,14 @@ class AgentLoop:
             task_id = self._find_task_id_for_subtask(subtask)
             task_data = self.state._tasks.get(task_id, {})
             description = task_data.get("description", subtask.description)
+            async def _on_eval_token(token):
+                await self._emit(task_id, EventType.LLM_TOKEN, token=token, phase="evaluate")
             try:
                 report = await self.evaluator.evaluate(
                     original_requirement=description,
                     code_changes=existing_changes,
                     project_path=project_path,
+                    on_token=_on_eval_token,
                 )
                 return ToolResult(
                     success=report.score >= self.min_eval_score,
@@ -557,14 +570,19 @@ class AgentLoop:
         返回的始终是相对于 project_path 的相对路径，避免绝对路径被重复拼接。
         """
         import re
-        from pathlib import Path
 
         desc = subtask.description.lower()
 
         # 如果描述中明确提到了文件名 (xxx.py, xxx.js 等)
-        file_match = re.search(r'[\w/\\-]+\.\w{1,5}', subtask.description)
+        # 使用 ASCII 字符集避免匹配中文等 Unicode 字符
+        file_match = re.search(r'[a-zA-Z0-9_/\\.-]+\.[a-zA-Z0-9]{1,5}', subtask.description)
         if file_match:
             matched = file_match.group(0)
+            # 清理前导的 ./
+            while matched.startswith('./'):
+                matched = matched[2:]
+            # 统一路径分隔符（兼容 Windows 反斜杠出现在描述中的情况）
+            matched = matched.replace('\\', '/')
             # 如果匹配到的是绝对路径，转成相对于 project_path 的相对路径
             matched_path = Path(matched)
             if matched_path.is_absolute():
@@ -596,7 +614,6 @@ class AgentLoop:
 
     def _infer_build_command(self, project_path: str, description: str) -> str:
         """根据项目类型智能推断构建命令"""
-        from pathlib import Path
         p = Path(project_path)
 
         # Python 项目 — 语法检查

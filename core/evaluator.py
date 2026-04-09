@@ -78,6 +78,7 @@ class Evaluator:
         code_changes: list[CodeChange],
         test_results: Optional[TestResult] = None,
         project_path: str = ".",
+        on_token=None,
     ) -> EvalReport:
         """
         多维度评估代码变更
@@ -89,7 +90,8 @@ class Evaluator:
 
         # Step 2: LLM 多维度评估（结合静态检查结果）
         llm_report = await self._llm_evaluate(
-            original_requirement, code_changes, test_results, static_checks
+            original_requirement, code_changes, test_results, static_checks,
+            on_token=on_token,
         )
 
         # Step 3: 合并为最终报告
@@ -254,6 +256,7 @@ class Evaluator:
         code_changes: list[CodeChange],
         test_results: Optional[TestResult],
         static_checks: dict,
+        on_token=None,
     ) -> dict:
         """调用 LLM 进行多维度评估"""
         # 构建代码变更摘要
@@ -322,7 +325,18 @@ class Evaluator:
             },
         ]
 
-        response = await self._llm.chat(messages)
+        if on_token and hasattr(self._llm, 'stream_chat'):
+            try:
+                chunks = []
+                async for token in self._llm.stream_chat(messages):
+                    chunks.append(token)
+                    await on_token(token)
+                response = "".join(chunks)
+            except Exception as e:
+                logger.warning(f"Stream eval failed ({e}), falling back to non-stream")
+                response = await self._llm.chat(messages)
+        else:
+            response = await self._llm.chat(messages)
         return self._parse_llm_report(response)
 
     def _parse_llm_report(self, response: str) -> dict:
