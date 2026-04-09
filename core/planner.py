@@ -400,8 +400,16 @@ class Planner:
             ),
         })
 
-        if on_token:
-            response = await self._llm.chat_stream(messages, on_token=on_token)
+        if on_token and hasattr(self._llm, 'stream_chat'):
+            try:
+                chunks = []
+                async for token in self._llm.stream_chat(messages):
+                    chunks.append(token)
+                    await on_token(token)
+                response = "".join(chunks)
+            except Exception as e:
+                logger.warning(f"Stream call failed ({e}), falling back to non-stream")
+                response = await self._llm.chat(messages)
         else:
             response = await self._llm.chat(messages)
 
