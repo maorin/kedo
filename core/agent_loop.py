@@ -128,7 +128,7 @@ class AgentLoop:
         # 恢复记忆
         self.memory.restore(checkpoint.memory_snapshot)
         if additional_context:
-            self.memory.add("user_continuation_context", additional_context)
+            self.memory.add_message("user", f"[续接补充] {additional_context}")
 
         # 确保任务有 pause_event
         if task_id not in self.state._pause_events:

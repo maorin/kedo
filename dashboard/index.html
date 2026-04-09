@@ -462,6 +462,41 @@
         .version-details { font-size: 0.8rem; color: #888; margin: 0.5rem 0; }
         .version-actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
 
+        /* ====== 续接确认弹窗 ====== */
+        .modal-overlay {
+            display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+            z-index: 9999; align-items: center; justify-content: center;
+        }
+        .modal-overlay.show { display: flex; }
+        .modal-box {
+            background: #1a1a2e; border: 1px solid rgba(0,217,255,0.3); border-radius: 12px;
+            padding: 1.5rem 2rem; max-width: 480px; width: 90%; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+            animation: modalIn 0.2s ease;
+        }
+        @keyframes modalIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+        .modal-title { font-size: 1rem; font-weight: 600; color: #00d9ff; margin-bottom: 1rem; }
+        .modal-task-card {
+            background: rgba(15,23,42,0.8); border-left: 3px solid #00d9ff; border-radius: 6px;
+            padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.85rem;
+        }
+        .modal-task-id { color: #58a6ff; font-family: monospace; font-size: 0.8rem; }
+        .modal-task-desc { color: #c9d1d9; margin: 0.3rem 0; }
+        .modal-task-meta { color: #666; font-size: 0.75rem; }
+        .modal-hint { color: #888; font-size: 0.78rem; margin-bottom: 1.2rem; line-height: 1.5; }
+        .modal-actions { display: flex; gap: 0.75rem; justify-content: flex-end; }
+        .modal-btn {
+            padding: 0.5rem 1.2rem; border: none; border-radius: 6px; font-size: 0.85rem;
+            font-weight: 600; cursor: pointer; transition: all 0.2s;
+        }
+        .modal-btn-primary {
+            background: linear-gradient(135deg, #0099cc, #00d9ff); color: white;
+        }
+        .modal-btn-primary:hover { box-shadow: 0 4px 12px rgba(0,217,255,0.3); }
+        .modal-btn-secondary {
+            background: rgba(100,200,255,0.1); color: #aaa; border: 1px solid rgba(100,200,255,0.2);
+        }
+        .modal-btn-secondary:hover { background: rgba(100,200,255,0.15); color: #ccc; }
+
         .discussion-item {
             padding: 0.75rem; margin-bottom: 0.5rem;
             background: rgba(30, 41, 59, 0.5); border-left: 3px solid #f59e0b; border-radius: 4px; font-size: 0.85rem;
@@ -3010,6 +3045,29 @@
             return CONTINUE_KEYWORDS.some(function(kw) { return lower.indexOf(kw) !== -1; });
         }
 
+        function showContinueModal(task) {
+            return new Promise(function(resolve) {
+                var overlay = document.getElementById('continueModal');
+                document.getElementById('modalTaskId').textContent = '[' + task.task_id + ']';
+                document.getElementById('modalTaskDesc').textContent = task.description;
+                document.getElementById('modalTaskMeta').textContent =
+                    '\u72B6\u6001: ' + task.status + '  \u8FDB\u5EA6: ' + (task.progress_percent || 0).toFixed(0) + '%'
+                    + (task.current_step ? '  \u5F53\u524D: ' + task.current_step : '');
+                overlay.classList.add('show');
+
+                function cleanup() {
+                    overlay.classList.remove('show');
+                    document.getElementById('modalConfirmBtn').removeEventListener('click', onConfirm);
+                    document.getElementById('modalCancelBtn').removeEventListener('click', onCancel);
+                }
+                function onConfirm() { cleanup(); resolve(true); }
+                function onCancel() { cleanup(); resolve(false); }
+
+                document.getElementById('modalConfirmBtn').addEventListener('click', onConfirm);
+                document.getElementById('modalCancelBtn').addEventListener('click', onCancel);
+            });
+        }
+
         async function createTask(description) {
             if (!description.trim()) return;
 
@@ -3020,17 +3078,10 @@
                     if (resumableResp.ok) {
                         const resumable = await resumableResp.json();
                         if (resumable && resumable.length > 0) {
-                            // 找到可续接任务，提示用户
                             const task = resumable[0];
-                            const taskDesc = task.description.length > 50 ? task.description.substring(0, 47) + '...' : task.description;
-                            const confirmed = confirm(
-                                '检测到续接意图，找到历史任务:\n\n'
-                                + '[' + task.task_id + '] ' + taskDesc + '\n'
-                                + '状态: ' + task.status + '  进度: ' + (task.progress_percent || 0).toFixed(0) + '%\n\n'
-                                + '点击「确定」续接该任务（智能续接：只补缺失功能）\n'
-                                + '点击「取消」创建新任务'
-                            );
-                            if (confirmed) {
+                            // 显示自定义弹窗
+                            const userChoice = await showContinueModal(task);
+                            if (userChoice) {
                                 await resumeFromCheckpoint(task.task_id, description);
                                 dom.taskInput.value = '';
                                 return;
@@ -3405,5 +3456,22 @@
         init();
 
     </script>
+
+    <!-- 续接确认弹窗 -->
+    <div class="modal-overlay" id="continueModal">
+        <div class="modal-box">
+            <div class="modal-title">检测到续接意图</div>
+            <div class="modal-task-card">
+                <div class="modal-task-id" id="modalTaskId"></div>
+                <div class="modal-task-desc" id="modalTaskDesc"></div>
+                <div class="modal-task-meta" id="modalTaskMeta"></div>
+            </div>
+            <div class="modal-hint">智能续接：扫描项目现状，只补充缺失功能，不重新生成已有文件。</div>
+            <div class="modal-actions">
+                <button class="modal-btn modal-btn-secondary" id="modalCancelBtn">创建新任务</button>
+                <button class="modal-btn modal-btn-primary" id="modalConfirmBtn">续接该任务</button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
