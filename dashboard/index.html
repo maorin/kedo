@@ -4159,7 +4159,9 @@
             });
         }
 
+        var _planRenderSeq = 0;  // 防止并发渲染冲突
         async function renderPlanSubtasks(taskId) {
+            var seq = ++_planRenderSeq;
             var listEl = document.getElementById('planSubtaskList');
             var progressEl = document.getElementById('planProgress');
             listEl.textContent = '';
@@ -4177,6 +4179,7 @@
             try {
                 var resp = await fetch(API_BASE + '/tasks/' + taskId);
                 if (!resp.ok) return;
+                if (seq !== _planRenderSeq) return;  // 已被新的渲染覆盖
                 var data = await resp.json();
 
                 var plan = data.plan;
