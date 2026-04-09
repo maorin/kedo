@@ -551,12 +551,18 @@ class Planner:
         # 转换为 SubTask 对象
         subtasks = []
         for i, raw in enumerate(raw_tasks):
+            # dependencies 可能是整数或字符串，统一转为字符串
+            raw_deps = raw.get("dependencies", [])
+            deps = [str(d) if not isinstance(d, str) else d for d in raw_deps]
+            # 如果 LLM 返回纯数字（如 [1, 2]），转为 subtask_N 格式
+            deps = [f"subtask_{d}" if d.isdigit() else d for d in deps]
+
             subtask = SubTask(
                 id=f"subtask_{i}",
                 title=raw.get("title", f"Step {i+1}"),
                 description=raw.get("description", ""),
                 step_type=StepType(raw.get("step_type", "code_generate")),
-                dependencies=raw.get("dependencies", []),
+                dependencies=deps,
             )
             subtasks.append(subtask)
 
