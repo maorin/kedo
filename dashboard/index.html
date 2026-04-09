@@ -1090,15 +1090,15 @@
                         </tbody>
                     </table>
                 </div>
-                <!-- 生成文件列表 & 代码预览 -->
-                <div style="display:flex;gap:1rem;margin-top:1rem;min-height:300px;" id="codeFilesWrap">
-                    <div style="width:260px;flex-shrink:0;background:var(--bg-tertiary,#1a1a2e);border-radius:8px;padding:0.75rem;overflow-y:auto;max-height:500px;">
-                        <div class="monitor-table-title" style="margin-bottom:0.5rem;">生成文件列表</div>
-                        <div id="codeFileList" style="font-size:0.85rem;">
-                            <div style="color:#888;padding:1rem;text-align:center;">暂无生成文件</div>
+                <!-- 文件树 & 代码预览 -->
+                <div style="display:flex;gap:1rem;margin-top:1rem;min-height:400px;" id="codeFilesWrap">
+                    <div style="width:280px;flex-shrink:0;background:var(--bg-tertiary,#1a1a2e);border-radius:8px;padding:0.5rem;overflow-y:auto;max-height:600px;">
+                        <div class="monitor-table-title" style="margin-bottom:0.5rem;padding:0 0.25rem;">资源管理器</div>
+                        <div id="codeFileList" style="font-size:0.82rem;font-family:'Menlo','Monaco','Consolas',monospace;">
+                            <div style="color:#888;padding:1rem;text-align:center;">暂无文件</div>
                         </div>
                     </div>
-                    <div style="flex:1;background:var(--bg-tertiary,#1a1a2e);border-radius:8px;padding:0.75rem;overflow:auto;max-height:500px;">
+                    <div style="flex:1;background:var(--bg-tertiary,#1a1a2e);border-radius:8px;padding:0.75rem;overflow:auto;max-height:600px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
                             <div class="monitor-table-title" id="codePreviewTitle" style="margin:0;">选择文件查看代码</div>
                             <span id="codePreviewMeta" style="font-size:0.8rem;color:#888;"></span>
@@ -1711,43 +1711,124 @@
             if (!files || files.length === 0) {
                 const empty = document.createElement('div');
                 empty.style.cssText = 'color:#888;padding:1rem;text-align:center;';
-                empty.textContent = '暂无生成文件';
+                empty.textContent = '暂无文件';
                 list.appendChild(empty);
                 return;
             }
+
+            // 构建目录树
+            const tree = {};
             files.forEach(f => {
-                const item = document.createElement('div');
-                const displayName = f.rel_path || f.path.split('/').pop();
-                const isDisk = f.action === 'disk';
-                const actionIcon = isDisk ? '📄' : (f.action === 'create' ? '+' : '~');
-                const actionColor = isDisk ? '#58a6ff' : (f.action === 'create' ? '#3fb950' : '#d29922');
-                item.style.cssText = 'padding:0.4rem 0.6rem;cursor:pointer;border-radius:4px;display:flex;justify-content:space-between;align-items:center;';
-
-                const nameSpan = document.createElement('span');
-                const iconSpan = document.createElement('span');
-                iconSpan.style.cssText = `color:${actionColor};font-weight:bold;margin-right:4px;font-size:0.8rem;`;
-                iconSpan.textContent = actionIcon;
-                nameSpan.appendChild(iconSpan);
-                nameSpan.appendChild(document.createTextNode(displayName));
-
-                const lineSpan = document.createElement('span');
-                lineSpan.style.cssText = 'color:#888;font-size:0.75rem;';
-                lineSpan.textContent = f.lines + 'L';
-
-                item.appendChild(nameSpan);
-                item.appendChild(lineSpan);
-                item.title = f.path;
-                item.addEventListener('mouseenter', () => item.style.background = 'rgba(255,255,255,0.05)');
-                item.addEventListener('mouseleave', () => { if (!item.dataset.selected) item.style.background = ''; });
-                item.addEventListener('click', () => {
-                    // 高亮选中
-                    list.querySelectorAll('div').forEach(d => { d.style.background = ''; delete d.dataset.selected; });
-                    item.style.background = 'rgba(88,166,255,0.15)';
-                    item.dataset.selected = '1';
-                    loadCodeFileContent(f.task_id, f.path);
+                const relPath = f.rel_path || f.path;
+                const parts = relPath.split('/');
+                let node = tree;
+                parts.forEach((part, i) => {
+                    if (i === parts.length - 1) {
+                        if (!node._files) node._files = [];
+                        node._files.push({ name: part, ...f });
+                    } else {
+                        if (!node[part]) node[part] = {};
+                        node = node[part];
+                    }
                 });
-                list.appendChild(item);
             });
+
+            // 文件图标
+            function fileIcon(name) {
+                const ext = name.split('.').pop().toLowerCase();
+                const icons = {
+                    'cpp': '\u{1F537}', 'c': '\u{1F537}', 'h': '\u{1F4CE}', 'hpp': '\u{1F4CE}',
+                    'py': '\u{1F40D}', 'js': '\u{1F7E8}', 'ts': '\u{1F537}', 'jsx': '\u{269B}', 'tsx': '\u{269B}',
+                    'html': '\u{1F310}', 'css': '\u{1F3A8}', 'scss': '\u{1F3A8}',
+                    'json': '\u{1F4CB}', 'yaml': '\u{1F4CB}', 'yml': '\u{1F4CB}', 'toml': '\u{1F4CB}',
+                    'md': '\u{1F4DD}', 'txt': '\u{1F4DD}',
+                    'sh': '\u{2699}', 'bash': '\u{2699}',
+                    'sql': '\u{1F5C4}', 'xml': '\u{1F4F0}',
+                };
+                const nl = name.toLowerCase();
+                if (nl === 'makefile' || nl === 'cmakelists.txt') return '\u{2699}';
+                if (nl === 'dockerfile') return '\u{1F433}';
+                return icons[ext] || '\u{1F4C4}';
+            }
+
+            // 创建带样式的 span
+            function makeSpan(text, style) {
+                const s = document.createElement('span');
+                s.textContent = text;
+                if (style) s.style.cssText = style;
+                return s;
+            }
+
+            // 递归渲染树
+            function renderNode(node, container, depth) {
+                const dirs = Object.keys(node).filter(k => k !== '_files').sort();
+                dirs.forEach(dirName => {
+                    const dirEl = document.createElement('div');
+
+                    // 目录行
+                    const dirRow = document.createElement('div');
+                    dirRow.style.cssText = 'padding:2px 4px;cursor:pointer;border-radius:3px;display:flex;align-items:center;padding-left:' + (depth * 16 + 4) + 'px;user-select:none;';
+
+                    const arrow = makeSpan('\u25B6', 'color:#888;font-size:0.6rem;margin-right:4px;transition:transform 0.15s;display:inline-block;');
+                    const folderIcon = makeSpan('\u{1F4C2}', 'margin-right:5px;');
+                    const dirLabel = makeSpan(dirName, 'color:#e0e0e0;font-weight:500;');
+
+                    dirRow.appendChild(arrow);
+                    dirRow.appendChild(folderIcon);
+                    dirRow.appendChild(dirLabel);
+
+                    dirRow.addEventListener('mouseenter', function() { dirRow.style.background = 'rgba(255,255,255,0.04)'; });
+                    dirRow.addEventListener('mouseleave', function() { dirRow.style.background = ''; });
+
+                    // 子内容容器
+                    const childContainer = document.createElement('div');
+                    renderNode(node[dirName], childContainer, depth + 1);
+
+                    // 折叠/展开
+                    let expanded = true;
+                    arrow.style.transform = 'rotate(90deg)';
+                    dirRow.addEventListener('click', function() {
+                        expanded = !expanded;
+                        childContainer.style.display = expanded ? 'block' : 'none';
+                        arrow.style.transform = expanded ? 'rotate(90deg)' : 'rotate(0deg)';
+                        folderIcon.textContent = expanded ? '\u{1F4C2}' : '\u{1F4C1}';
+                    });
+
+                    dirEl.appendChild(dirRow);
+                    dirEl.appendChild(childContainer);
+                    container.appendChild(dirEl);
+                });
+
+                // 文件
+                const fileList = (node._files || []).sort(function(a, b) { return a.name.localeCompare(b.name); });
+                fileList.forEach(function(f) {
+                    const item = document.createElement('div');
+                    item.style.cssText = 'padding:2px 4px;cursor:pointer;border-radius:3px;display:flex;justify-content:space-between;align-items:center;padding-left:' + (depth * 16 + 20) + 'px;';
+                    item.className = 'tree-file-item';
+
+                    const nameSpan = document.createElement('span');
+                    nameSpan.style.cssText = 'display:flex;align-items:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+                    nameSpan.appendChild(makeSpan(fileIcon(f.name), 'margin-right:5px;font-size:0.8rem;'));
+                    nameSpan.appendChild(makeSpan(f.name, 'color:#c9d1d9;'));
+
+                    const metaSpan = makeSpan(f.lines ? f.lines + 'L' : '', 'color:#555;font-size:0.7rem;flex-shrink:0;margin-left:8px;');
+
+                    item.appendChild(nameSpan);
+                    item.appendChild(metaSpan);
+                    item.title = f.rel_path || f.path;
+                    item.addEventListener('mouseenter', function() { if (!item.dataset.selected) item.style.background = 'rgba(255,255,255,0.04)'; });
+                    item.addEventListener('mouseleave', function() { if (!item.dataset.selected) item.style.background = ''; });
+                    item.addEventListener('click', function() {
+                        list.querySelectorAll('.tree-file-item').forEach(function(d) { d.style.background = ''; delete d.dataset.selected; });
+                        item.style.background = 'rgba(88,166,255,0.15)';
+                        item.dataset.selected = '1';
+                        loadCodeFileContent(f.task_id, f.path);
+                    });
+                    container.appendChild(item);
+                });
+            }
+
+            renderNode(tree, list, 0);
         }
 
         async function loadCodeFileContent(taskId, filePath) {
