@@ -1054,7 +1054,10 @@
                     <!-- 左侧主内容：文件树 + 代码预览 -->
                     <div class="deploy-main" style="display:flex;flex-direction:column;">
                         <div class="monitor-header">
-                            <h2>代码监控</h2>
+                            <div>
+                                <h2 style="margin:0;">代码监控</h2>
+                                <div id="codeProjectPath" style="font-size:0.75rem;color:#666;font-family:'Menlo','Monaco','Consolas',monospace;margin-top:2px;"></div>
+                            </div>
                             <div style="display:flex;gap:0.5rem;">
                                 <button class="monitor-refresh-btn" onclick="toggleCodeDrawer()" id="codeDrawerBtn">统计 / 记录</button>
                                 <button class="monitor-refresh-btn" onclick="refreshCodeData()">刷新</button>
@@ -1643,6 +1646,10 @@
             document.getElementById('codeSuccess').textContent = data.success || 0;
             document.getElementById('codeFailed').textContent = data.failed || 0;
             document.getElementById('codeRunning').textContent = data.running || 0;
+
+            // 显示项目根目录
+            const pathEl = document.getElementById('codeProjectPath');
+            if (data.project_path) pathEl.textContent = data.project_path;
 
             const tbody = document.getElementById('codeTableBody');
             tbody.textContent = '';

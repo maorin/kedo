@@ -668,6 +668,7 @@ async def get_code_status():
         "total": total, "success": success, "failed": failed, "running": running,
         "records": records,
         "project_files": project_files,
+        "project_path": str(Path(_project_path).resolve()),
     }
 
 
