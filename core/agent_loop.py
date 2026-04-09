@@ -400,6 +400,32 @@ class AgentLoop:
                 on_token=_on_token,
             )
 
+            # ★ 强制注入不完整文档的补全步骤（不依赖 LLM 决策）
+            if incomplete_docs:
+                existing_titles = {s.title.lower() for s in plan.subtasks}
+                inject_at = 0  # 插入到计划最前面
+                for doc in incomplete_docs:
+                    doc_path = doc["path"]
+                    title = f"补全文档 {doc_path}"
+                    if title.lower() not in existing_titles and doc_path.lower() not in " ".join(existing_titles):
+                        inject_subtask = SubTask(
+                            id=f"subtask_inject_{inject_at}",
+                            title=title,
+                            description=(
+                                f"重新生成 {doc_path}（当前内容不完整: {doc['reason']}）。"
+                                f"必须生成完整内容，严格按照 kedo 文档模板结构。"
+                                f"文件路径: {doc_path}"
+                            ),
+                            step_type=StepType.CODE_GENERATE,
+                            dependencies=[],
+                        )
+                        plan.subtasks.insert(inject_at, inject_subtask)
+                        inject_at += 1
+                        logger.info(f"Injected doc regeneration step: {title}")
+                # 重新编号
+                for i, st in enumerate(plan.subtasks):
+                    st.id = f"subtask_{i}"
+
             plan_detail = " → ".join(s.title for s in plan.subtasks)
             await self._emit(task_id, EventType.LLM_RESPONSE,
                              phase="planning", summary=f"续接计划: {len(plan.subtasks)} 个子任务: {plan_detail}")
