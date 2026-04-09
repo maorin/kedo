@@ -1267,7 +1267,10 @@
                         <div style="padding:1rem 1.2rem;border-bottom:1px solid rgba(100,200,255,0.1);flex-shrink:0;">
                             <div style="display:flex;justify-content:space-between;align-items:center;">
                                 <h2 style="font-size:1.1rem;color:#e0e0e0;font-weight:600;margin:0;">部署环境</h2>
-                                <button class="monitor-refresh-btn" onclick="refreshDeployData();refreshDeployGuide();refreshDeployEnvDrawer();" style="font-size:0.72rem;padding:0.2rem 0.6rem;">刷新</button>
+                                <div style="display:flex;gap:0.4rem;">
+                                    <button class="monitor-refresh-btn" onclick="showAddTargetModal();" style="font-size:0.72rem;padding:0.2rem 0.6rem;background:rgba(0,217,255,0.15);color:#00d9ff;">+ 添加环境</button>
+                                    <button class="monitor-refresh-btn" onclick="refreshDeployTargets();" style="font-size:0.72rem;padding:0.2rem 0.6rem;">刷新</button>
+                                </div>
                             </div>
                         </div>
                         <div id="deployEnvCards" style="flex:1;overflow-y:auto;padding:0.75rem;display:flex;flex-direction:column;gap:0.75rem;min-height:0;">
@@ -1676,8 +1679,7 @@
                 dom.deployView.classList.add('active');
                 dom.deployView.style.display = 'flex';
                 refreshDeployData();
-                refreshDeployGuide();
-                refreshDeployEnvDrawer();
+                refreshDeployTargets();
             } else if (viewName === 'test') {
                 dom.testView.classList.add('active');
                 dom.testView.style.display = 'flex';
@@ -2102,128 +2104,363 @@
         }
 
         // ============================================================
-        // 部署监控
+        // 部署监控 - 部署目标管理
         // ============================================================
+
+        var _deployTargets = [];
+        var _selectedTargetId = null;
+
+        var _targetTypeIcons = {
+            'server': '\u{1F5A5}\uFE0F',
+            'switch': '\u{1F3AE}',
+            'docker': '\u{1F433}',
+            'custom': '\u{1F527}'
+        };
+        var _targetTypeLabels = {
+            'server': '\u670D\u52A1\u5668',
+            'switch': 'Switch',
+            'docker': 'Docker',
+            'custom': '\u81EA\u5B9A\u4E49'
+        };
+        var _statusColors = {
+            'unknown': '#888',
+            'checking': '#f59e0b',
+            'reachable': '#22c55e',
+            'unreachable': '#ef4444',
+            'setup_needed': '#f59e0b',
+            'ready': '#22c55e',
+            'setting_up': '#3b82f6',
+            'setup_failed': '#ef4444'
+        };
+        var _statusLabels = {
+            'unknown': '\u672A\u68C0\u6D4B',
+            'checking': '\u68C0\u6D4B\u4E2D...',
+            'reachable': '\u53EF\u8FBE',
+            'unreachable': '\u4E0D\u53EF\u8FBE',
+            'setup_needed': '\u9700\u914D\u7F6E',
+            'ready': '\u5C31\u7EEA',
+            'setting_up': '\u914D\u7F6E\u4E2D...',
+            'setup_failed': '\u914D\u7F6E\u5931\u8D25'
+        };
+
+        async function refreshDeployTargets() {
+            try {
+                var resp = await fetch(API_BASE + '/deploy/targets');
+                if (!resp.ok) throw new Error('API error');
+                _deployTargets = await resp.json();
+            } catch (e) {
+                _deployTargets = [];
+            }
+            renderDeployTargetCards();
+            // Also load guide for right panel
+            refreshDeployGuide();
+        }
+
+        function renderDeployTargetCards() {
+            var cardsEl = document.getElementById('deployEnvCards');
+            cardsEl.textContent = '';
+
+            if (_deployTargets.length === 0) {
+                var empty = document.createElement('div');
+                empty.style.cssText = 'color:#666;padding:2rem 1rem;text-align:center;font-size:0.85rem;line-height:1.6;';
+                empty.textContent = '\u6682\u65E0\u90E8\u7F72\u76EE\u6807\uFF0C\u70B9\u51FB\u201C+ \u6DFB\u52A0\u73AF\u5883\u201D\u6DFB\u52A0';
+                cardsEl.appendChild(empty);
+                return;
+            }
+
+            _deployTargets.forEach(function(t) {
+                var card = document.createElement('div');
+                var isSelected = t.id === _selectedTargetId;
+                var borderColor = isSelected ? '#00d9ff' : 'rgba(100,200,255,0.15)';
+                card.style.cssText = 'background:rgba(15,23,42,0.8);border:1px solid ' + borderColor + ';border-radius:8px;padding:0.85rem;cursor:pointer;transition:all 0.2s;';
+                card.addEventListener('mouseenter', function() { card.style.borderColor = '#00d9ff'; card.style.boxShadow = '0 4px 12px rgba(0,217,255,0.12)'; });
+                card.addEventListener('mouseleave', function() {
+                    if (t.id !== _selectedTargetId) { card.style.borderColor = 'rgba(100,200,255,0.15)'; }
+                    card.style.boxShadow = 'none';
+                });
+                card.addEventListener('click', function() {
+                    _selectedTargetId = t.id;
+                    renderDeployTargetCards();
+                    renderDeployTargetDetail(t);
+                });
+
+                // Row 1: icon + name + type badge
+                var row1 = document.createElement('div');
+                row1.style.cssText = 'display:flex;align-items:center;gap:0.5rem;margin-bottom:0.4rem;';
+                var icon = document.createElement('span');
+                icon.style.fontSize = '1.3rem';
+                icon.textContent = _targetTypeIcons[t.type] || '\u{1F4E6}';
+                row1.appendChild(icon);
+                var nameSpan = document.createElement('span');
+                nameSpan.style.cssText = 'font-weight:600;color:#e0e0e0;font-size:0.9rem;flex:1;';
+                nameSpan.textContent = t.name || '\u672A\u547D\u540D';
+                row1.appendChild(nameSpan);
+                // Delete button
+                var delBtn = document.createElement('span');
+                delBtn.style.cssText = 'font-size:0.7rem;color:#666;cursor:pointer;padding:2px 4px;';
+                delBtn.textContent = '\u2716';
+                delBtn.title = '\u5220\u9664';
+                delBtn.addEventListener('click', function(ev) {
+                    ev.stopPropagation();
+                    if (confirm('\u786E\u5B9A\u5220\u9664\u90E8\u7F72\u76EE\u6807 "' + t.name + '"\uFF1F')) {
+                        deleteDeployTarget(t.id);
+                    }
+                });
+                row1.appendChild(delBtn);
+                card.appendChild(row1);
+
+                // Row 2: IP + port
+                var row2 = document.createElement('div');
+                row2.style.cssText = 'font-size:0.75rem;color:#888;margin-bottom:0.4rem;font-family:monospace;';
+                row2.textContent = (t.user || '') + '@' + (t.ip || '???') + ':' + (t.port || 22);
+                card.appendChild(row2);
+
+                // Row 3: status badge + action buttons
+                var row3 = document.createElement('div');
+                row3.style.cssText = 'display:flex;align-items:center;gap:0.5rem;';
+                var statusBadge = document.createElement('span');
+                var sColor = _statusColors[t.status] || '#888';
+                statusBadge.style.cssText = 'font-size:0.68rem;padding:2px 8px;border-radius:10px;border:1px solid ' + sColor + ';color:' + sColor + ';';
+                statusBadge.textContent = _statusLabels[t.status] || t.status;
+                row3.appendChild(statusBadge);
+
+                var spacer = document.createElement('span');
+                spacer.style.flex = '1';
+                row3.appendChild(spacer);
+
+                // Check button
+                var checkBtn = document.createElement('button');
+                checkBtn.style.cssText = 'font-size:0.68rem;padding:2px 8px;border-radius:4px;border:1px solid rgba(100,200,255,0.2);background:rgba(100,200,255,0.05);color:#aaa;cursor:pointer;';
+                checkBtn.textContent = '\u68C0\u6D4B';
+                checkBtn.addEventListener('click', function(ev) {
+                    ev.stopPropagation();
+                    checkDeployTarget(t.id);
+                });
+                row3.appendChild(checkBtn);
+
+                // Setup button
+                var setupBtn = document.createElement('button');
+                setupBtn.style.cssText = 'font-size:0.68rem;padding:2px 8px;border-radius:4px;border:1px solid rgba(0,217,255,0.2);background:rgba(0,217,255,0.08);color:#00d9ff;cursor:pointer;';
+                setupBtn.textContent = '\u642D\u5EFA\u73AF\u5883';
+                setupBtn.addEventListener('click', function(ev) {
+                    ev.stopPropagation();
+                    setupDeployTarget(t.id);
+                });
+                row3.appendChild(setupBtn);
+
+                card.appendChild(row3);
+                cardsEl.appendChild(card);
+            });
+        }
+
+        function renderDeployTargetDetail(target) {
+            var targetEl = document.getElementById('deployGuideTarget');
+            targetEl.textContent = '';
+
+            var titleLine = document.createElement('div');
+            titleLine.style.cssText = 'font-size:1.3rem;margin-bottom:0.5rem;display:flex;align-items:center;gap:0.5rem;';
+            var iconSpan = document.createElement('span');
+            iconSpan.textContent = _targetTypeIcons[target.type] || '\u{1F4E6}';
+            titleLine.appendChild(iconSpan);
+            var nameSpan = document.createElement('span');
+            nameSpan.style.cssText = 'font-weight:600;color:#e0e0e0;';
+            nameSpan.textContent = target.name;
+            titleLine.appendChild(nameSpan);
+            var typeBadge = document.createElement('span');
+            typeBadge.style.cssText = 'font-size:0.7rem;padding:2px 8px;border-radius:10px;background:rgba(100,200,255,0.1);color:#aaa;';
+            typeBadge.textContent = _targetTypeLabels[target.type] || target.type;
+            titleLine.appendChild(typeBadge);
+            targetEl.appendChild(titleLine);
+
+            // Connection info
+            var infoDiv = document.createElement('div');
+            infoDiv.style.cssText = 'background:rgba(15,23,42,0.6);border-radius:6px;padding:0.75rem;margin-bottom:1rem;font-size:0.82rem;';
+            var fields = [
+                ['\u4E3B\u673A', target.ip || '-'],
+                ['\u7AEF\u53E3', String(target.port || 22)],
+                ['\u7528\u6237', target.user || '-'],
+                ['\u72B6\u6001', _statusLabels[target.status] || target.status],
+                ['\u6700\u540E\u68C0\u6D4B', target.last_check ? new Date(target.last_check).toLocaleString() : '\u4ECE\u672A\u68C0\u6D4B'],
+            ];
+            fields.forEach(function(f) {
+                var row = document.createElement('div');
+                row.style.cssText = 'display:flex;padding:0.2rem 0;';
+                var label = document.createElement('span');
+                label.style.cssText = 'color:#888;width:80px;flex-shrink:0;';
+                label.textContent = f[0];
+                var val = document.createElement('span');
+                val.style.cssText = 'color:#c9d1d9;font-family:monospace;';
+                val.textContent = f[1];
+                row.appendChild(label);
+                row.appendChild(val);
+                infoDiv.appendChild(row);
+            });
+            targetEl.appendChild(infoDiv);
+
+            // Setup commands
+            var cmds = target.setup_commands || [];
+            if (cmds.length > 0) {
+                var cmdTitle = document.createElement('div');
+                cmdTitle.style.cssText = 'font-weight:600;color:#aaa;font-size:0.82rem;margin-bottom:0.3rem;';
+                cmdTitle.textContent = '\u914D\u7F6E\u547D\u4EE4 (' + cmds.length + ')';
+                targetEl.appendChild(cmdTitle);
+                var cmdBlock = document.createElement('pre');
+                cmdBlock.style.cssText = 'background:rgba(0,0,0,0.3);border-radius:6px;padding:0.6rem;font-size:0.75rem;color:#aaa;line-height:1.6;overflow-x:auto;white-space:pre;margin-bottom:1rem;';
+                cmdBlock.textContent = cmds.join('\n');
+                targetEl.appendChild(cmdBlock);
+            }
+        }
+
+        async function checkDeployTarget(targetId) {
+            // Update card to show checking
+            var t = _deployTargets.find(function(x) { return x.id === targetId; });
+            if (t) { t.status = 'checking'; renderDeployTargetCards(); }
+
+            try {
+                var resp = await fetch(API_BASE + '/deploy/targets/' + targetId + '/check', { method: 'POST' });
+                var result = await resp.json();
+                // Refresh targets
+                await refreshDeployTargets();
+                // Show result in right panel
+                var stepsEl = document.getElementById('deployGuideSteps');
+                stepsEl.textContent = '';
+                var resultDiv = document.createElement('div');
+                resultDiv.style.cssText = 'padding:0.6rem;background:rgba(15,23,42,0.6);border-radius:6px;font-size:0.82rem;';
+                var lines = [
+                    ['Ping', result.ping ? '\u2705 \u6210\u529F' : '\u274C \u5931\u8D25'],
+                    ['SSH', result.ssh ? '\u2705 \u6210\u529F' : '\u274C \u5931\u8D25'],
+                    ['\u8BE6\u60C5', result.detail || '-'],
+                ];
+                lines.forEach(function(l) {
+                    var row = document.createElement('div');
+                    row.style.cssText = 'display:flex;gap:0.5rem;padding:0.2rem 0;';
+                    var label = document.createElement('span');
+                    label.style.cssText = 'color:#888;width:50px;';
+                    label.textContent = l[0];
+                    var val = document.createElement('span');
+                    val.style.color = '#c9d1d9';
+                    val.textContent = l[1];
+                    row.appendChild(label);
+                    row.appendChild(val);
+                    resultDiv.appendChild(row);
+                });
+                stepsEl.appendChild(resultDiv);
+            } catch (e) {
+                console.warn('Check failed:', e);
+                await refreshDeployTargets();
+            }
+        }
+
+        async function setupDeployTarget(targetId) {
+            var t = _deployTargets.find(function(x) { return x.id === targetId; });
+            if (t) { t.status = 'setting_up'; renderDeployTargetCards(); }
+
+            // Show log panel
+            var stepsEl = document.getElementById('deployGuideSteps');
+            stepsEl.textContent = '';
+            var logTitle = document.createElement('div');
+            logTitle.style.cssText = 'font-weight:600;color:#3b82f6;font-size:0.85rem;margin-bottom:0.5rem;';
+            logTitle.textContent = '\u6B63\u5728\u642D\u5EFA\u73AF\u5883...';
+            stepsEl.appendChild(logTitle);
+            var logArea = document.createElement('pre');
+            logArea.style.cssText = 'background:rgba(0,0,0,0.4);border-radius:6px;padding:0.75rem;font-size:0.72rem;color:#aaa;line-height:1.5;max-height:400px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;';
+            logArea.textContent = '\u8FDE\u63A5\u4E2D...\n';
+            stepsEl.appendChild(logArea);
+
+            try {
+                var resp = await fetch(API_BASE + '/deploy/targets/' + targetId + '/setup', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({}),
+                });
+                var result = await resp.json();
+
+                // Render logs
+                logArea.textContent = '';
+                (result.logs || []).forEach(function(log) {
+                    var cmdLine = '$ ' + log.command + '\n';
+                    logArea.textContent += cmdLine;
+                    if (log.stdout) logArea.textContent += log.stdout;
+                    if (log.stderr) logArea.textContent += '\u001b[stderr] ' + log.stderr;
+                    var statusMark = log.status === 'success' ? '[OK]' : '[FAILED]';
+                    logArea.textContent += statusMark + '\n\n';
+                });
+
+                // Update title
+                if (result.status === 'ready') {
+                    logTitle.textContent = '\u73AF\u5883\u642D\u5EFA\u5B8C\u6210';
+                    logTitle.style.color = '#22c55e';
+                } else {
+                    logTitle.textContent = '\u73AF\u5883\u642D\u5EFA\u5931\u8D25';
+                    logTitle.style.color = '#ef4444';
+                    if (result.message) {
+                        logArea.textContent += '\n' + result.message + '\n';
+                    }
+                }
+
+                await refreshDeployTargets();
+            } catch (e) {
+                logTitle.textContent = '\u642D\u5EFA\u8BF7\u6C42\u5931\u8D25';
+                logTitle.style.color = '#ef4444';
+                logArea.textContent += '\u8BF7\u6C42\u5F02\u5E38: ' + e.message + '\n';
+                await refreshDeployTargets();
+            }
+        }
+
+        async function deleteDeployTarget(targetId) {
+            try {
+                await fetch(API_BASE + '/deploy/targets/' + targetId, { method: 'DELETE' });
+            } catch (e) { /* ignore */ }
+            if (_selectedTargetId === targetId) { _selectedTargetId = null; }
+            await refreshDeployTargets();
+        }
+
+        // ---- Add/Edit target modal ----
+        function showAddTargetModal() {
+            document.getElementById('targetName').value = '';
+            document.getElementById('targetIP').value = '';
+            document.getElementById('targetPort').value = '22';
+            document.getElementById('targetUser').value = '';
+            document.getElementById('targetType').value = 'server';
+            document.getElementById('addTargetModal').classList.add('show');
+        }
+
+        async function submitAddTarget() {
+            var name = document.getElementById('targetName').value.trim();
+            var type = document.getElementById('targetType').value;
+            var ip = document.getElementById('targetIP').value.trim();
+            var port = parseInt(document.getElementById('targetPort').value) || 22;
+            var user = document.getElementById('targetUser').value.trim() || 'root';
+
+            if (!name || !ip) {
+                alert('\u8BF7\u586B\u5199\u540D\u79F0\u548C IP \u5730\u5740');
+                return;
+            }
+
+            try {
+                var resp = await fetch(API_BASE + '/deploy/targets', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name, type: type, ip: ip, port: port, user: user })
+                });
+                if (resp.ok) {
+                    document.getElementById('addTargetModal').classList.remove('show');
+                    addLog('\u90E8\u7F72\u76EE\u6807', '\u5DF2\u6DFB\u52A0: ' + name + ' (' + ip + ')', 'success');
+                    refreshDeployTargets();
+                }
+            } catch (e) {
+                addLog('\u9519\u8BEF', '\u6DFB\u52A0\u5931\u8D25: ' + e, 'error');
+            }
+        }
+
+        // Keep refreshDeployGuide for right panel guide content
         async function refreshDeployGuide() {
             try {
                 var guideResp = await fetch(API_BASE + '/deploy/guide');
-                var envResp = await fetch(API_BASE + '/deploy/environment');
                 if (!guideResp.ok) return;
                 var data = await guideResp.json();
-                var envData = envResp.ok ? await envResp.json() : { ready: 0, missing: 0, checks: [] };
 
-                // ★ 渲染左侧环境卡片列表
-                var cardsEl = document.getElementById('deployEnvCards');
-                cardsEl.textContent = '';
-                var t = data.target;
-
-                // 主部署环境卡片
-                var card = document.createElement('div');
-                card.style.cssText = 'background:rgba(15,23,42,0.8);border:1px solid rgba(0,217,255,0.3);border-radius:8px;padding:1rem;cursor:pointer;transition:all 0.2s;';
-                card.addEventListener('mouseenter', function() { card.style.borderColor = '#00d9ff'; card.style.boxShadow = '0 4px 12px rgba(0,217,255,0.15)'; });
-                card.addEventListener('mouseleave', function() { card.style.borderColor = 'rgba(0,217,255,0.3)'; card.style.boxShadow = 'none'; });
-
-                var cardIcon = document.createElement('div');
-                cardIcon.style.cssText = 'font-size:1.8rem;margin-bottom:0.5rem;';
-                cardIcon.textContent = t.icon || '\u{1F4E6}';
-                card.appendChild(cardIcon);
-
-                var cardTitle = document.createElement('div');
-                cardTitle.style.cssText = 'font-weight:600;color:#00d9ff;font-size:0.95rem;margin-bottom:0.3rem;';
-                cardTitle.textContent = t.platform || 'Unknown';
-                card.appendChild(cardTitle);
-
-                var cardDesc = document.createElement('div');
-                cardDesc.style.cssText = 'font-size:0.78rem;color:#888;margin-bottom:0.75rem;line-height:1.4;';
-                cardDesc.textContent = t.description || '';
-                card.appendChild(cardDesc);
-
-                // 准备进度条
-                var totalChecks = envData.ready + envData.missing;
-                var pct = totalChecks > 0 ? Math.round(envData.ready / totalChecks * 100) : 0;
-                var progressWrap = document.createElement('div');
-                progressWrap.style.cssText = 'background:rgba(255,255,255,0.05);border-radius:4px;height:6px;overflow:hidden;margin-bottom:0.4rem;';
-                var progressBar = document.createElement('div');
-                progressBar.style.cssText = 'height:100%;border-radius:4px;transition:width 0.3s;background:' + (pct === 100 ? '#22c55e' : pct > 50 ? '#f59e0b' : '#ef4444') + ';width:' + pct + '%;';
-                progressWrap.appendChild(progressBar);
-                card.appendChild(progressWrap);
-
-                var cardMeta = document.createElement('div');
-                cardMeta.style.cssText = 'display:flex;justify-content:space-between;font-size:0.72rem;';
-                var readySpan = document.createElement('span');
-                readySpan.style.color = '#22c55e';
-                readySpan.textContent = '\u2705 ' + envData.ready + ' \u5C31\u7EEA';
-                var missSpan = document.createElement('span');
-                missSpan.style.color = envData.missing > 0 ? '#ef4444' : '#22c55e';
-                missSpan.textContent = envData.missing > 0 ? ('\u274C ' + envData.missing + ' \u7F3A\u5931') : '\u5168\u90E8\u5C31\u7EEA';
-                cardMeta.appendChild(readySpan);
-                cardMeta.appendChild(missSpan);
-                card.appendChild(cardMeta);
-
-                // 步骤摘要
-                var stepsTotal = (data.steps || []).length;
-                var stepsReady = (data.steps || []).filter(function(s) { return s.status === 'ready'; }).length;
-                var stepsManual = (data.steps || []).filter(function(s) { return s.manual; }).length;
-                var stepsSummary = document.createElement('div');
-                stepsSummary.style.cssText = 'margin-top:0.5rem;font-size:0.72rem;color:#666;';
-                stepsSummary.textContent = stepsTotal + ' \u6B65\u9AA4 | ' + stepsReady + ' \u5C31\u7EEA | ' + stepsManual + ' \u9700\u4EBA\u5DE5';
-                card.appendChild(stepsSummary);
-
-                cardsEl.appendChild(card);
-
-                // 编译服务器卡片
-                var serverCard = document.createElement('div');
-                serverCard.style.cssText = 'background:rgba(15,23,42,0.6);border:1px solid rgba(100,200,255,0.1);border-radius:8px;padding:1rem;';
-                var sIcon = document.createElement('div');
-                sIcon.style.cssText = 'font-size:1.3rem;margin-bottom:0.4rem;';
-                sIcon.textContent = '\u{1F5A5}';
-                serverCard.appendChild(sIcon);
-                var sTitle = document.createElement('div');
-                sTitle.style.cssText = 'font-weight:600;color:#aaa;font-size:0.85rem;margin-bottom:0.2rem;';
-                sTitle.textContent = '\u7F16\u8BD1\u670D\u52A1\u5668';
-                serverCard.appendChild(sTitle);
-                var sDesc = document.createElement('div');
-                sDesc.style.cssText = 'font-size:0.75rem;color:#666;';
-                sDesc.textContent = data.project_path || '.';
-                serverCard.appendChild(sDesc);
-
-                // Docker 状态
-                var dockerCheck = (envData.checks || []).find(function(c) { return c.name === 'Docker'; });
-                var dockerLine = document.createElement('div');
-                dockerLine.style.cssText = 'margin-top:0.5rem;font-size:0.72rem;';
-                dockerLine.textContent = dockerCheck && dockerCheck.status === 'ready' ? ('\u2705 Docker: ' + (dockerCheck.version || '').substring(0, 30)) : '\u274C Docker \u672A\u5B89\u88C5';
-                dockerLine.style.color = dockerCheck && dockerCheck.status === 'ready' ? '#22c55e' : '#ef4444';
-                serverCard.appendChild(dockerLine);
-
-                cardsEl.appendChild(serverCard);
-
-                // ★ 渲染右侧目标详情
-                var targetEl = document.getElementById('deployGuideTarget');
-                targetEl.textContent = '';
-
-                var iconLine = document.createElement('div');
-                iconLine.style.cssText = 'font-size:1.5rem;margin-bottom:0.5rem;';
-                iconLine.textContent = (t.icon || '') + ' ' + (t.platform || '');
-                targetEl.appendChild(iconLine);
-
-                var descLine = document.createElement('div');
-                descLine.style.cssText = 'color:#aaa;margin-bottom:0.75rem;';
-                descLine.textContent = t.description || '';
-                targetEl.appendChild(descLine);
-
-                var reqTitle = document.createElement('div');
-                reqTitle.style.cssText = 'color:#f59e0b;font-weight:600;font-size:0.78rem;margin-bottom:0.3rem;';
-                reqTitle.textContent = '\u{1F6A7} \u4F60\u9700\u8981\u51C6\u5907:';
-                targetEl.appendChild(reqTitle);
-
-                (t.requirements || []).forEach(function(r) {
-                    var li = document.createElement('div');
-                    li.style.cssText = 'padding:0.2rem 0 0.2rem 1rem;color:#c9d1d9;font-size:0.8rem;';
-                    li.textContent = '\u2022 ' + r;
-                    targetEl.appendChild(li);
-                });
-
-                // 渲染分步指南
+                // Only render the right panel guide steps and env detection
                 var stepsEl = document.getElementById('deployGuideSteps');
                 stepsEl.textContent = '';
 
@@ -2231,7 +2468,6 @@
                     var stepDiv = document.createElement('div');
                     stepDiv.style.cssText = 'padding:0.6rem 0.5rem;border-bottom:1px solid rgba(100,200,255,0.05);';
 
-                    // 标题行
                     var header = document.createElement('div');
                     header.style.cssText = 'display:flex;align-items:center;gap:0.5rem;margin-bottom:0.3rem;';
 
@@ -2261,13 +2497,11 @@
 
                     stepDiv.appendChild(header);
 
-                    // 描述
                     var descDiv = document.createElement('div');
                     descDiv.style.cssText = 'font-size:0.78rem;color:#888;margin-left:32px;margin-bottom:0.3rem;';
                     descDiv.textContent = s.description;
                     stepDiv.appendChild(descDiv);
 
-                    // 备注
                     if (s.note) {
                         var noteDiv = document.createElement('div');
                         noteDiv.style.cssText = 'margin-left:32px;padding:0.3rem 0.5rem;background:rgba(239,68,68,0.1);border-left:3px solid #ef4444;border-radius:3px;font-size:0.72rem;color:#f59e0b;';
@@ -2275,7 +2509,6 @@
                         stepDiv.appendChild(noteDiv);
                     }
 
-                    // 命令块（折叠）
                     if (s.commands && s.commands.length > 0) {
                         var toggleBtn = document.createElement('div');
                         toggleBtn.style.cssText = 'margin-left:32px;margin-top:0.3rem;cursor:pointer;font-size:0.72rem;color:#58a6ff;user-select:none;';
@@ -2298,9 +2531,26 @@
                     stepsEl.appendChild(stepDiv);
                 });
 
+                // If no target selected yet, show guide overview in target panel
+                if (!_selectedTargetId) {
+                    var targetEl = document.getElementById('deployGuideTarget');
+                    targetEl.textContent = '';
+                    var t = data.target;
+                    var iconLine = document.createElement('div');
+                    iconLine.style.cssText = 'font-size:1.3rem;margin-bottom:0.5rem;';
+                    iconLine.textContent = (t.icon || '') + ' ' + (t.platform || '');
+                    targetEl.appendChild(iconLine);
+                    var descLine = document.createElement('div');
+                    descLine.style.cssText = 'color:#aaa;margin-bottom:0.75rem;font-size:0.85rem;';
+                    descLine.textContent = t.description || '';
+                    targetEl.appendChild(descLine);
+                }
             } catch (e) {
                 console.warn('Failed to load deploy guide:', e);
             }
+
+            // Also refresh env drawer
+            refreshDeployEnvDrawer();
         }
 
         async function refreshDeployEnvDrawer() {
@@ -3920,6 +4170,57 @@
         init();
 
     </script>
+
+    <!-- 添加部署环境弹窗 -->
+    <div class="modal-overlay" id="addTargetModal">
+        <div class="modal-box" style="max-width:420px;">
+            <div class="modal-title">添加部署环境</div>
+            <div style="display:flex;flex-direction:column;gap:0.75rem;">
+                <div>
+                    <div style="font-size:0.75rem;color:#888;margin-bottom:0.25rem;">环境名称</div>
+                    <input type="text" id="targetName" placeholder="如: 编译服务器" style="width:100%;padding:0.5rem;background:rgba(30,41,59,0.6);border:1px solid rgba(100,200,255,0.2);border-radius:4px;color:#e0e0e0;font-size:0.85rem;box-sizing:border-box;">
+                </div>
+                <div>
+                    <div style="font-size:0.75rem;color:#888;margin-bottom:0.25rem;">类型</div>
+                    <select id="targetType" style="width:100%;padding:0.5rem;background:rgba(30,41,59,0.6);border:1px solid rgba(100,200,255,0.2);border-radius:4px;color:#e0e0e0;font-size:0.85rem;">
+                        <option value="server">服务器 (SSH)</option>
+                        <option value="docker">Docker 主机</option>
+                        <option value="switch">Nintendo Switch</option>
+                        <option value="custom">自定义</option>
+                    </select>
+                </div>
+                <div style="display:flex;gap:0.5rem;">
+                    <div style="flex:1;">
+                        <div style="font-size:0.75rem;color:#888;margin-bottom:0.25rem;">IP 地址</div>
+                        <input type="text" id="targetIP" placeholder="192.168.1.8" style="width:100%;padding:0.5rem;background:rgba(30,41,59,0.6);border:1px solid rgba(100,200,255,0.2);border-radius:4px;color:#e0e0e0;font-size:0.85rem;box-sizing:border-box;">
+                    </div>
+                    <div style="width:80px;">
+                        <div style="font-size:0.75rem;color:#888;margin-bottom:0.25rem;">端口</div>
+                        <input type="number" id="targetPort" value="22" style="width:100%;padding:0.5rem;background:rgba(30,41,59,0.6);border:1px solid rgba(100,200,255,0.2);border-radius:4px;color:#e0e0e0;font-size:0.85rem;box-sizing:border-box;">
+                    </div>
+                </div>
+                <div>
+                    <div style="font-size:0.75rem;color:#888;margin-bottom:0.25rem;">用户名</div>
+                    <input type="text" id="targetUser" placeholder="root" style="width:100%;padding:0.5rem;background:rgba(30,41,59,0.6);border:1px solid rgba(100,200,255,0.2);border-radius:4px;color:#e0e0e0;font-size:0.85rem;box-sizing:border-box;">
+                </div>
+            </div>
+            <div class="modal-actions" style="margin-top:1rem;">
+                <button class="modal-btn modal-btn-secondary" onclick="document.getElementById('addTargetModal').classList.remove('show');">取消</button>
+                <button class="modal-btn modal-btn-primary" onclick="submitAddTarget();">添加</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 搭建环境日志弹窗 -->
+    <div class="modal-overlay" id="setupLogModal">
+        <div class="modal-box" style="max-width:600px;">
+            <div class="modal-title" id="setupLogTitle">搭建环境</div>
+            <pre id="setupLogContent" style="margin:0;padding:0.75rem;background:rgba(0,0,0,0.3);border-radius:6px;font-size:0.78rem;line-height:1.5;color:#aaa;max-height:400px;overflow:auto;white-space:pre-wrap;"></pre>
+            <div class="modal-actions" style="margin-top:1rem;">
+                <button class="modal-btn modal-btn-secondary" onclick="document.getElementById('setupLogModal').classList.remove('show');">关闭</button>
+            </div>
+        </div>
+    </div>
 
     <!-- 续接确认弹窗 -->
     <div class="modal-overlay" id="continueModal">

@@ -5,8 +5,13 @@ API 路由定义 — RESTful API + WebSocket 端点
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import os
+import re
+import subprocess
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -1414,6 +1419,316 @@ def _collect_agent_list() -> list:
                 "last_activity": "-",
             })
     return agents
+
+
+# ============================================================
+# 部署目标管理 API (deploy targets CRUD + check + setup)
+# ============================================================
+
+def _deploy_targets_path() -> Path:
+    """获取 deploy_targets.json 路径"""
+    return Path(_project_path) / ".kedo" / "deploy_targets.json"
+
+
+def _load_deploy_targets() -> list[dict]:
+    """从磁盘加载部署目标列表"""
+    fp = _deploy_targets_path()
+    if fp.exists():
+        try:
+            return json.loads(fp.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return []
+
+
+def _save_deploy_targets(targets: list[dict]):
+    """保存部署目标列表到磁盘"""
+    fp = _deploy_targets_path()
+    fp.parent.mkdir(parents=True, exist_ok=True)
+    fp.write_text(json.dumps(targets, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+@router.get("/deploy/targets")
+async def list_deploy_targets():
+    """列出所有部署目标"""
+    return _load_deploy_targets()
+
+
+@router.post("/deploy/targets")
+async def add_deploy_target(body: dict = Body(...)):
+    """添加新的部署目标"""
+    targets = _load_deploy_targets()
+    target = {
+        "id": str(uuid.uuid4())[:8],
+        "name": body.get("name", "未命名"),
+        "type": body.get("type", "server"),
+        "ip": body.get("ip", ""),
+        "port": body.get("port", 22),
+        "user": body.get("user", "root"),
+        "status": "unknown",
+        "setup_commands": body.get("setup_commands", []),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "last_check": None,
+    }
+    targets.append(target)
+    _save_deploy_targets(targets)
+    return target
+
+
+@router.put("/deploy/targets/{target_id}")
+async def update_deploy_target(target_id: str, body: dict = Body(...)):
+    """更新部署目标"""
+    targets = _load_deploy_targets()
+    for t in targets:
+        if t["id"] == target_id:
+            for key in ("name", "type", "ip", "port", "user", "setup_commands"):
+                if key in body:
+                    t[key] = body[key]
+            _save_deploy_targets(targets)
+            return t
+    raise HTTPException(404, f"Deploy target {target_id} not found")
+
+
+@router.delete("/deploy/targets/{target_id}")
+async def delete_deploy_target(target_id: str):
+    """删除部署目标"""
+    targets = _load_deploy_targets()
+    new_targets = [t for t in targets if t["id"] != target_id]
+    if len(new_targets) == len(targets):
+        raise HTTPException(404, f"Deploy target {target_id} not found")
+    _save_deploy_targets(new_targets)
+    return {"status": "ok", "message": f"Target {target_id} deleted"}
+
+
+@router.post("/deploy/targets/{target_id}/check")
+async def check_deploy_target(target_id: str):
+    """检测部署目标的可达性（ping + SSH）"""
+    targets = _load_deploy_targets()
+    target = None
+    for t in targets:
+        if t["id"] == target_id:
+            target = t
+            break
+    if not target:
+        raise HTTPException(404, f"Deploy target {target_id} not found")
+
+    ip = target.get("ip", "")
+    user = target.get("user", "root")
+    port = target.get("port", 22)
+
+    # Update status to checking
+    target["status"] = "checking"
+    target["last_check"] = datetime.now(timezone.utc).isoformat()
+    _save_deploy_targets(targets)
+
+    result = {"ping": False, "ssh": False, "detail": ""}
+
+    # Step 1: ping
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ping", "-c", "1", "-W", "2", ip,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+        result["ping"] = proc.returncode == 0
+        if not result["ping"]:
+            result["detail"] = f"Ping failed: {stderr.decode(errors='replace').strip()}"
+    except asyncio.TimeoutError:
+        result["detail"] = "Ping timeout"
+    except Exception as e:
+        result["detail"] = f"Ping error: {e}"
+
+    # Step 2: SSH test (only if ping succeeded)
+    if result["ping"]:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ssh", "-o", "ConnectTimeout=3",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "BatchMode=yes",
+                "-p", str(port),
+                f"{user}@{ip}", "echo", "ok",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=8)
+            result["ssh"] = proc.returncode == 0 and "ok" in stdout.decode(errors="replace")
+            if not result["ssh"]:
+                result["detail"] = f"SSH failed: {stderr.decode(errors='replace').strip()}"
+            else:
+                result["detail"] = "SSH connection OK"
+        except asyncio.TimeoutError:
+            result["detail"] = "SSH timeout"
+        except Exception as e:
+            result["detail"] = f"SSH error: {e}"
+
+    # Update status
+    if result["ssh"]:
+        target["status"] = "reachable"
+    elif result["ping"]:
+        target["status"] = "unreachable"
+    else:
+        target["status"] = "unreachable"
+    _save_deploy_targets(targets)
+
+    result["status"] = target["status"]
+    return result
+
+
+def _extract_setup_commands_from_doc() -> list[str]:
+    """从部署文档中提取可执行的 setup 命令"""
+    project = Path(_project_path)
+    deploy_path = project / "docs" / "deploy" / "deployment.md"
+    if not deploy_path.exists():
+        return []
+    try:
+        doc = deploy_path.read_text(encoding="utf-8")
+    except Exception:
+        return []
+
+    commands = []
+    cmd_prefixes = ("apt", "apt-get", "docker", "make", "pip", "pip3", "npm", "yarn",
+                    "curl", "wget", "git", "scp", "ssh", "dkp-pacman", "sudo",
+                    "mkdir", "chmod", "chown", "cp", "mv", "ln", "export")
+    in_code_block = False
+    for line in doc.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            if stripped and any(stripped.startswith(p) for p in cmd_prefixes):
+                commands.append(stripped)
+        else:
+            if stripped.startswith("$ "):
+                cmd = stripped[2:].strip()
+                if cmd and any(cmd.startswith(p) for p in cmd_prefixes):
+                    commands.append(cmd)
+    return commands
+
+
+@router.post("/deploy/targets/{target_id}/setup")
+async def setup_deploy_target(target_id: str, body: dict = Body(default={})):
+    """在部署目标上执行 setup 命令（通过 SSH）"""
+    targets = _load_deploy_targets()
+    target = None
+    for t in targets:
+        if t["id"] == target_id:
+            target = t
+            break
+    if not target:
+        raise HTTPException(404, f"Deploy target {target_id} not found")
+
+    ip = target.get("ip", "")
+    user = target.get("user", "root")
+    port = target.get("port", 22)
+
+    # Get commands: from body, from target, or from deploy doc
+    commands = body.get("commands") or target.get("setup_commands") or []
+    if not commands:
+        commands = _extract_setup_commands_from_doc()
+    if not commands:
+        return {"status": "error", "message": "没有可执行的 setup 命令", "logs": []}
+
+    # Update status
+    target["status"] = "setting_up"
+    _save_deploy_targets(targets)
+
+    # Publish start event
+    if _state_manager:
+        try:
+            _state_manager.event_bus.publish(
+                event_type="deploy_setup_start",
+                task_id="deploy",
+                data={"target_id": target_id, "target_name": target["name"], "commands": commands},
+            )
+        except Exception:
+            pass
+
+    logs = []
+    all_success = True
+
+    for i, cmd in enumerate(commands):
+        log_entry = {"index": i, "command": cmd, "stdout": "", "stderr": "", "returncode": -1}
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ssh", "-o", "ConnectTimeout=5",
+                "-o", "StrictHostKeyChecking=no",
+                "-p", str(port),
+                f"{user}@{ip}", cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            log_entry["stdout"] = stdout.decode(errors="replace")
+            log_entry["stderr"] = stderr.decode(errors="replace")
+            log_entry["returncode"] = proc.returncode
+
+            if proc.returncode != 0:
+                all_success = False
+                log_entry["status"] = "failed"
+            else:
+                log_entry["status"] = "success"
+        except asyncio.TimeoutError:
+            log_entry["stderr"] = "Command timed out (120s)"
+            log_entry["status"] = "timeout"
+            all_success = False
+        except Exception as e:
+            log_entry["stderr"] = str(e)
+            log_entry["status"] = "error"
+            all_success = False
+
+        logs.append(log_entry)
+
+        # Publish progress event
+        if _state_manager:
+            try:
+                _state_manager.event_bus.publish(
+                    event_type="deploy_setup_progress",
+                    task_id="deploy",
+                    data={
+                        "target_id": target_id,
+                        "index": i,
+                        "total": len(commands),
+                        "command": cmd,
+                        "status": log_entry["status"],
+                        "stdout": log_entry["stdout"][-500:],
+                        "stderr": log_entry["stderr"][-500:],
+                    },
+                )
+            except Exception:
+                pass
+
+        # Stop on failure
+        if not all_success:
+            break
+
+    # Update final status
+    target["status"] = "ready" if all_success else "setup_failed"
+    _save_deploy_targets(targets)
+
+    # Publish completion event
+    if _state_manager:
+        try:
+            _state_manager.event_bus.publish(
+                event_type="deploy_setup_complete",
+                task_id="deploy",
+                data={
+                    "target_id": target_id,
+                    "target_name": target["name"],
+                    "status": target["status"],
+                    "total_commands": len(commands),
+                    "executed": len(logs),
+                },
+            )
+        except Exception:
+            pass
+
+    return {
+        "status": target["status"],
+        "message": "环境搭建完成" if all_success else "环境搭建失败",
+        "logs": logs,
+    }
 
 
 @router.get("/test/status")
