@@ -3156,7 +3156,7 @@
                 dom.taskList.innerHTML = '<div class="no-data">暂无任务</div>';
                 return;
             }
-            appState.tasks.forEach(task => {
+            [...appState.tasks].reverse().forEach(task => {
                 const el = document.createElement('div');
                 el.className = `task-item ${task.id === appState.currentTaskId ? 'active' : ''}`;
 
