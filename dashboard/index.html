@@ -3491,11 +3491,31 @@
                         description: t.description || '未命名任务',
                         status: typeof t.status === 'string' ? t.status : (t.status?.value || t.status || 'pending'),
                         created_at: t.created_at,
+                        progress_percent: t.progress_percent || 0,
                     }));
                     renderTaskList();
                     updateTaskCount();
+                    // 异步加载每个任务的评估报告
+                    taskArray.forEach(function(t) {
+                        var taskId = t.task_id || t.id;
+                        fetchTaskEval(taskId);
+                    });
                 }
             } catch (e) { console.error('Failed to fetch tasks:', e); }
+        }
+
+        async function fetchTaskEval(taskId) {
+            try {
+                var resp = await fetch(API_BASE + '/tasks/' + taskId);
+                if (!resp.ok) return;
+                var data = await resp.json();
+                var task = appState.tasks.find(function(t) { return t.id === taskId; });
+                if (task && data.eval_report) {
+                    task.eval_report = data.eval_report;
+                    task.progress_percent = data.progress_percent || task.progress_percent;
+                    renderTaskList();
+                }
+            } catch (e) { /* ignore */ }
         }
 
         async function resumeFromCheckpoint(taskId, additionalContext) {
@@ -3642,10 +3662,91 @@
                 titleDiv.textContent = task.description;
                 el.appendChild(titleDiv);
 
-                const statusDiv = document.createElement('div');
-                statusDiv.className = 'task-item-status';
-                statusDiv.textContent = '\u72B6\u6001: ' + task.status;
-                el.appendChild(statusDiv);
+                // 状态 + 进度 + 评分
+                var statusLine = document.createElement('div');
+                statusLine.className = 'task-item-status';
+                var statusText = '\u72B6\u6001: ' + task.status;
+                if (task.progress_percent > 0) {
+                    statusText += '  \u8FDB\u5EA6: ' + Math.round(task.progress_percent) + '%';
+                }
+                if (task.eval_report && task.eval_report.score != null) {
+                    var score = task.eval_report.score;
+                    var scoreColor = score >= 70 ? '#22c55e' : score >= 50 ? '#f59e0b' : '#ef4444';
+                    statusText += '  ';
+                    statusLine.textContent = statusText;
+                    var scoreBadge = document.createElement('span');
+                    scoreBadge.style.cssText = 'font-weight:700;color:' + scoreColor + ';';
+                    scoreBadge.textContent = '\u8BC4\u5206: ' + score;
+                    statusLine.appendChild(scoreBadge);
+                } else {
+                    statusLine.textContent = statusText;
+                }
+                el.appendChild(statusLine);
+
+                // ★ 评估报告详情（选中任务时展开）
+                if (task.id === appState.currentTaskId && task.eval_report) {
+                    var evalDiv = document.createElement('div');
+                    evalDiv.style.cssText = 'margin-top:0.5rem;padding:0.5rem;background:rgba(0,0,0,0.2);border-radius:4px;font-size:0.75rem;line-height:1.5;';
+
+                    // 维度评分
+                    var dims = task.eval_report.dimensions || [];
+                    if (dims.length > 0) {
+                        dims.forEach(function(d) {
+                            var dimLine = document.createElement('div');
+                            dimLine.style.cssText = 'display:flex;justify-content:space-between;padding:1px 0;';
+                            var dimName = document.createElement('span');
+                            dimName.style.color = '#aaa';
+                            dimName.textContent = d.name || '';
+                            var dimScore = document.createElement('span');
+                            var ds = d.score || 0;
+                            dimScore.style.cssText = 'font-weight:600;color:' + (ds >= 70 ? '#22c55e' : ds >= 50 ? '#f59e0b' : '#ef4444') + ';';
+                            dimScore.textContent = ds;
+                            dimLine.appendChild(dimName);
+                            dimLine.appendChild(dimScore);
+                            evalDiv.appendChild(dimLine);
+                        });
+                    }
+
+                    // 缺失需求
+                    var missed = task.eval_report.requirements_missed || [];
+                    if (missed.length > 0) {
+                        var missTitle = document.createElement('div');
+                        missTitle.style.cssText = 'margin-top:0.4rem;color:#ef4444;font-weight:600;font-size:0.7rem;';
+                        missTitle.textContent = '\u274C \u7F3A\u5931 (' + missed.length + ')';
+                        evalDiv.appendChild(missTitle);
+                        missed.slice(0, 5).forEach(function(m) {
+                            var mLine = document.createElement('div');
+                            mLine.style.cssText = 'color:#888;padding-left:0.5rem;font-size:0.7rem;';
+                            mLine.textContent = '\u2022 ' + (m.length > 60 ? m.substring(0, 57) + '...' : m);
+                            mLine.title = m;
+                            evalDiv.appendChild(mLine);
+                        });
+                        if (missed.length > 5) {
+                            var moreSpan = document.createElement('div');
+                            moreSpan.style.cssText = 'color:#555;padding-left:0.5rem;font-size:0.68rem;';
+                            moreSpan.textContent = '... \u8FD8\u6709 ' + (missed.length - 5) + ' \u9879';
+                            evalDiv.appendChild(moreSpan);
+                        }
+                    }
+
+                    // 已满足需求
+                    var met = task.eval_report.requirements_met || [];
+                    if (met.length > 0) {
+                        var metTitle = document.createElement('div');
+                        metTitle.style.cssText = 'margin-top:0.4rem;color:#22c55e;font-weight:600;font-size:0.7rem;';
+                        metTitle.textContent = '\u2705 \u5DF2\u6EE1\u8DB3 (' + met.length + ')';
+                        evalDiv.appendChild(metTitle);
+                        met.slice(0, 3).forEach(function(m) {
+                            var mLine = document.createElement('div');
+                            mLine.style.cssText = 'color:#888;padding-left:0.5rem;font-size:0.7rem;';
+                            mLine.textContent = '\u2022 ' + (m.length > 60 ? m.substring(0, 57) + '...' : m);
+                            mLine.title = m;
+                            evalDiv.appendChild(mLine);
+                        });
+                    }
+
+                    el.appendChild(evalDiv);
+                }
 
                 const isRunning = ['pending', 'planning', 'in_progress'].includes(task.status);
                 const isPaused = task.status === 'paused';

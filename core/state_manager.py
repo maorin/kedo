@@ -205,7 +205,18 @@ class StateManager:
         if task_id not in self._tasks:
             return None
         task = self._tasks[task_id]
+        # 优先从内存取 checkpoint，没有则从磁盘加载
         checkpoint = self._checkpoints.get(task_id)
+        if not checkpoint:
+            cp_path = self.storage_path / f"{task_id}_checkpoint.json"
+            if cp_path.exists():
+                try:
+                    import json
+                    data = json.loads(cp_path.read_text(encoding="utf-8"))
+                    checkpoint = AgentCheckpoint(**data)
+                    self._checkpoints[task_id] = checkpoint
+                except Exception:
+                    pass
         return TaskStatusResponse(
             task_id=task_id,
             status=task["status"],
