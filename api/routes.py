@@ -648,14 +648,26 @@ async def get_code_status():
             len((c.content or "").splitlines()) for c in code_changes
         )
 
-        # 构建生成文件列表
+        # 构建生成文件列表（去重：同一文件只保留最后一次变更）
         generated_files = []
-        for c in code_changes:
-            generated_files.append({
-                "path": c.file_path,
-                "action": c.action,
-                "lines": len((c.content or "").splitlines()),
-            })
+        seen_paths = set()
+        for c in reversed(code_changes):  # 从后往前，保留最新的
+            # 统一路径：绝对路径转相对路径
+            fp = c.file_path
+            project = Path(_project_path).resolve()
+            try:
+                fp_resolved = Path(fp).resolve() if Path(fp).is_absolute() else (project / fp).resolve()
+                rel = str(fp_resolved.relative_to(project))
+            except (ValueError, OSError):
+                rel = fp
+            if rel not in seen_paths:
+                seen_paths.add(rel)
+                generated_files.append({
+                    "path": c.file_path,
+                    "action": c.action,
+                    "lines": len((c.content or "").splitlines()),
+                })
+        generated_files.reverse()  # 恢复原始顺序
 
         records.append({
             "id": task_id,
