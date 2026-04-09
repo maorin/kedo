@@ -411,6 +411,12 @@ class AgentLoop:
                     return result
 
                 # 失败 — 尝试自动修复
+                # evaluate 步骤失败（分数不够）不在此重试，交给外层 _handle_eval_failure_loop 处理
+                if subtask.step_type == StepType.EVALUATE:
+                    subtask.status = TaskStatus.FAILED
+                    subtask.result = {"error": result.error}
+                    return result
+
                 if self.auto_fix_enabled and attempt < subtask.max_retries - 1:
                     logger.warning(
                         f"Step '{subtask.title}' failed (attempt {attempt+1}), auto-fixing..."

@@ -78,9 +78,40 @@ class TestRunnerTool(BaseTool):
         """自动检测项目使用的测试框架"""
         p = Path(project_path)
 
-        # Python: pytest
-        if (p / "pytest.ini").exists() or (p / "pyproject.toml").exists() or (p / "tests").exists():
+        # C/C++: Makefile / CMakeLists.txt — 优先检测，避免误判为 Python
+        is_c_cpp = (
+            (p / "Makefile").exists()
+            or (p / "CMakeLists.txt").exists()
+            or any(p.glob("*.c"))
+            or any(p.glob("*.cpp"))
+            or any(p.glob("source/*.c"))
+            or any(p.glob("source/*.cpp"))
+        )
+        if is_c_cpp:
+            # 检查是否有 make test 目标
+            makefile = p / "Makefile"
+            if makefile.exists():
+                try:
+                    content = makefile.read_text(encoding="utf-8", errors="ignore")
+                    if re.search(r"^test\s*:", content, re.MULTILINE):
+                        return "make test"
+                except Exception:
+                    pass
+            # CMake 项目
+            if (p / "CMakeLists.txt").exists():
+                return "cmake --build build --target test"
+            return None  # C/C++ 项目无测试目标则跳过
+
+        # Python: pytest — 需要确认有 .py 测试文件
+        if (p / "pytest.ini").exists():
             return "python -m pytest tests/ -v"
+        if (p / "pyproject.toml").exists() or (p / "tests").exists():
+            # 确认 tests/ 下确实有 Python 测试文件
+            tests_dir = p / "tests"
+            has_py_tests = tests_dir.is_dir() and any(tests_dir.rglob("test_*.py"))
+            has_setup = (p / "pyproject.toml").exists() or (p / "setup.py").exists()
+            if has_py_tests or (has_setup and not (p / "tests").exists()):
+                return "python -m pytest tests/ -v"
 
         # Node.js: jest / vitest
         pkg_json = p / "package.json"

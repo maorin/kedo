@@ -1103,6 +1103,22 @@
                         </tbody>
                     </table>
                 </div>
+                <!-- 生成文件列表 & 代码预览 -->
+                <div style="display:flex;gap:1rem;margin-top:1rem;min-height:300px;" id="codeFilesWrap">
+                    <div style="width:260px;flex-shrink:0;background:var(--bg-tertiary,#1a1a2e);border-radius:8px;padding:0.75rem;overflow-y:auto;max-height:500px;">
+                        <div class="monitor-table-title" style="margin-bottom:0.5rem;">生成文件列表</div>
+                        <div id="codeFileList" style="font-size:0.85rem;">
+                            <div style="color:#888;padding:1rem;text-align:center;">暂无生成文件</div>
+                        </div>
+                    </div>
+                    <div style="flex:1;background:var(--bg-tertiary,#1a1a2e);border-radius:8px;padding:0.75rem;overflow:auto;max-height:500px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
+                            <div class="monitor-table-title" id="codePreviewTitle" style="margin:0;">选择文件查看代码</div>
+                            <span id="codePreviewMeta" style="font-size:0.8rem;color:#888;"></span>
+                        </div>
+                        <pre id="codePreviewContent" style="margin:0;padding:0.75rem;background:var(--bg-primary,#0d0d1a);border-radius:6px;font-size:0.82rem;line-height:1.5;overflow:auto;white-space:pre;color:#c9d1d9;min-height:200px;"><code style="color:#888;">// 点击左侧文件查看代码内容</code></pre>
+                    </div>
+                </div>
             </div>
 
             <!-- ====== 打包监控视图 ====== -->
@@ -1629,8 +1645,12 @@
                 td.textContent = '暂无代码生成记录';
                 tr.appendChild(td);
                 tbody.appendChild(tr);
+                renderCodeFileList([]);
                 return;
             }
+
+            // 收集所有生成文件
+            const allFiles = [];
             data.records.forEach(r => {
                 const tr = document.createElement('tr');
                 const cells = [
@@ -1654,7 +1674,87 @@
                     tr.appendChild(td);
                 });
                 tbody.appendChild(tr);
+
+                // 收集生成文件
+                if (r.generated_files) {
+                    r.generated_files.forEach(f => {
+                        allFiles.push({ ...f, task_id: r.id, task_name: r.task });
+                    });
+                }
             });
+
+            renderCodeFileList(allFiles);
+        }
+
+        function renderCodeFileList(files) {
+            const list = document.getElementById('codeFileList');
+            list.textContent = '';
+            if (!files || files.length === 0) {
+                const empty = document.createElement('div');
+                empty.style.cssText = 'color:#888;padding:1rem;text-align:center;';
+                empty.textContent = '暂无生成文件';
+                list.appendChild(empty);
+                return;
+            }
+            files.forEach(f => {
+                const item = document.createElement('div');
+                const fileName = f.path.split('/').pop();
+                const actionIcon = f.action === 'create' ? '+' : '~';
+                const actionColor = f.action === 'create' ? '#3fb950' : '#d29922';
+                item.style.cssText = 'padding:0.4rem 0.6rem;cursor:pointer;border-radius:4px;display:flex;justify-content:space-between;align-items:center;';
+
+                const nameSpan = document.createElement('span');
+                const iconSpan = document.createElement('span');
+                iconSpan.style.cssText = `color:${actionColor};font-weight:bold;margin-right:4px;`;
+                iconSpan.textContent = actionIcon;
+                nameSpan.appendChild(iconSpan);
+                nameSpan.appendChild(document.createTextNode(fileName));
+
+                const lineSpan = document.createElement('span');
+                lineSpan.style.cssText = 'color:#888;font-size:0.75rem;';
+                lineSpan.textContent = f.lines + 'L';
+
+                item.appendChild(nameSpan);
+                item.appendChild(lineSpan);
+                item.title = f.path;
+                item.addEventListener('mouseenter', () => item.style.background = 'rgba(255,255,255,0.05)');
+                item.addEventListener('mouseleave', () => { if (!item.dataset.selected) item.style.background = ''; });
+                item.addEventListener('click', () => {
+                    // 高亮选中
+                    list.querySelectorAll('div').forEach(d => { d.style.background = ''; delete d.dataset.selected; });
+                    item.style.background = 'rgba(88,166,255,0.15)';
+                    item.dataset.selected = '1';
+                    loadCodeFileContent(f.task_id, f.path);
+                });
+                list.appendChild(item);
+            });
+        }
+
+        async function loadCodeFileContent(taskId, filePath) {
+            const titleEl = document.getElementById('codePreviewTitle');
+            const metaEl = document.getElementById('codePreviewMeta');
+            const contentEl = document.getElementById('codePreviewContent');
+            const fileName = filePath.split('/').pop();
+            titleEl.textContent = fileName;
+            contentEl.textContent = 'Loading...';
+            metaEl.textContent = '';
+
+            try {
+                const resp = await fetch(`${API_BASE}/code/file?task_id=${encodeURIComponent(taskId)}&file_path=${encodeURIComponent(filePath)}`);
+                if (!resp.ok) throw new Error('Failed to load file');
+                const data = await resp.json();
+                metaEl.textContent = `${data.lines} lines | ${data.action}`;
+                // 用 textContent 安全展示代码，带行号
+                const lines = (data.content || '').split('\n');
+                const numbered = lines.map((line, i) => {
+                    const num = String(i + 1).padStart(4, ' ');
+                    return num + '  ' + line;
+                }).join('\n');
+                contentEl.textContent = numbered;
+            } catch (e) {
+                contentEl.textContent = 'Failed to load: ' + filePath;
+                contentEl.style.color = '#f85149';
+            }
         }
 
         // ============================================================

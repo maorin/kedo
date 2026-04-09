@@ -584,44 +584,109 @@ async def get_code_status():
     records = []
     total = success = failed = running = 0
     for t in tasks:
-        status = _state_manager.get_task_status(t.get("task_id", t.get("id", "")))
+        task_id = t.get("task_id", t.get("id", ""))
+        status = _state_manager.get_task_status(task_id)
         if not status:
             continue
-        logs = getattr(status, "logs", []) or []
-        has_code = False
-        for log in logs:
-            log_text = log if isinstance(log, str) else str(log)
-            if "code" in log_text.lower() or "coding" in log_text.lower() or "代码" in log_text:
-                has_code = True
-                break
-        if has_code or getattr(status, "current_step", "") in ("coding", "代码生成"):
-            total += 1
-            task_status_val = getattr(status, "status", None)
-            if task_status_val:
-                s = task_status_val.value if hasattr(task_status_val, "value") else str(task_status_val)
-            else:
-                s = "pending"
-            if s in ("completed", "success"):
-                success += 1
-                badge = "success"
-            elif s in ("failed", "error"):
-                failed += 1
-                badge = "failed"
-            elif s in ("in_progress", "running"):
-                running += 1
-                badge = "running"
-            else:
-                badge = "pending"
-            records.append({
-                "id": t.get("task_id", t.get("id", "")),
-                "task": t.get("description", t.get("task_id", "")),
-                "files": 0,
-                "lines": 0,
-                "status": badge,
-                "start_time": t.get("created_at", "-"),
-                "duration": "-",
+
+        # 从 checkpoint 中获取 code_changes
+        code_changes = getattr(status, "code_changes", []) or []
+        if not code_changes:
+            # 也检查 logs 判断是否有代码相关步骤
+            logs = getattr(status, "logs", []) or []
+            has_code = False
+            for log in logs:
+                log_text = log if isinstance(log, str) else str(log)
+                if "code" in log_text.lower() or "coding" in log_text.lower() or "代码" in log_text:
+                    has_code = True
+                    break
+            if not has_code and getattr(status, "current_step", "") not in ("coding", "代码生成"):
+                continue
+
+        total += 1
+        task_status_val = getattr(status, "status", None)
+        if task_status_val:
+            s = task_status_val.value if hasattr(task_status_val, "value") else str(task_status_val)
+        else:
+            s = "pending"
+        if s in ("completed", "success"):
+            success += 1
+            badge = "success"
+        elif s in ("failed", "error"):
+            failed += 1
+            badge = "failed"
+        elif s in ("in_progress", "running"):
+            running += 1
+            badge = "running"
+        else:
+            badge = "pending"
+
+        # 统计文件数和行数
+        file_count = len(code_changes)
+        line_count = sum(
+            len((c.content or "").splitlines()) for c in code_changes
+        )
+
+        # 构建生成文件列表
+        generated_files = []
+        for c in code_changes:
+            generated_files.append({
+                "path": c.file_path,
+                "action": c.action,
+                "lines": len((c.content or "").splitlines()),
             })
+
+        records.append({
+            "id": task_id,
+            "task": t.get("description", task_id),
+            "files": file_count,
+            "lines": line_count,
+            "status": badge,
+            "start_time": t.get("created_at", "-"),
+            "duration": "-",
+            "generated_files": generated_files,
+        })
     return {"total": total, "success": success, "failed": failed, "running": running, "records": records}
+
+
+@router.get("/code/file")
+async def get_code_file(task_id: str, file_path: str):
+    """获取指定任务中生成的代码文件内容"""
+    status = _state_manager.get_task_status(task_id)
+    if not status:
+        raise HTTPException(404, f"Task not found: {task_id}")
+
+    code_changes = getattr(status, "code_changes", []) or []
+    for c in code_changes:
+        if c.file_path == file_path:
+            return {
+                "file_path": c.file_path,
+                "action": c.action,
+                "content": c.content or "",
+                "diff": c.diff or "",
+                "lines": len((c.content or "").splitlines()),
+            }
+
+    # 如果 checkpoint 中没有，尝试从磁盘读取
+    from pathlib import Path as _Path
+    fp = _Path(file_path)
+    if fp.is_file():
+        try:
+            content = fp.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            try:
+                content = fp.read_text(encoding="gbk")
+            except Exception:
+                raise HTTPException(415, "Cannot read file: unsupported encoding")
+        return {
+            "file_path": file_path,
+            "action": "disk",
+            "content": content,
+            "diff": "",
+            "lines": len(content.splitlines()),
+        }
+
+    raise HTTPException(404, f"File not found: {file_path}")
 
 
 @router.get("/build/status")
