@@ -216,11 +216,49 @@ class Planner:
                 "content": f"Relevant past experiences:\n{exp_str}",
             })
 
+        # ★ 根据项目状态自动判断：从头做 vs 增量做
+        project_state = project_context.get("project_state", {}) if project_context else {}
+        state_hint = ""
+        if project_state.get("has_source_code") or project_state.get("has_docs"):
+            # 项目已有内容 → 提示 Planner 做增量而非从头
+            state_parts = []
+            if project_state.get("has_source_code"):
+                state_parts.append(f"已有 {project_state.get('source_count', 0)} 个源码文件: {', '.join(project_state.get('source_files', [])[:10])}")
+            if project_state.get("has_docs"):
+                state_parts.append(f"已有文档: {', '.join(project_state.get('doc_files', [])[:8])}")
+            if project_state.get("has_build_artifacts"):
+                state_parts.append(f"已有构建产物: {', '.join(project_state.get('artifacts', []))}")
+            elif project_state.get("has_source_code"):
+                state_parts.append("注意: 没有构建产物，需要确保构建脚本正确")
+            if not project_state.get("has_makefile") and not project_state.get("has_cmake"):
+                state_parts.append("注意: 没有构建脚本（Makefile/CMakeLists.txt），需要生成")
+            last_eval = project_state.get("last_eval")
+            if last_eval:
+                state_parts.append(f"上次评估: {last_eval.get('score', 0)}/100")
+                missed = last_eval.get("requirements_missed", [])
+                if missed:
+                    state_parts.append(f"缺失需求: {', '.join(missed[:5])}")
+                suggestions = last_eval.get("suggestions", [])
+                if suggestions:
+                    state_parts.append(f"改进建议: {', '.join(suggestions[:3])}")
+
+            state_hint = (
+                "\n\n=== 项目现状 ===\n"
+                + "\n".join(f"- {s}" for s in state_parts)
+                + "\n\n=== 重要 ===\n"
+                "根据以上项目现状和用户的需求，你需要自主判断：\n"
+                "1. 如果用户是全新需求且项目为空 → 按五步流程从头生成\n"
+                "2. 如果项目已有代码/文档且用户想继续 → 只生成缺失的部分，不重新生成已有文件\n"
+                "3. 如果用户提到构建/打包问题 → 只修复构建脚本，不重新生成所有代码\n"
+                "4. 如果用户提到某个具体功能缺失 → 只补充该功能\n"
+                "5. 如果有上次评估结果 → 优先修复评估中指出的问题\n"
+            )
+
         messages.append({
             "role": "user",
             "content": (
                 f"Task: {description}\n\n"
-                f"请严格按照 kedo 五步流程生成计划，文档结构按照固化模板生成。\n"
+                f"请根据用户需求和项目现状生成执行计划。{state_hint}\n"
                 f"Generate the execution plan as JSON."
             ),
         })

@@ -92,147 +92,6 @@ class AgentLoop:
     # 主入口
     # ==========================================================
 
-    # ==========================================================
-    # 意图分类器
-    # ==========================================================
-
-    async def classify_intent(self, user_input: str, project_path: str = ".") -> dict:
-        """
-        分析用户输入的意图，返回分类结果。
-
-        分类:
-        - new_task: 全新需求，从头创建任务
-        - continue: 续接上次任务（智能续接）
-        - fix_build: 修复构建问题
-        - fix_file: 修复/重新生成某个具体文件
-        - add_feature: 补充某个具体功能
-        - refactor: 重构代码
-        - deploy: 执行部署
-        - diagnose: 诊断问题（不执行，只分析）
-        """
-        from pathlib import Path as _Path
-        project = _Path(project_path)
-
-        # 收集项目状态摘要
-        has_tasks = bool(self.state._tasks)
-        recent_tasks = []
-        for t in list(self.state._tasks.values())[-3:]:
-            status = t["status"]
-            status_val = status.value if hasattr(status, "value") else str(status)
-            recent_tasks.append(f"[{t['task_id'][:8]}] {status_val}: {t.get('description', '')[:50]}")
-
-        has_src = any(project.rglob("*.cpp")) or any(project.rglob("*.py")) or any(project.rglob("*.js"))
-        has_build_artifacts = any(project.rglob("*.nro")) or any(project.rglob("*.elf")) or any(project.rglob("*.exe"))
-        has_makefile = (project / "Makefile").exists() or (project / "CMakeLists.txt").exists()
-        has_docs = (project / "docs").is_dir()
-
-        # 获取最近的评估结果
-        eval_summary = "无评估记录"
-        resumable = self.state.find_resumable_tasks()
-        if resumable:
-            latest_task_id = resumable[0]["task_id"]
-            cp = await self.state.load_checkpoint(latest_task_id)
-            if cp and cp.eval_report:
-                score = cp.eval_report.score
-                missed = cp.eval_report.requirements_missed[:3]
-                eval_summary = f"评分 {score}/100, 缺失: {', '.join(missed)}"
-
-        project_summary = (
-            f"项目路径: {project_path}\n"
-            f"有源码: {has_src}, 有构建产物: {has_build_artifacts}, "
-            f"有构建脚本: {has_makefile}, 有文档: {has_docs}\n"
-            f"最近任务: {'; '.join(recent_tasks) if recent_tasks else '无'}\n"
-            f"最近评估: {eval_summary}\n"
-            f"可续接任务数: {len(resumable)}"
-        )
-
-        # 用 LLM 分类
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "你是一个意图分类器。根据用户输入和项目状态，判断用户的意图。\n"
-                    "只返回一个 JSON 对象，格式:\n"
-                    '{"intent": "分类名", "reason": "判断理由", "target": "具体目标(可选)"}\n\n'
-                    "可选的分类:\n"
-                    "- new_task: 全新的开发需求（用户描述了一个新功能或新项目）\n"
-                    "- continue: 续接上次任务（继续、接着、上次等关键词，或没有具体新需求只是想继续）\n"
-                    "- fix_build: 修复构建/打包/编译问题（没有包、编译失败、Makefile 有问题等）\n"
-                    "- fix_file: 修复或重新生成某个具体文件（部署文档不对、config.cpp 有 bug 等）\n"
-                    "- add_feature: 补充某个具体功能（视频播放没实现、加个字幕功能等）\n"
-                    "- refactor: 重构代码（改成 C++17、优化性能、重命名等）\n"
-                    "- deploy: 执行部署操作（部署到 Switch、推送到服务器等）\n"
-                    "- diagnose: 诊断问题但不执行（为什么没有包、哪里出错了等）\n\n"
-                    "只返回 JSON，不要其他文字。"
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"项目状态:\n{project_summary}\n\n用户输入: {user_input}",
-            }
-        ]
-
-        try:
-            response = await self.planner._llm.chat(messages)
-            # 解析 JSON
-            import json as _json
-            text = response.strip()
-            if "```" in text:
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-                text = text.strip()
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            if start >= 0 and end > start:
-                result = _json.loads(text[start:end])
-                result.setdefault("intent", "new_task")
-                result.setdefault("reason", "")
-                result.setdefault("target", "")
-                logger.info(f"Intent classified: {result['intent']} - {result['reason']}")
-                return result
-        except Exception as e:
-            logger.warning(f"Intent classification failed: {e}, falling back to keyword detection")
-
-        # Fallback: 关键词检测
-        return self._keyword_classify(user_input, has_build_artifacts, resumable)
-
-    def _keyword_classify(self, user_input: str, has_build_artifacts: bool, resumable: list) -> dict:
-        """关键词 fallback 分类"""
-        text = user_input.lower()
-
-        # 构建/打包问题
-        build_keywords = ["打包", "编译", "构建", "build", "makefile", "cmake", "没有包", "打不出", "nro"]
-        if any(k in text for k in build_keywords):
-            return {"intent": "fix_build", "reason": "关键词匹配: 构建相关", "target": ""}
-
-        # 续接
-        continue_keywords = ["继续", "接着", "上次", "之前", "resume", "continue"]
-        if any(k in text for k in continue_keywords):
-            if resumable:
-                return {"intent": "continue", "reason": "关键词匹配: 续接", "target": ""}
-
-        # 部署
-        deploy_keywords = ["部署", "deploy", "推送", "上线", "发布"]
-        if any(k in text for k in deploy_keywords):
-            return {"intent": "deploy", "reason": "关键词匹配: 部署", "target": ""}
-
-        # 修复文件
-        fix_keywords = ["修复", "修改", "重新生成", "有问题", "bug", "fix", "错误"]
-        if any(k in text for k in fix_keywords):
-            return {"intent": "fix_file", "reason": "关键词匹配: 修复", "target": ""}
-
-        # 诊断
-        diag_keywords = ["为什么", "怎么回事", "分析", "诊断", "原因", "why", "diagnose"]
-        if any(k in text for k in diag_keywords):
-            return {"intent": "diagnose", "reason": "关键词匹配: 诊断", "target": ""}
-
-        return {"intent": "new_task", "reason": "默认: 新任务", "target": ""}
-
-    # ==========================================================
-    # 任务启动
-    # ==========================================================
-
     async def start_task(self, task_id: str, description: str, project_path: str = "."):
         """
         启动一个新任务 — 非阻塞，在后台运行 Agent Loop
@@ -333,6 +192,10 @@ class AgentLoop:
 
             # 收集项目上下文
             project_context = await self._gather_project_context(project_path)
+
+            # ★ 收集项目状态（让 Planner 自己判断意图）
+            project_state = await self._gather_project_state(project_path)
+            project_context["project_state"] = project_state
 
             # 生成计划
             await self._emit(task_id, EventType.LLM_REQUEST,
@@ -1883,6 +1746,63 @@ class AgentLoop:
             "project_path": project_path,
             "file_count": result.data.get("count", 0),
             "files": result.data.get("files", [])[:50],  # 最多 50 个文件
+        }
+
+    async def _gather_project_state(self, project_path: str) -> dict:
+        """收集项目深层状态，让 Planner 自主判断该做什么"""
+        from pathlib import Path as _Path
+        project = _Path(project_path)
+        skip_dirs = {".kedo", ".git", ".venv", "node_modules", "__pycache__", "build", "dist"}
+        src_exts = {".cpp", ".c", ".h", ".hpp", ".py", ".js", ".ts", ".java", ".go", ".rs"}
+
+        # 源码状态
+        src_files = []
+        for f in project.rglob("*"):
+            if f.is_file() and f.suffix.lower() in src_exts and not any(p in f.relative_to(project).parts for p in skip_dirs):
+                src_files.append(str(f.relative_to(project)))
+
+        # 构建状态
+        artifact_exts = {".nro", ".elf", ".exe", ".bin", ".so", ".dll", ".jar", ".whl"}
+        artifacts = [str(f.relative_to(project)) for f in project.rglob("*")
+                     if f.is_file() and f.suffix.lower() in artifact_exts
+                     and not any(p in f.relative_to(project).parts for p in skip_dirs)]
+
+        has_makefile = (project / "Makefile").exists()
+        has_cmake = (project / "CMakeLists.txt").exists()
+        has_docker = (project / "docker-compose.yml").exists() or (project / "Dockerfile").exists()
+        has_docs = (project / "docs").is_dir()
+
+        # 文档状态
+        doc_files = []
+        if has_docs:
+            doc_files = [str(f.relative_to(project)) for f in (project / "docs").rglob("*.md")]
+
+        # 上次评估
+        last_eval = None
+        resumable = self.state.find_resumable_tasks()
+        if resumable:
+            cp = await self.state.load_checkpoint(resumable[0]["task_id"])
+            if cp and cp.eval_report:
+                last_eval = {
+                    "score": cp.eval_report.score,
+                    "requirements_met": cp.eval_report.requirements_met[:5],
+                    "requirements_missed": cp.eval_report.requirements_missed[:5],
+                    "suggestions": cp.eval_report.suggestions[:3],
+                }
+
+        return {
+            "has_source_code": len(src_files) > 0,
+            "source_files": src_files[:20],
+            "source_count": len(src_files),
+            "has_build_artifacts": len(artifacts) > 0,
+            "artifacts": artifacts,
+            "has_makefile": has_makefile,
+            "has_cmake": has_cmake,
+            "has_docker": has_docker,
+            "has_docs": has_docs,
+            "doc_files": doc_files[:15],
+            "last_eval": last_eval,
+            "previous_tasks": len(self.state._tasks),
         }
 
     def _get_model_name(self) -> str:

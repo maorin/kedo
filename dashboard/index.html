@@ -3781,73 +3781,28 @@
             });
         }
 
-        var _intentLabels = {
-            'new_task': '\u{1F195} \u65B0\u4EFB\u52A1',
-            'continue': '\u{25B6} \u667A\u80FD\u7EED\u63A5',
-            'fix_build': '\u{1F527} \u4FEE\u590D\u6784\u5EFA',
-            'fix_file': '\u{1F4DD} \u4FEE\u590D\u6587\u4EF6',
-            'add_feature': '\u{2795} \u8865\u5145\u529F\u80FD',
-            'refactor': '\u{1F504} \u91CD\u6784\u4EE3\u7801',
-            'deploy': '\u{1F680} \u6267\u884C\u90E8\u7F72',
-            'diagnose': '\u{1F50D} \u8BCA\u65AD\u95EE\u9898',
-        };
-
         async function createTask(description) {
             if (!description.trim()) return;
 
-            // ★ Step 1: 调用意图分类器
-            addLog('\u610F\u56FE\u5206\u6790', '\u6B63\u5728\u5206\u6790: ' + description.substring(0, 40) + '...', 'info');
-            var intent = null;
-            try {
-                var classifyResp = await fetch(API_BASE + '/tasks/classify', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ description: description })
-                });
-                if (classifyResp.ok) {
-                    intent = await classifyResp.json();
-                    var label = _intentLabels[intent.intent] || intent.intent;
-                    addLog('\u610F\u56FE\u8BC6\u522B', label + ' - ' + (intent.reason || ''), 'info');
-                }
-            } catch (e) {
-                console.warn('Intent classification failed:', e);
-            }
-
-            // ★ Step 2: 根据意图分发
-            if (intent && intent.intent !== 'new_task') {
-                var intentType = intent.intent;
-                var resumableTask = intent.resumable_task;
-
-                if ((intentType === 'continue' || intentType === 'fix_build' || intentType === 'add_feature' || intentType === 'fix_file') && resumableTask) {
-                    // 续接类意图 → 走智能续接
-                    var taskDesc = (resumableTask.description || '').substring(0, 50);
-                    var confirmed = await showContinueModal({
-                        task_id: resumableTask.task_id,
-                        description: taskDesc,
-                        status: resumableTask.status,
-                        progress_percent: resumableTask.progress_percent || 0,
-                    });
-                    if (confirmed) {
-                        await resumeFromCheckpoint(resumableTask.task_id, description);
-                        dom.taskInput.value = '';
-                        return;
+            // ★ 轻量关键词检测（不调 LLM，纯前端）
+            // 续接关键词 → 走智能续接
+            if (detectContinuation(description)) {
+                try {
+                    var resumableResp = await fetch(API_BASE + '/tasks/resumable');
+                    if (resumableResp.ok) {
+                        var resumable = await resumableResp.json();
+                        if (resumable && resumable.length > 0) {
+                            var task = resumable[0];
+                            var confirmed = await showContinueModal(task);
+                            if (confirmed) {
+                                await resumeFromCheckpoint(task.task_id, description);
+                                dom.taskInput.value = '';
+                                return;
+                            }
+                        }
                     }
-                    // 用户取消 → 创建新任务
-                }
-
-                if (intentType === 'deploy') {
-                    // 部署意图 → 切到部署页面
-                    addLog('\u90E8\u7F72', '\u5207\u6362\u5230\u90E8\u7F72\u9875\u9762', 'info');
-                    switchView('deploy');
-                    dom.taskInput.value = '';
-                    return;
-                }
-
-                if (intentType === 'diagnose') {
-                    // 诊断意图 → 不创建任务，只显示分析结果
-                    addLog('\u8BCA\u65AD', intent.reason || '\u5206\u6790\u5B8C\u6210', 'info');
-                    dom.taskInput.value = '';
-                    return;
+                } catch (e) {
+                    console.warn('Continuation check failed:', e);
                 }
             }
 

@@ -53,25 +53,6 @@ def set_dependencies(agent_loop, state_manager, create_llm_client_fn=None, proje
 # 任务管理 API
 # ============================================================
 
-@router.post("/tasks/classify")
-async def classify_user_intent(req: CreateTaskRequest):
-    """
-    分析用户输入的意图，返回分类结果。
-    前端根据分类结果决定走哪条路径。
-    """
-    project_path = req.project_path
-    if project_path == ".":
-        project_path = _project_path
-    result = await _agent_loop.classify_intent(req.description, project_path)
-
-    # 如果是 continue/fix_build，找到可续接的任务
-    if result["intent"] in ("continue", "fix_build", "add_feature", "fix_file"):
-        resumable = _state_manager.find_resumable_tasks()
-        if resumable:
-            result["resumable_task"] = resumable[0]
-
-    return result
-
 
 @router.post("/tasks", response_model=CreateTaskResponse)
 async def create_task(req: CreateTaskRequest):
