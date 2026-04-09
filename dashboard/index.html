@@ -1713,24 +1713,25 @@
                 }
             });
 
-            // ★ 如果 checkpoint 中没有文件，使用磁盘扫描的项目文件
-            if (allFiles.length === 0 && data.project_files && data.project_files.length > 0) {
-                const diskFiles = data.project_files.map(f => ({
-                    path: f.abs_path,
-                    rel_path: f.path,
-                    name: f.name,
-                    action: 'disk',
-                    lines: f.lines || 0,
-                    size: f.size || 0,
-                    task_id: '',
-                }));
-                renderCodeFileList(diskFiles);
-                // 更新统计卡片
-                document.getElementById('codeTotal').textContent = diskFiles.length;
-                document.getElementById('codeSuccess').textContent = diskFiles.length;
-            } else {
-                renderCodeFileList(allFiles);
+            // ★ 始终合并磁盘扫描的项目文件（去重）
+            if (data.project_files && data.project_files.length > 0) {
+                const existingPaths = new Set(allFiles.map(f => f.path));
+                data.project_files.forEach(f => {
+                    if (!existingPaths.has(f.abs_path)) {
+                        allFiles.push({
+                            path: f.abs_path,
+                            rel_path: f.path,
+                            name: f.name,
+                            action: 'disk',
+                            lines: f.lines || 0,
+                            size: f.size || 0,
+                            task_id: '',
+                        });
+                    }
+                });
+                document.getElementById('codeTotal').textContent = allFiles.length;
             }
+            renderCodeFileList(allFiles);
         }
 
         function renderCodeFileList(files) {

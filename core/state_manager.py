@@ -292,12 +292,13 @@ class StateManager:
             logger.warning(f"Failed to load task index: {e}")
 
     def find_resumable_tasks(self) -> list[dict]:
-        """查找可续接的历史任务（有 checkpoint 的失败/暂停任务）"""
+        """查找可续接的历史任务（有 checkpoint 且非完成状态的任务）"""
         resumable = []
         for t in self._tasks.values():
             status = t["status"]
             status_val = status.value if hasattr(status, "value") else str(status)
-            if status_val not in ("failed", "paused"):
+            # 完成的任务不可续接，其余有 checkpoint 的都可以
+            if status_val in ("completed",):
                 continue
             # 检查是否有 checkpoint 文件
             cp_path = self.storage_path / f"{t['task_id']}_checkpoint.json"

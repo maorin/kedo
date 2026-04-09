@@ -74,6 +74,12 @@ async def list_tasks():
     return _state_manager.list_tasks()
 
 
+@router.get("/tasks/resumable")
+async def list_resumable_tasks():
+    """列出所有可续接的历史任务（有 checkpoint 的非完成状态任务）"""
+    return _state_manager.find_resumable_tasks()
+
+
 @router.get("/tasks/{task_id}", response_model=TaskStatusResponse)
 async def get_task(task_id: str):
     """获取任务详细状态"""
@@ -172,11 +178,6 @@ async def resume_from_checkpoint(task_id: str, req: ResumeCheckpointRequest = Re
                 + (f", context: {req.additional_context[:50]}" if req.additional_context else ""),
     )
 
-
-@router.get("/tasks/resumable")
-async def list_resumable_tasks():
-    """列出所有可续接的历史任务（有 checkpoint 的失败/暂停任务）"""
-    return _state_manager.find_resumable_tasks()
 
 
 # ============================================================
