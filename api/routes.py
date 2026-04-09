@@ -1443,14 +1443,122 @@ def _deploy_targets_path() -> Path:
 
 
 def _load_deploy_targets() -> list[dict]:
-    """从磁盘加载部署目标列表"""
+    """从磁盘加载部署目标列表。如果为空，自动从部署文档解析。"""
     fp = _deploy_targets_path()
     if fp.exists():
         try:
-            return json.loads(fp.read_text(encoding="utf-8"))
+            targets = json.loads(fp.read_text(encoding="utf-8"))
+            if targets:
+                return targets
         except Exception:
             pass
-    return []
+
+    # 没有手动添加的 targets → 从部署文档自动解析
+    auto_targets = _auto_detect_deploy_targets()
+    if auto_targets:
+        _save_deploy_targets(auto_targets)
+    return auto_targets
+
+
+def _auto_detect_deploy_targets() -> list[dict]:
+    """从部署文档和项目文件自动检测需要的部署环境"""
+    project = Path(_project_path)
+    targets = []
+
+    # 读取部署文档
+    deploy_doc = ""
+    deploy_path = project / "docs" / "deploy" / "deployment.md"
+    if deploy_path.exists():
+        try:
+            deploy_doc = deploy_path.read_text(encoding="utf-8").lower()
+        except Exception:
+            pass
+
+    # 读取需求文档
+    req_doc = ""
+    req_path = project / "docs" / "requirement" / "requirement.md"
+    if req_path.exists():
+        try:
+            req_doc = req_path.read_text(encoding="utf-8").lower()
+        except Exception:
+            pass
+
+    all_text = deploy_doc + " " + req_doc
+    file_list = " ".join(str(f.name) for f in project.rglob("*") if f.is_file())
+
+    # 检测项目类型 → 自动生成对应的部署环境
+    has_switch = "switch" in all_text or ".nro" in file_list or "devkitpro" in all_text or "libnx" in all_text
+    has_docker = "docker" in all_text or (project / "docker-compose.yml").exists() or (project / "Dockerfile").exists()
+    has_server = "服务器" in all_text or "server" in all_text or "ssh" in all_text or "scp" in all_text
+    has_android = "android" in all_text or ".apk" in file_list
+    has_ios = "ios" in all_text or "xcode" in all_text
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    # 编译服务器（几乎所有项目都需要）
+    if has_docker or has_switch or (project / "Makefile").exists() or (project / "CMakeLists.txt").exists():
+        targets.append({
+            "id": str(uuid.uuid4())[:8],
+            "name": "\u7F16\u8BD1\u670D\u52A1\u5668",  # 编译服务器
+            "type": "server",
+            "ip": "",
+            "port": 22,
+            "user": "",
+            "status": "unconfigured",
+            "setup_commands": [],
+            "created_at": now,
+            "last_check": None,
+            "auto_detected": True,
+            "description": "\u7528\u4E8E\u7F16\u8BD1\u6784\u5EFA\u9879\u76EE\u7684\u670D\u52A1\u5668\uFF0C\u9700\u8981\u5B89\u88C5\u7F16\u8BD1\u5DE5\u5177\u94FE",
+            # 用于编译构建项目的服务器，需要安装编译工具链
+        })
+
+    # Switch 游戏机
+    if has_switch:
+        targets.append({
+            "id": str(uuid.uuid4())[:8],
+            "name": "Nintendo Switch",
+            "type": "switch",
+            "ip": "",
+            "port": 0,
+            "user": "",
+            "status": "unconfigured",
+            "setup_commands": [],
+            "created_at": now,
+            "last_check": None,
+            "auto_detected": True,
+            "description": "\u76EE\u6807\u8FD0\u884C\u8BBE\u5907\uFF0C\u9700\u8981 Atmosphere \u81EA\u5B9A\u4E49\u56FA\u4EF6\u548C hbmenu",
+            # 目标运行设备，需要 Atmosphere 自定义固件和 hbmenu
+            "checklist": [
+                {"item": "\u5B89\u88C5 Atmosphere \u81EA\u5B9A\u4E49\u56FA\u4EF6", "done": False},
+                # 安装 Atmosphere 自定义固件
+                {"item": "SD \u5361\u4E0A\u6709 /switch/ \u76EE\u5F55", "done": False},
+                # SD 卡上有 /switch/ 目录
+                {"item": "Switch \u5DF2\u8FDE\u63A5 WiFi\uFF08\u540C\u4E00\u5C40\u57DF\u7F51\uFF09", "done": False},
+                # Switch 已连接 WiFi（同一局域网）
+                {"item": "\u8BB0\u5F55 Switch IP \u5730\u5740", "done": False},
+                # 记录 Switch IP 地址
+            ],
+        })
+
+    # Android 设备
+    if has_android:
+        targets.append({
+            "id": str(uuid.uuid4())[:8],
+            "name": "Android \u8BBE\u5907",
+            "type": "android",
+            "ip": "",
+            "port": 5555,
+            "user": "",
+            "status": "unconfigured",
+            "setup_commands": [],
+            "created_at": now,
+            "last_check": None,
+            "auto_detected": True,
+            "description": "\u76EE\u6807 Android \u8BBE\u5907\uFF0C\u9700\u8981\u5F00\u542F\u5F00\u53D1\u8005\u6A21\u5F0F",
+        })
+
+    return targets
 
 
 def _save_deploy_targets(targets: list[dict]):
@@ -1493,7 +1601,7 @@ async def update_deploy_target(target_id: str, body: dict = Body(...)):
     targets = _load_deploy_targets()
     for t in targets:
         if t["id"] == target_id:
-            for key in ("name", "type", "ip", "port", "user", "setup_commands"):
+            for key in ("name", "type", "ip", "port", "user", "setup_commands", "status", "checklist", "description"):
                 if key in body:
                     t[key] = body[key]
             _save_deploy_targets(targets)

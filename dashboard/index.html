@@ -2129,6 +2129,7 @@
         };
         var _statusColors = {
             'unknown': '#888',
+            'unconfigured': '#58a6ff',
             'checking': '#f59e0b',
             'reachable': '#22c55e',
             'unreachable': '#ef4444',
@@ -2139,6 +2140,7 @@
         };
         var _statusLabels = {
             'unknown': '\u672A\u68C0\u6D4B',
+            'unconfigured': '\u5F85\u914D\u7F6E',
             'checking': '\u68C0\u6D4B\u4E2D...',
             'reachable': '\u53EF\u8FBE',
             'unreachable': '\u4E0D\u53EF\u8FBE',
@@ -2214,10 +2216,29 @@
                 row1.appendChild(delBtn);
                 card.appendChild(row1);
 
-                // Row 2: IP + port
+                // Description (auto-detected)
+                if (t.description) {
+                    var descDiv = document.createElement('div');
+                    descDiv.style.cssText = 'font-size:0.72rem;color:#666;margin-bottom:0.4rem;line-height:1.4;';
+                    descDiv.textContent = t.description;
+                    card.appendChild(descDiv);
+                }
+
+                // Row 2: IP + port (or "待配置" prompt)
                 var row2 = document.createElement('div');
-                row2.style.cssText = 'font-size:0.75rem;color:#888;margin-bottom:0.4rem;font-family:monospace;';
-                row2.textContent = (t.user || '') + '@' + (t.ip || '???') + ':' + (t.port || 22);
+                row2.style.cssText = 'font-size:0.75rem;margin-bottom:0.4rem;font-family:monospace;';
+                if (t.ip) {
+                    row2.style.color = '#888';
+                    row2.textContent = (t.user ? t.user + '@' : '') + t.ip + (t.port ? ':' + t.port : '');
+                } else {
+                    row2.style.color = '#58a6ff';
+                    row2.style.cursor = 'pointer';
+                    row2.textContent = '\u{1F4DD} \u70B9\u51FB\u914D\u7F6E IP \u5730\u5740';
+                    row2.addEventListener('click', function(ev) {
+                        ev.stopPropagation();
+                        promptConfigureTarget(t);
+                    });
+                }
                 card.appendChild(row2);
 
                 // Row 3: status badge + action buttons
@@ -2301,6 +2322,43 @@
                 infoDiv.appendChild(row);
             });
             targetEl.appendChild(infoDiv);
+
+            // Checklist (for Switch etc.)
+            var checklist = target.checklist || [];
+            if (checklist.length > 0) {
+                var clTitle = document.createElement('div');
+                clTitle.style.cssText = 'font-weight:600;color:#f59e0b;font-size:0.85rem;margin-bottom:0.4rem;';
+                clTitle.textContent = '\u{1F6A7} \u51C6\u5907\u6E05\u5355';
+                targetEl.appendChild(clTitle);
+
+                checklist.forEach(function(c, idx) {
+                    var clItem = document.createElement('div');
+                    clItem.style.cssText = 'display:flex;align-items:center;gap:0.5rem;padding:0.3rem 0;cursor:pointer;font-size:0.82rem;';
+                    var checkbox = document.createElement('span');
+                    checkbox.style.cssText = 'font-size:0.9rem;';
+                    checkbox.textContent = c.done ? '\u2705' : '\u2B1C';
+                    var label = document.createElement('span');
+                    label.style.color = c.done ? '#888' : '#c9d1d9';
+                    label.style.textDecoration = c.done ? 'line-through' : 'none';
+                    label.textContent = c.item;
+                    clItem.appendChild(checkbox);
+                    clItem.appendChild(label);
+                    clItem.addEventListener('click', function() {
+                        c.done = !c.done;
+                        // 保存 checklist 状态到 target
+                        fetch(API_BASE + '/deploy/targets/' + target.id, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ checklist: checklist })
+                        }).then(function() { refreshDeployTargets(); });
+                    });
+                    targetEl.appendChild(clItem);
+                });
+
+                var clSpacer = document.createElement('div');
+                clSpacer.style.height = '1rem';
+                targetEl.appendChild(clSpacer);
+            }
 
             // Setup commands
             var cmds = target.setup_commands || [];
@@ -2421,40 +2479,74 @@
         }
 
         // ---- Add/Edit target modal ----
+        function promptConfigureTarget(target) {
+            // 复用添加环境 modal，但预填数据
+            document.getElementById('targetName').value = target.name || '';
+            document.getElementById('targetType').value = target.type || 'server';
+            document.getElementById('targetIP').value = target.ip || '';
+            document.getElementById('targetPort').value = target.port || (target.type === 'switch' ? '' : '22');
+            document.getElementById('targetUser').value = target.user || '';
+
+            // 修改提交按钮行为：更新而非创建
+            var modal = document.getElementById('addTargetModal');
+            modal.classList.add('show');
+            modal.dataset.editId = target.id;
+
+            // 修改标题
+            var titleEl = modal.querySelector('.modal-title');
+            if (titleEl) titleEl.textContent = '\u914D\u7F6E\u90E8\u7F72\u73AF\u5883';
+        }
+
         function showAddTargetModal() {
+            var modal = document.getElementById('addTargetModal');
+            delete modal.dataset.editId;
+            var titleEl = modal.querySelector('.modal-title');
+            if (titleEl) titleEl.textContent = '\u6DFB\u52A0\u90E8\u7F72\u73AF\u5883';
             document.getElementById('targetName').value = '';
             document.getElementById('targetIP').value = '';
             document.getElementById('targetPort').value = '22';
             document.getElementById('targetUser').value = '';
             document.getElementById('targetType').value = 'server';
-            document.getElementById('addTargetModal').classList.add('show');
+            modal.classList.add('show');
         }
 
         async function submitAddTarget() {
+            var modal = document.getElementById('addTargetModal');
+            var editId = modal.dataset.editId || '';
             var name = document.getElementById('targetName').value.trim();
             var type = document.getElementById('targetType').value;
             var ip = document.getElementById('targetIP').value.trim();
-            var port = parseInt(document.getElementById('targetPort').value) || 22;
-            var user = document.getElementById('targetUser').value.trim() || 'root';
+            var port = parseInt(document.getElementById('targetPort').value) || (type === 'switch' ? 0 : 22);
+            var user = document.getElementById('targetUser').value.trim();
 
-            if (!name || !ip) {
-                alert('\u8BF7\u586B\u5199\u540D\u79F0\u548C IP \u5730\u5740');
+            if (!name) {
+                alert('\u8BF7\u586B\u5199\u540D\u79F0');
                 return;
             }
 
             try {
-                var resp = await fetch(API_BASE + '/deploy/targets', {
-                    method: 'POST',
+                var url, method;
+                if (editId) {
+                    url = API_BASE + '/deploy/targets/' + editId;
+                    method = 'PUT';
+                } else {
+                    url = API_BASE + '/deploy/targets';
+                    method = 'POST';
+                }
+                var resp = await fetch(url, {
+                    method: method,
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name: name, type: type, ip: ip, port: port, user: user })
+                    body: JSON.stringify({ name: name, type: type, ip: ip, port: port, user: user, status: ip ? 'unknown' : 'unconfigured' })
                 });
                 if (resp.ok) {
-                    document.getElementById('addTargetModal').classList.remove('show');
-                    addLog('\u90E8\u7F72\u76EE\u6807', '\u5DF2\u6DFB\u52A0: ' + name + ' (' + ip + ')', 'success');
+                    modal.classList.remove('show');
+                    delete modal.dataset.editId;
+                    var action = editId ? '\u5DF2\u66F4\u65B0' : '\u5DF2\u6DFB\u52A0';
+                    addLog('\u90E8\u7F72\u76EE\u6807', action + ': ' + name + (ip ? ' (' + ip + ')' : ''), 'success');
                     refreshDeployTargets();
                 }
             } catch (e) {
-                addLog('\u9519\u8BEF', '\u6DFB\u52A0\u5931\u8D25: ' + e, 'error');
+                addLog('\u9519\u8BEF', '\u64CD\u4F5C\u5931\u8D25: ' + e, 'error');
             }
         }
 
