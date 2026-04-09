@@ -352,6 +352,9 @@ class AgentLoop:
             # 读取已有源码文件的摘要（文件名 + 前几行）
             existing_code_summary = await self._summarize_existing_code(project_path)
 
+            # 扫描不完整的文档（需要重新生成）
+            incomplete_docs = self._scan_incomplete_docs(project_path)
+
             # 从 checkpoint 提取历史信息
             prev_eval = checkpoint.eval_report
             prev_plan = checkpoint.plan
@@ -369,6 +372,7 @@ class AgentLoop:
                 existing_code_summary=existing_code_summary,
                 prev_eval=prev_eval,
                 prev_code_changes=prev_code_changes,
+                incomplete_docs=incomplete_docs,
             )
 
             await self._emit(task_id, EventType.STEP_COMPLETED,
@@ -493,6 +497,7 @@ class AgentLoop:
         existing_code_summary: list[dict],
         prev_eval: Optional[EvalReport],
         prev_code_changes: list[CodeChange],
+        incomplete_docs: list[dict] = None,
     ) -> str:
         """构建续接上下文文本，供 Planner 使用"""
         parts = []
@@ -511,6 +516,16 @@ class AgentLoop:
                 for f in existing_code_summary[:30]
             )
             parts.append(f"## 项目中已有的源码文件\n{file_list}")
+
+        if incomplete_docs:
+            doc_list = "\n".join(
+                f"- {d['path']} ({d['lines']}行, {d['size_bytes']}字节): {d['reason']}"
+                for d in incomplete_docs
+            )
+            parts.append(
+                f"## 不完整的文档（需要重新生成）\n"
+                f"以下文档内容不完整（被截断或过短），请在续接计划中重新生成这些文档：\n{doc_list}"
+            )
 
         if prev_eval:
             parts.append(f"## 上次评估结果 (评分: {prev_eval.score}/100)")
@@ -558,6 +573,90 @@ class AgentLoop:
                 continue
 
         return results
+
+    def _scan_incomplete_docs(self, project_path: str) -> list[dict]:
+        """
+        扫描 docs/ 目录，检测不完整的文档（截断、过短、内容断在中间）。
+        这些文档应在续接计划中重新生成。
+        """
+        from pathlib import Path as _Path
+        project = _Path(project_path)
+        docs_dir = project / "docs"
+        if not docs_dir.is_dir():
+            return []
+
+        # 各文档的最小合理长度（字节）
+        min_doc_sizes = {
+            "requirement.md": 500,
+            "user-stories.md": 500,
+            "architecture.md": 800,
+            "api-design.md": 600,
+            "database-design.md": 400,
+            "module-design.md": 800,
+            "deployment.md": 500,
+            "test-plan.md": 500,
+            "test-cases.md": 600,
+            "automation.md": 400,
+        }
+
+        incomplete = []
+        for md_file in sorted(docs_dir.rglob("*.md")):
+            try:
+                content = md_file.read_text(encoding="utf-8", errors="replace")
+                size_bytes = len(content.encode("utf-8"))
+                lines = content.splitlines()
+                line_count = len(lines)
+                rel_path = str(md_file.relative_to(project))
+                file_name = md_file.name
+
+                reasons = []
+
+                # 检查 1：文件过短
+                min_size = min_doc_sizes.get(file_name, 300)
+                if size_bytes < min_size:
+                    reasons.append(f"文件过短（{size_bytes}字节 < {min_size}字节最低要求）")
+
+                # 检查 2：内容以冒号、"如下"等结尾（被截断的特征）
+                stripped = content.rstrip()
+                if stripped:
+                    last_line = stripped.split("\n")[-1].strip()
+                    truncation_endings = ("：", "如下：", "如下", "following:", "below:", "as follows:")
+                    if any(last_line.endswith(e) for e in truncation_endings):
+                        reasons.append(f"内容疑似被截断（末尾: '{last_line[-30:]}'）")
+
+                # 检查 3：有标题但没有对应内容
+                headers_without_content = 0
+                for i, line in enumerate(lines):
+                    if line.startswith("## ") or line.startswith("### "):
+                        # 检查后续是否有非空行
+                        has_content = False
+                        for j in range(i + 1, min(i + 5, len(lines))):
+                            if lines[j].strip() and not lines[j].startswith("#"):
+                                has_content = True
+                                break
+                        if not has_content:
+                            headers_without_content += 1
+
+                if headers_without_content >= 2:
+                    reasons.append(f"{headers_without_content}个章节标题下没有内容")
+
+                # 检查 4：行数过少（相对于标题数）
+                header_count = sum(1 for l in lines if l.startswith("#"))
+                if header_count > 0 and line_count < header_count * 3:
+                    reasons.append(f"内容过少（{line_count}行/{header_count}个标题）")
+
+                if reasons:
+                    incomplete.append({
+                        "path": rel_path,
+                        "lines": line_count,
+                        "size_bytes": size_bytes,
+                        "reason": "; ".join(reasons),
+                    })
+
+            except Exception:
+                continue
+
+        return incomplete
 
     # ==========================================================
     # 子任务执行

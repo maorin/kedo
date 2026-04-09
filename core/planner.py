@@ -343,10 +343,11 @@ class Planner:
 
 ## 核心原则（必须严格遵守）
 
-1. **绝对禁止重新生成已有文件** — 项目中已存在的文件（文档、代码）一律跳过，除非需要修改其内容
-2. **只做缺失的工作** — 根据续接上下文中的"缺失的需求"列表，只生成实现这些功能的步骤
-3. **在现有代码基础上修改/扩展** — 新代码应该 import/引用已有的模块（如已有 Config、NFSClient），不要重写
-4. **计划要精简** — 通常 5-15 个步骤，不应超过 15 步
+1. **不要重新生成完整的已有文件** — 除非续接上下文明确标记为"不完整的文档"
+2. **重新生成不完整的文档** — 如果续接上下文中列出了"不完整的文档"，必须重新生成这些文档的完整内容
+3. **只做缺失的工作** — 根据续接上下文中的"缺失的需求"列表，只生成实现这些功能的步骤
+4. **在现有代码基础上修改/扩展** — 新代码应该 import/引用已有的模块，不要重写
+5. **计划要精简** — 通常 5-15 个步骤，不应超过 20 步
 
 ## 输出格式
 
@@ -358,21 +359,18 @@ class Planner:
 
 ## 计划结构
 
-1. **修改已有代码文件**（补充缺失功能的实现）— step_type: "code_generate"
-2. **新增代码文件**（如果需要全新模块）— step_type: "code_generate"
-3. **更新构建文件**（如果新增了文件需要加入编译）— step_type: "code_generate"
-4. **build** — step_type: "build"
-5. **test** — step_type: "test"
-6. **evaluate** — step_type: "evaluate"
+1. **重新生成不完整的文档**（如果有）— step_type: "code_generate"
+2. **修改已有代码文件**（补充缺失功能的实现）— step_type: "code_generate"
+3. **新增代码文件**（如果需要全新模块）— step_type: "code_generate"
+4. **更新构建文件**（如果新增了文件需要加入编译）— step_type: "code_generate"
+5. **build** — step_type: "build"
+6. **test** — step_type: "test"
+7. **evaluate** — step_type: "evaluate"
 
 ## 禁止事项
 
-- ❌ 不要生成 requirement 文档（docs/requirement/）
-- ❌ 不要生成 SDD 文档（docs/sdd/）
-- ❌ 不要生成部署文档（docs/deploy/）
-- ❌ 不要生成测试文档（docs/test/）
-- ❌ 不要重新生成已经存在的代码文件的全部内容，只修改需要补充的部分
-- ❌ 不要生成 README.md、docker-compose.yml 等已有文件
+- ❌ 不要重新生成内容完整的文档（只重新生成被标记为"不完整"的）
+- ❌ 不要重新生成内容完整的代码文件的全部内容，只修改需要补充的部分
 
 文档语言: {self._config.get("doc_language", "zh")}
 """
