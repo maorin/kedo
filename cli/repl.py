@@ -54,7 +54,6 @@ class KedoREPL:
             "自动测试": "pending",
             "质量评估": "pending",
             "候选版本": "pending",
-            "人工审查": "pending",
             "自动部署": "pending",
             "线上监控": "pending",
         }
@@ -214,7 +213,6 @@ class KedoREPL:
                 "Build & Lint": ("编译检查", "running"),
                 "Run Tests": ("自动测试", "running"),
                 "Quality Review": ("质量评估", "running"),
-                "Human Review": ("人工审查", "running"),
             },
             "step_completed": {
                 "Planning": ("计划生成", "success"),
@@ -223,7 +221,6 @@ class KedoREPL:
                 "Build & Lint": ("编译检查", "success"),
                 "Run Tests": ("自动测试", "success"),
                 "Quality Review": ("质量评估", "success"),
-                "Human Review": ("人工审查", "success"),
             },
             "step_failed": {
                 "Build & Lint": ("编译检查", "failed"),
@@ -304,7 +301,6 @@ class KedoREPL:
                 "build": "🔨",
                 "test": "🧪",
                 "evaluate": "📊",
-                "review": "👤",
                 "deploy": "🚀",
             }.get(tool_type, "⚙")
             self._print_event(f"{INFO}{tool_icon} 执行: {step}{retry_hint}{C.RESET}")
@@ -340,10 +336,6 @@ class KedoREPL:
             self.flow_state["候选版本"] = "success"
             conf = data.get("ai_confidence", 0)
             self._print_event(f"{SUCCESS}📦 候选版本已创建{C.RESET} confidence={conf}")
-
-        elif etype == "review_requested":
-            self.flow_state["人工审查"] = "active"
-            self._print_event(f"{WARN}⏸ 等待人工审查{C.RESET} — 输入 /review 查看候选版本")
 
         elif etype == "discussion_started":
             iteration = data.get("iteration", 1)
@@ -384,7 +376,6 @@ class KedoREPL:
                 "planning": "规划中",
                 "in_progress": "执行中",
                 "paused": "已暂停",
-                "reviewing": "审查中",
                 "completed": "已完成",
                 "failed": "失败",
             }.get(new_status, new_status)
@@ -507,10 +498,6 @@ class KedoREPL:
             "/f": self._cmd_flow,
             "/pause": self._cmd_pause,
             "/resume": self._cmd_resume,
-            "/review": self._cmd_review,
-            "/r": self._cmd_review,
-            "/approve": lambda a="": self._cmd_review_action("approve", a),
-            "/reject": lambda a="": self._cmd_review_action("reject", a),
             "/candidates": self._cmd_candidates,
             "/c": self._cmd_candidates,
             "/discuss": self._cmd_discuss,
@@ -549,9 +536,6 @@ class KedoREPL:
             ("/pause", "暂停当前任务"),
             ("/resume", "恢复暂停的任务"),
             ("/continue, /cont", "从检查点续接历史任务"),
-            ("/review, /r", "查看待审查的候选版本"),
-            ("/approve [反馈]", "批准当前候选版本"),
-            ("/reject [反馈]", "驳回并给出反馈"),
             ("/candidates, /c", "列出所有候选版本"),
             ("/discuss, /d", "参与闭环讨论（选择方案）"),
             ("/history", "查看迭代历史"),
@@ -576,7 +560,7 @@ class KedoREPL:
             return
 
         status = data.get("status", "unknown")
-        color = {"in_progress": BRAND, "completed": SUCCESS, "paused": WARN, "failed": ERROR, "reviewing": ACCENT}.get(status, MUTED)
+        color = {"in_progress": BRAND, "completed": SUCCESS, "paused": WARN, "failed": ERROR}.get(status, MUTED)
 
         print(f"  {HIGHLIGHT}任务{C.RESET} {self.current_task_id}  {status_badge(status, color)}")
         print(table_row("当前步骤", data.get("current_step", "—")))
@@ -605,7 +589,6 @@ class KedoREPL:
             ("🧪", "自动测试"),
             ("📊", "质量评估"),
             ("📦", "候选版本"),
-            ("👤", "人工审查"),
             ("🚀", "自动部署"),
             ("📡", "线上监控"),
         ]
@@ -627,9 +610,6 @@ class KedoREPL:
                         print(f"  {ERROR}  ╰──▶ 否 → 闭环讨论 → 重新规划 → 回到 计划生成{C.RESET}")
                     else:
                         print(f"  {MUTED}  │{C.RESET}")
-                elif name == "人工审查":
-                    # 不打印箭头 — 有审查分支在上面显示
-                    print(f"  {MUTED}  │{C.RESET}")
                 else:
                     print(f"  {MUTED}  │{C.RESET}")
 
@@ -650,8 +630,8 @@ class KedoREPL:
         self._api_post(f"/tasks/{self.current_task_id}/resume")
         print(f"  {SUCCESS}▶ 任务已恢复{C.RESET}")
 
-    def _cmd_review(self, _=""):
-        """查看待审查候选版本"""
+    def _cmd_candidates(self, _=""):
+        """查看候选版本"""
         if not self.current_task_id:
             print(f"  {MUTED}暂无活跃任务{C.RESET}")
             return
@@ -683,38 +663,6 @@ class KedoREPL:
                 print(f"    {MUTED}{summary}{C.RESET}")
 
         print()
-        print(f"  {MUTED}使用 /approve 或 /reject [反馈] 提交审查{C.RESET}")
-        print()
-
-    def _cmd_review_action(self, decision: str, feedback: str = ""):
-        if not self.current_task_id:
-            print(f"  {MUTED}暂无活跃任务{C.RESET}")
-            return
-
-        # 获取推荐版本
-        data = self._api_get(f"/tasks/{self.current_task_id}/candidates")
-        version_id = ""
-        if data:
-            version_id = data.get("recommended_version_id", "")
-            if not version_id:
-                candidates = data.get("candidates", [])
-                if candidates:
-                    version_id = candidates[-1].get("version_id", "")
-
-        self._api_post(f"/tasks/{self.current_task_id}/review", {
-            "decision": decision,
-            "version_id": version_id,
-            "feedback": feedback,
-            "test_notes": feedback,
-        })
-
-        if decision == "approve":
-            print(f"  {SUCCESS}✓ 已批准{C.RESET}  版本: {version_id}")
-        else:
-            print(f"  {ERROR}✗ 已驳回{C.RESET}  版本: {version_id}  反馈: {feedback}")
-
-    def _cmd_candidates(self, _=""):
-        self._cmd_review()
 
     def _cmd_discuss(self, _=""):
         """参与闭环讨论"""

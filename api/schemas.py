@@ -20,9 +20,6 @@ class TaskStatus(str, Enum):
     PLANNING = "planning"
     IN_PROGRESS = "in_progress"
     PAUSED = "paused"
-    REVIEWING = "reviewing"
-    APPROVED = "approved"
-    REJECTED = "rejected"
     DEPLOYING = "deploying"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -34,7 +31,6 @@ class StepType(str, Enum):
     BUILD = "build"
     TEST = "test"
     EVALUATE = "evaluate"
-    REVIEW = "review"
     DEPLOY = "deploy"
     MONITOR = "monitor"
 
@@ -65,7 +61,6 @@ class EventType(str, Enum):
     STEP_FAILED = "step_failed"
     AGENT_PAUSED = "agent_paused"
     AGENT_RESUMED = "agent_resumed"
-    REVIEW_REQUESTED = "review_requested"
     CANDIDATE_CREATED = "candidate_created"
     CANDIDATE_RECOMMENDED = "candidate_recommended"
     CANDIDATE_SELECTED = "candidate_selected"
@@ -93,12 +88,6 @@ class EventType(str, Enum):
     SUB_AGENT_COMPLETED = "sub_agent_completed"
     PARALLEL_BATCH_STARTED = "parallel_batch_started"
     PARALLEL_BATCH_COMPLETED = "parallel_batch_completed"
-
-
-class ReviewDecision(str, Enum):
-    APPROVE = "approve"
-    REJECT = "reject"
-    EDIT = "edit"
 
 
 # ============================================================
@@ -314,15 +303,6 @@ class TaskStatusResponse(BaseModel):
     test_results: Optional[TestResult] = None
     eval_report: Optional[EvalReport] = None
     logs: list[str] = Field(default_factory=list)
-
-
-class ReviewRequest(BaseModel):
-    """人工审查决策"""
-    decision: ReviewDecision
-    version_id: str = ""              # 审查的候选版本 ID
-    feedback: str = ""
-    test_notes: str = ""              # 人工测试记录
-    edits: list[CodeChange] = Field(default_factory=list)
 
 
 class SelectCandidateRequest(BaseModel):

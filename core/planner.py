@@ -48,7 +48,7 @@ PLAN_SYSTEM_PROMPT = """You are a software development planner following kedo's 
 Each subtask must have:
 - title: short descriptive name
 - description: detailed what to do (be very specific about file paths, content, and structure)
-- step_type: one of [plan, code_generate, build, test, evaluate, review, deploy]
+- step_type: one of [plan, code_generate, build, test, evaluate, deploy]
 - dependencies: list of subtask IDs this depends on
 
 step_type guidelines:
@@ -57,7 +57,6 @@ step_type guidelines:
 - "build": for compilation, dependency install, or docker build
 - "test": for running tests or validation
 - "evaluate": for quality assessment
-- "review": for human review checkpoint
 - "deploy": for deployment actions
 
 === 固化文档结构（必须严格遵循） ===
@@ -94,7 +93,6 @@ step_type guidelines:
   - subtask_N+4: build（构建项目）
   - subtask_N+5: test（运行测试）
   - subtask_N+6: evaluate（质量评估）
-  - subtask_N+7: review（人工审查）
 
 === 重要规则 ===
 
@@ -512,13 +510,5 @@ class Planner:
             dependencies=[f"subtask_{idx - 1}"],
         ))
         idx += 1
-
-        subtasks.append(SubTask(
-            id=f"subtask_{idx}",
-            title="Human review",
-            description="Human review checkpoint",
-            step_type=StepType.REVIEW,
-            dependencies=[f"subtask_{idx - 1}"],
-        ))
 
         return subtasks

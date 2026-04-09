@@ -23,7 +23,6 @@ from api.schemas import (
     IssueItem,
     IterationState,
     Proposal,
-    ReviewDecision,
     StepType,
     SubTask,
     TaskPlan,
@@ -76,7 +75,6 @@ class AgentLoop:
 
         # 运行时状态
         self._running_tasks: dict[str, asyncio.Task] = {}
-        self._review_queues: dict[str, asyncio.Queue] = {}
         self._discussion_queues: dict[str, asyncio.Queue] = {}  # 讨论阶段的人工输入队列
         self._iterations: dict[str, IterationState] = {}         # 迭代状态跟踪
 
@@ -86,7 +84,6 @@ class AgentLoop:
 
         self.max_retries = self.config.get("max_retries", 3)
         self.auto_fix_enabled = self.config.get("auto_fix", True)
-        self.review_gate_enabled = self.config.get("review_gate", False)
         self.min_eval_score = self.config.get("min_eval_score", 70)
         self.max_iterations = self.config.get("max_iterations", 5)
         self.auto_discussion = self.config.get("auto_discussion", True)  # AI自动选方案 vs 等人工
@@ -105,7 +102,6 @@ class AgentLoop:
             project_path: 项目根目录
         """
         await self.state.create_task(task_id, description)
-        self._review_queues[task_id] = asyncio.Queue()
 
         # 在后台启动 Agent Loop
         loop_task = asyncio.create_task(
@@ -148,8 +144,6 @@ class AgentLoop:
             await self.state.create_task(task_id, task_desc)
             await self.state.update_status(task_id, TaskStatus.IN_PROGRESS)
 
-        self._review_queues.setdefault(task_id, asyncio.Queue())
-
         # 从检查点位置继续执行
         loop_task = asyncio.create_task(
             self._run_loop_from_checkpoint(task_id, checkpoint)
@@ -158,27 +152,6 @@ class AgentLoop:
 
         logger.info(f"Agent Loop resumed from checkpoint for task {task_id}"
                      + (f" with context: {additional_context[:80]}" if additional_context else ""))
-
-    async def submit_review(
-        self,
-        task_id: str,
-        decision: ReviewDecision,
-        feedback: str = "",
-        version_id: str = "",
-        test_notes: str = "",
-    ):
-        """提交人工审查结果"""
-        # 如果用户选择了一个版本进行测试，先标记为 human_testing
-        if version_id:
-            await self.versions.select_for_testing(task_id, version_id)
-
-        if task_id in self._review_queues:
-            await self._review_queues[task_id].put({
-                "decision": decision,
-                "feedback": feedback,
-                "version_id": version_id,
-                "test_notes": test_notes,
-            })
 
     async def submit_discussion_input(
         self,
@@ -313,10 +286,6 @@ class AgentLoop:
                                 project_path=project_path,
                             )
                             continue
-
-                elif subtask.step_type == StepType.REVIEW and self.review_gate_enabled:
-                    # ★ 人工审查门 — 现在基于候选版本
-                    await self._handle_review_gate(task_id, plan, code_changes, test_results)
 
                 # 保存检查点
                 await self.state.save_checkpoint(AgentCheckpoint(
@@ -582,9 +551,6 @@ class AgentLoop:
                     data={"eval_report": {"score": 75, "requirements_met": [], "requirements_missed": [], "risks": [str(e)], "suggestions": []}},
                 )
 
-        elif step_type == StepType.REVIEW:
-            return ToolResult(success=True, output="Awaiting human review")
-
         elif step_type == StepType.DEPLOY:
             deploy_cmd = self._infer_deploy_command(project_path, subtask.description)
             return await self.tools.execute(
@@ -680,112 +646,6 @@ class AgentLoop:
         for task_id in self._running_tasks:
             return task_id
         return ""
-
-    # ==========================================================
-    # 人工审查门
-    # ==========================================================
-
-    async def _handle_review_gate(
-        self,
-        task_id: str,
-        plan: TaskPlan,
-        code_changes: list[CodeChange],
-        test_results: Optional[TestResult],
-    ):
-        """
-        处理人工审查节点 — 基于候选版本
-
-        流程:
-        1. 获取所有候选版本 → 找到 AI 推荐的版本
-        2. 通知前端展示候选版本列表
-        3. 用户选择一个版本进行人工测试
-        4. 用户提交 Approve / Reject 决策
-        5. 如果 Reject → 反馈注入 Agent 上下文 → 触发 replan
-        """
-        # 获取候选版本列表
-        candidates = self.versions.get_candidates(task_id)
-        recommended = self.versions.get_recommended(task_id)
-
-        # 如果没有候选版本 (边界情况)，自动创建一个
-        if not candidates:
-            recommended_candidate = await self.versions.create_candidate(
-                task_id=task_id,
-                code_changes=code_changes,
-                test_results=test_results,
-                build_success=True,
-                ai_confidence=70,
-                ai_summary="Auto-created for review gate",
-            )
-            recommended = recommended_candidate
-
-        await self.state.update_status(task_id, TaskStatus.REVIEWING, current_step="Awaiting Review")
-        await self._emit(
-            task_id, EventType.REVIEW_REQUESTED,
-            changes=len(code_changes),
-            test_passed=test_results.passed if test_results else 0,
-            candidates=[{
-                "version_id": c.version_id,
-                "version_number": c.version_number,
-                "status": c.status.value,
-                "ai_confidence": c.ai_confidence,
-                "ai_summary": c.ai_summary,
-                "ai_recommendation": c.ai_recommendation,
-                "testable": c.testable,
-                "build_success": c.build_success,
-                "test_passed": c.test_results.passed if c.test_results else 0,
-                "test_total": c.test_results.total if c.test_results else 0,
-            } for c in candidates],
-            recommended_version_id=recommended.version_id if recommended else None,
-        )
-
-        # 等待人工审查结果
-        review_queue = self._review_queues.get(task_id)
-        if not review_queue:
-            return
-
-        review = await review_queue.get()
-        decision = review["decision"]
-        feedback = review.get("feedback", "")
-        version_id = review.get("version_id", "")
-        test_notes = review.get("test_notes", "")
-
-        if decision == ReviewDecision.APPROVE:
-            logger.info(f"Task {task_id} approved (version={version_id})")
-            if version_id:
-                await self.versions.approve_candidate(task_id, version_id, feedback, test_notes)
-            self.memory.add_message("user", f"Review: APPROVED (v={version_id}) {feedback}")
-
-        elif decision == ReviewDecision.REJECT:
-            logger.info(f"Task {task_id} rejected (version={version_id}): {feedback}")
-            if version_id:
-                await self.versions.reject_candidate(task_id, version_id, feedback, test_notes)
-            self.memory.add_message("user", f"Review: REJECTED - {feedback}")
-
-            # ★ 人工 Reject 也走讨论闭环
-            # 获取该版本的 eval_report（如果有的话）
-            rejected_version = None
-            for c in self.versions.get_candidates(task_id):
-                if c.version_id == version_id:
-                    rejected_version = c
-                    break
-            eval_report = rejected_version.eval_report if rejected_version else None
-
-            new_plan = await self._handle_eval_failure_loop(
-                task_id=task_id,
-                plan=plan,
-                eval_report=eval_report,
-                code_changes=code_changes,
-                test_results=test_results,
-                description=feedback,
-                project_path=".",
-                trigger="human_rejected",
-                human_feedback=feedback,
-            )
-            plan.subtasks = new_plan.subtasks
-
-        elif decision == ReviewDecision.EDIT:
-            logger.info(f"Task {task_id} edited by user (version={version_id})")
-            self.memory.add_message("user", f"Review: Manual edits applied to version {version_id}")
 
     # ==========================================================
     # 闭环讨论机制
@@ -1209,7 +1069,7 @@ class AgentLoop:
             if subtask.dependencies:
                 sequential.append(subtask)
             # 写操作（代码生成、部署）必须串行
-            elif subtask.step_type in (StepType.CODE_GENERATE, StepType.DEPLOY, StepType.REVIEW):
+            elif subtask.step_type in (StepType.CODE_GENERATE, StepType.DEPLOY):
                 sequential.append(subtask)
             # 只读/分析类操作可以并行
             elif subtask.step_type in (StepType.PLAN, StepType.TEST, StepType.EVALUATE):

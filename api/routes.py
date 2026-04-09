@@ -21,7 +21,6 @@ from api.schemas import (
     PauseResumeResponse,
     ResumeCheckpointRequest,
     ResumeCheckpointResponse,
-    ReviewRequest,
     SelectCandidateRequest,
     TaskStatus,
     TaskStatusResponse,
@@ -178,24 +177,6 @@ async def resume_from_checkpoint(task_id: str, req: ResumeCheckpointRequest = Re
 async def list_resumable_tasks():
     """列出所有可续接的历史任务（有 checkpoint 的失败/暂停任务）"""
     return _state_manager.find_resumable_tasks()
-
-
-@router.post("/tasks/{task_id}/review")
-async def submit_review(task_id: str, req: ReviewRequest):
-    """提交人工审查结果 (基于候选版本)"""
-    await _agent_loop.submit_review(
-        task_id,
-        req.decision,
-        feedback=req.feedback,
-        version_id=req.version_id,
-        test_notes=req.test_notes,
-    )
-    return {
-        "task_id": task_id,
-        "version_id": req.version_id,
-        "decision": req.decision.value,
-        "message": "Review submitted",
-    }
 
 
 # ============================================================

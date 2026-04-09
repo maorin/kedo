@@ -460,15 +460,6 @@
         .version-details { font-size: 0.8rem; color: #888; margin: 0.5rem 0; }
         .version-actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
 
-        .btn-approve, .btn-reject {
-            flex: 1; padding: 0.5rem; border: none; border-radius: 3px;
-            cursor: pointer; font-size: 0.8rem; font-weight: 600; transition: all 0.3s;
-        }
-        .btn-approve { background: linear-gradient(135deg, #22c55e, #16a34a); color: white; }
-        .btn-approve:hover { box-shadow: 0 4px 12px rgba(34, 197, 94, 0.3); }
-        .btn-reject { background: linear-gradient(135deg, #ef4444, #dc2626); color: white; }
-        .btn-reject:hover { box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3); }
-
         .discussion-item {
             padding: 0.75rem; margin-bottom: 0.5rem;
             background: rgba(30, 41, 59, 0.5); border-left: 3px solid #f59e0b; border-radius: 4px; font-size: 0.85rem;
@@ -1043,7 +1034,6 @@
                     <div class="panel-tabs">
                         <div class="panel-tab active" data-tab="console">控制台</div>
                         <div class="panel-tab" data-tab="logs">日志</div>
-                        <div class="panel-tab" data-tab="review">审查</div>
                         <div class="panel-tab" data-tab="discussion">讨论</div>
                     </div>
                     <div class="panel-content active" id="console-panel">
@@ -1051,9 +1041,6 @@
                     </div>
                     <div class="panel-content" id="logs-panel">
                         <div id="logsList"></div>
-                    </div>
-                    <div class="panel-content" id="review-panel">
-                        <div id="candidatesList"></div>
                     </div>
                     <div class="panel-content" id="discussion-panel">
                         <div id="discussionContent"></div>
@@ -1529,7 +1516,6 @@
             connectionText: document.getElementById('connectionText'),
             logsList: document.getElementById('logsList'),
             consoleOutput: document.getElementById('consoleOutput'),
-            candidatesList: document.getElementById('candidatesList'),
             discussionContent: document.getElementById('discussionContent'),
             footerStatus: document.getElementById('footerStatus'),
             iterationNumber: document.getElementById('iterationNumber'),
@@ -2741,16 +2727,6 @@
                 case 'candidate_recommended':
                     addLog('推荐版本', `推荐版本: ${data.version_id} (信心分数: ${data.confidence_score})`, 'success');
                     break;
-                case 'review_requested':
-                    renderReviewPanel();
-                    addLog('审查请求', '等待人工审查', 'warning');
-                    break;
-                case 'candidate_approved':
-                    addLog('版本审批', `版本 ${data.version_id} 已批准`, 'success');
-                    break;
-                case 'candidate_rejected':
-                    addLog('版本拒绝', `版本 ${data.version_id} 已拒绝`, 'error');
-                    break;
                 case 'discussion_started':
                     appState.discussion = { issues: data.issues || [], proposals: data.proposals || [] };
                     renderDiscussion();
@@ -2921,36 +2897,6 @@
             } catch (e) { console.error('Failed to fetch tasks:', e); }
         }
 
-        async function approveCandidate(versionId, feedback = '') {
-            if (!appState.currentTaskId) return;
-            try {
-                const response = await fetch(`${API_BASE}/tasks/${appState.currentTaskId}/review`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ decision: 'approve', version_id: versionId, feedback })
-                });
-                if (response.ok) {
-                    addLog('版本批准', `版本 ${versionId} 已批准`, 'success');
-                    renderCandidates();
-                }
-            } catch (e) { console.error('Failed to approve:', e); }
-        }
-
-        async function rejectCandidate(versionId, feedback = '') {
-            if (!appState.currentTaskId) return;
-            try {
-                const response = await fetch(`${API_BASE}/tasks/${appState.currentTaskId}/review`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ decision: 'reject', version_id: versionId, feedback })
-                });
-                if (response.ok) {
-                    addLog('版本拒绝', `版本 ${versionId} 已拒绝`, 'error');
-                    renderCandidates();
-                }
-            } catch (e) { console.error('Failed to reject:', e); }
-        }
-
         async function pauseTask(taskId) {
             try {
                 const r = await fetch(`${API_BASE}/tasks/${taskId}/pause`, { method: 'POST' });
@@ -3107,31 +3053,8 @@
             });
         }
 
-        function renderCandidates() {
-            dom.candidatesList.innerHTML = '';
-            if (appState.candidates.length === 0) {
-                dom.candidatesList.innerHTML = '<div class="no-data">暂无候选版本</div>';
-                return;
-            }
-            appState.candidates.forEach(c => {
-                const el = document.createElement('div');
-                el.className = 'candidate-version fade-in';
-                el.innerHTML = `
-                    <div class="version-header">
-                        <div class="version-name">${c.version_id}</div>
-                        <div class="confidence-badge">${(c.confidence_score * 100).toFixed(0)}%</div>
-                    </div>
-                    <div class="version-details">变更行数: ${c.lines_changed}<br>通过测试: ${c.tests_passed}</div>
-                    <div class="version-actions">
-                        <button class="btn-approve" onclick="approveCandidate('${c.version_id}')">批准</button>
-                        <button class="btn-reject" onclick="rejectCandidate('${c.version_id}')">拒绝</button>
-                    </div>
-                `;
-                dom.candidatesList.appendChild(el);
-            });
-        }
-
-        function renderReviewPanel() { renderCandidates(); }
+        function renderCandidates() { /* removed: review gate no longer exists */ }
+        function renderReviewPanel() { /* removed */ }
 
         function renderDiscussion() {
             dom.discussionContent.innerHTML = '';
@@ -3265,8 +3188,6 @@
 
         init();
 
-        window.approveCandidate = approveCandidate;
-        window.rejectCandidate = rejectCandidate;
     </script>
 </body>
 </html>
