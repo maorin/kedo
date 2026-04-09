@@ -1,283 +1,280 @@
-# kedo — AI 开发助手
+# kedo — AI 全流程自动化开发工具
 
-从需求到部署的全流程自动化开发工具。输入自然语言需求，kedo 自动完成需求分析、任务拆解、代码生成、测试、评估、人工审查，直到部署上线。只是针对软件开发的自动化工具，非通用 AI 助手。
-
-代码参考：
-可以参考 calude代码 位置 /Users/maojj/project/claude-code-source 不能修改 /Users/maojj/project/claude-code-source 只能参考 /Users/maojj/project/claude-code-source 代码结构和实现细节，来设计 kedo 的架构和功能。 
+从需求到部署的全流程自动化开发工具。输入自然语言需求，kedo 自动完成需求分析、架构设计、代码生成、构建、测试、评估，直到部署上线。支持智能续接、增量开发、自动闭环修复。
 
 ## 核心特性
 
-**三层闭环机制** 确保产出质量：
-
-- **内层闭环**（自动修复）：编译/测试失败时，AI 自动分析错误并修复，最多重试 3 次
-- **中层闭环**（评估+人工审查）：评估不通过或人工拒绝时，进入讨论阶段 → 生成修复方案 → 人工选择 → 重新规划执行
-- **外层闭环**（生产监控）：线上异常触发新任务，形成完整的持续改进循环
+- **五步开发流程**：需求 → 设计文档 → 代码生成 → 测试评估 → 部署
+- **智能续接**：输入"继续"自动识别上次进度，扫描项目现状，只补缺失功能
+- **闭环修复**：评估不通过时自动分析失败原因 → 生成修复方案 → 重新规划执行（最多 5 轮）
+- **自动修复**：编译/测试失败时 AI 自动分析错误并修复，最多重试 3 次
+- **不完整文档检测**：续接时自动检测被截断的文档并重新生成
+- **目录结构规范**：强制使用 `src/` + `build/` 标准目录，续接时自动重构不规范的目录
+- **Web Dashboard**：实时流程图、VS Code 风格文件树、代码预览、部署环境引导
 
 ## 安装
 
 ```bash
-# 克隆项目
 git clone <repo-url>
 cd kedo
+
+# 创建虚拟环境
+python -m venv .venv
+source .venv/bin/activate
 
 # 安装依赖
 pip install -r requirements.txt
 
-# 安装为命令行工具（推荐）
+# 安装为命令行工具
 pip install -e .
 ```
 
-安装完成后，`kedo` 命令全局可用。
-
 ## 快速开始
 
-### 1. 配置 API Key
+### 1. 配置 LLM
 
 ```bash
-# 方式一：环境变量（推荐）
+# Claude (推荐)
 export ANTHROPIC_API_KEY="sk-ant-..."
 
-# 方式二：编辑配置文件
-# 修改 config.yaml 或 ~/.config/kedo/config.yaml 中的 anthropic_api_key
+# 或 Kimi Code
+export KIMI_API_KEY="sk-..."
 
-# 方式三：无 Key 体验（Mock 模式）
+# 或无 Key 体验 (Mock 模式)
 kedo --provider mock
 ```
 
-### 2. 启动 kedo
+### 2. 启动
 
 ```bash
-# 在当前项目目录启动交互式 REPL
+# REPL 模式（交互式）
 cd my-project
 kedo
 
-# 指定项目路径
-kedo /path/to/project
-
-# 指定端口和 LLM 提供商
-kedo --port 9000 --provider anthropic
-
-# 仅启动 Web 服务（无 REPL）
+# Server 模式（仅 Web Dashboard）
 kedo server
+
+# 指定端口和提供商
+kedo --port 9000 --provider anthropic
 ```
 
-### 3. 输入需求，开始开发
+### 3. 输入需求
 
 ```
-kedo ❯ 实现一个用户登录功能，包含 JWT 认证和密码加密
+kedo> 写一个在 Switch 上运行的视频播放器，能连接 NFS 共享存储播放视频
 ```
 
-kedo 会自动执行：需求分析 → 任务拆解 → 逐个编码 → 测试 → 评估 → 等待你审查。
+kedo 自动执行全流程。你可以随时 `/pause` 暂停查看进度。
 
-## 命令行用法
+### 4. 续接开发
 
 ```
-kedo [项目路径] [选项]
-
-位置参数:
-  project_path          项目根目录（默认: 当前目录）
-
-选项:
-  --port PORT           Dashboard 端口（默认: 8000）
-  --host HOST           绑定地址（默认: 127.0.0.1）
-  --provider PROVIDER   LLM 提供商: anthropic / openai / ollama / mock
-  --model MODEL         模型名称
-  --config PATH         配置文件路径
-  -v, --verbose         详细日志输出
-
-子命令:
-  server                仅启动 Web 服务，不进入 REPL
+kedo> 继续
 ```
 
-## REPL 交互命令
+kedo 会：
+1. 扫描磁盘上已有的文件和代码
+2. 加载上次评估结果（哪些功能缺失）
+3. 检测不完整的文档和不规范的目录
+4. 生成增量计划，只做缺失的部分
+5. 执行计划
 
-进入 kedo 后，除了输入自然语言需求，还支持以下命令：
+## 标准项目目录结构
+
+kedo 生成的项目强制使用以下目录结构：
+
+```
+项目根目录/
+├── src/              ← 所有源代码（不是 source/、lib/、app/）
+├── tests/            ← 测试代码
+├── build/            ← 构建产物输出（.nro、.exe 等，不在根目录）
+├── docs/             ← 文档
+│   ├── requirement/  ← 需求文档
+│   │   ├── requirement.md
+│   │   └── user-stories.md
+│   ├── sdd/          ← 设计文档
+│   │   ├── architecture.md
+│   │   ├── api-design.md
+│   │   ├── database-design.md
+│   │   └── module-design.md
+│   ├── deploy/       ← 部署文档
+│   │   └── deployment.md
+│   └── test/         ← 测试文档
+│       ├── test-plan.md
+│       ├── test-cases.md
+│       └── automation.md
+├── config/           ← 配置文件（可选）
+├── Makefile / CMakeLists.txt
+├── Dockerfile / docker-compose.yml
+└── README.md
+```
+
+续接时，如果检测到不规范的目录（如 `source/` 而非 `src/`），会自动加入重构步骤。
+
+## REPL 命令
 
 | 命令 | 说明 |
 |------|------|
-| `/help` | 显示帮助信息 |
+| `/help` | 显示帮助 |
 | `/status` | 查看当前任务状态 |
-| `/flow` | 显示流程图及各阶段状态 |
-| `/pause` | 暂停当前执行 |
-| `/resume` | 恢复执行 |
-| `/review` | 查看当前候选版本详情 |
-| `/candidates` | 列出所有候选版本 |
-| `/approve` | 批准当前候选版本 |
-| `/reject [原因]` | 拒绝候选版本并说明原因 |
-| `/discuss` | 进入讨论模式，查看/选择修复方案 |
+| `/flow` | 显示流程图 |
+| `/pause` | 暂停当前任务 |
+| `/resume` | 恢复暂停的任务 |
+| `/continue` | 从检查点续接历史任务 |
+| `/candidates` | 查看候选版本 |
+| `/discuss` | 参与闭环讨论 |
 | `/history` | 查看迭代历史 |
-| `/web` | 在浏览器中打开 Dashboard |
-| `/config` | 显示当前配置 |
-| `/clear` | 清屏 |
+| `/login` | 切换 LLM 提供商 |
+| `/web` | 打开 Dashboard |
+| `/config` | 查看配置 |
 | `/quit` | 退出 |
 
-## 典型工作流
-
-```
-$ cd my-project
-$ kedo
-
-  ██╗  ██╗███████╗██████╗  ██████╗
-  ██║ ██╔╝██╔════╝██╔══██╗██╔═══██╗
-  █████╔╝ █████╗  ██║  ██║██║   ██║
-  ██╔═██╗ ██╔══╝  ██║  ██║██║   ██║
-  ██║  ██╗███████╗██████╔╝╚██████╔╝
-  ╚═╝  ╚═╝╚══════╝╚═════╝  ╚═════╝
-  AI Development Assistant v0.1.0
-
-kedo ❯ 实现一个用户登录功能，包含 JWT 认证
-
-  ◉ 需求输入     ← 当前
-  ○ 需求分析
-  ○ 任务拆解
-  ○ 代码生成
-  ○ 编译测试
-  ○ 质量评估
-  ○ 人工审查
-  ○ 部署
-  ○ 线上监控
-
-# AI 自动执行各阶段...
-# 到达人工审查时暂停，等待你操作
-
-kedo ❯ /review          # 查看候选代码
-kedo ❯ /approve         # 满意则批准
-kedo ❯ /reject 缺少输入校验  # 不满意则拒绝，自动进入讨论→重做
-```
+自然语言输入中包含"继续""接着""上次"等关键词时，自动检测续接意图。
 
 ## Web Dashboard
 
-启动 kedo 后，Dashboard 自动可用：
+启动后访问 `http://localhost:8000`，提供：
+
+- **Pipeline 视图**：实时流程图 + 任务列表 + 控制台/日志
+- **文档视图**：浏览和编辑项目文档，Mermaid 图表渲染
+- **代码视图**：VS Code 风格目录树 + 代码预览，显示项目根路径
+- **打包视图**：构建产物列表 + 候选版本 + 打包监控统计
+- **部署视图**：部署环境列表 + 分步准备指南 + 环境检测 + 部署记录
+- **测试视图**：测试结果 + 覆盖率
+
+Dashboard 支持：
+- 输入"继续"时弹出续接确认弹窗（智能续接）
+- 任务列表按最新排序，可滚动
+- 代码文件树折叠/展开
+
+## 智能续接机制
+
+当用户输入包含续接关键词（继续、接着、上次等）时：
 
 ```
-http://localhost:8000
+用户输入 "继续"
+  ↓
+① 查询 /tasks/resumable 找到有 checkpoint 的历史任务
+② 弹出确认弹窗，显示任务 ID、描述、进度
+③ 扫描项目现状：
+   - 磁盘上有哪些源码文件（提取摘要）
+   - 哪些文档不完整（截断、过短、空章节）
+   - 目录结构是否规范（source/ → src/）
+④ 加载上次评估报告：已满足/缺失的需求
+⑤ Planner 生成增量计划（独立 prompt，不继承固化模板）：
+   - 目录重构（如有）
+   - 重新生成不完整文档
+   - 补充缺失功能代码
+   - build → test → evaluate
+⑥ 执行增量计划
 ```
 
-Dashboard 提供：
+## 部署环境检测
 
-- **实时流程图**：SVG 可视化，各阶段状态实时更新
-- **任务管理**：创建、查看、跟踪所有任务
-- **日志流**：WebSocket 推送的实时执行日志
-- **审查面板**：查看候选版本代码、批准/拒绝操作
-- **讨论面板**：查看失败分析、修复方案、提交人工意见
+部署页面自动检测：
 
-API 文档：`http://localhost:8000/docs`（Swagger UI）
+- Docker / Docker Compose
+- 编译工具链（Make、devkitPro 等）
+- 项目文件（Makefile、源代码、构建产物）
+- 部署目标（根据项目类型自动识别：Switch、Docker、Node.js 等）
 
-## 配置文件
+缺失的依赖会显示安装提示，人工步骤标记为黄色。
 
-kedo 按以下优先级查找配置（后者覆盖前者）：
+## API 接口
 
-1. `kedo.yaml` 或 `kedo.yml`（当前目录）
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/tasks` | 创建新任务 |
+| GET | `/api/tasks` | 列出所有任务 |
+| GET | `/api/tasks/resumable` | 列出可续接的历史任务 |
+| GET | `/api/tasks/{id}` | 获取任务详情 |
+| POST | `/api/tasks/{id}/resume-checkpoint` | 智能续接（从检查点恢复） |
+| POST | `/api/tasks/{id}/pause` | 暂停任务 |
+| POST | `/api/tasks/{id}/resume` | 恢复暂停的任务 |
+| GET | `/api/tasks/{id}/candidates` | 获取候选版本 |
+| GET | `/api/tasks/{id}/discussion` | 获取讨论状态 |
+| POST | `/api/tasks/{id}/discussion/input` | 提交讨论意见 |
+| GET | `/api/code/status` | 代码监控（含磁盘文件扫描） |
+| GET | `/api/code/file` | 读取代码文件内容 |
+| GET | `/api/build/status` | 打包监控（含构建产物 + 候选版本） |
+| GET | `/api/deploy/guide` | 部署指南（从部署文档解析） |
+| GET | `/api/deploy/environment` | 部署环境检测 |
+| GET | `/api/deploy/status` | 部署状态 |
+| GET | `/api/docs` | 文档目录树 |
+| GET | `/api/docs/file` | 读取文档内容 |
+| WS | `/api/ws` | WebSocket 实时事件流 |
+
+## 配置
+
+kedo 按以下优先级查找配置：
+
+1. `kedo.yaml` / `kedo.yml`（当前目录）
 2. `.kedo.yaml`（当前目录）
 3. `~/.config/kedo/config.yaml`（全局）
 4. 环境变量（最高优先级）
 
 ```yaml
-# kedo.yaml 示例
-llm_provider: "anthropic"         # anthropic / openai / ollama / mock
+# kedo.yaml
+llm_provider: "anthropic"         # anthropic / kimi / kimi-code / openai / ollama / mock
 model: "claude-sonnet-4-20250514"
-
-# API Keys（推荐用环境变量代替）
-anthropic_api_key: ""
-openai_api_key: ""
-ollama_url: "http://localhost:11434"
-
-# Agent 配置
 max_retries: 3                    # 子任务最大重试次数
-auto_fix: true                    # 自动修复开关
-review_gate: true                 # 人工审查门开关
-min_eval_score: 70                # 最低评估通过分数 (0-100)
-
-# 安全
-sandbox_mode: true                # Shell 沙箱模式
-max_context_chars: 120000         # LLM 最大上下文
-
-# 服务
+auto_fix: true                    # 自动修复
+min_eval_score: 70                # 最低评估通过分数
+max_iterations: 5                 # 最大闭环迭代次数
+auto_discussion: true             # AI 自动选择修复方案
+doc_language: "zh"                # 文档语言
+sandbox_mode: true                # Shell 沙箱
 host: "0.0.0.0"
 port: 8000
 ```
 
-环境变量映射：
+| 环境变量 | 说明 |
+|----------|------|
+| `ANTHROPIC_API_KEY` | Claude API Key |
+| `KIMI_API_KEY` | Kimi API Key |
+| `OPENAI_API_KEY` | OpenAI API Key |
+| `KEDO_PORT` | 服务端口 |
+| `KEDO_HOST` | 绑定地址 |
+| `KEDO_PROVIDER` | LLM 提供商 |
 
-| 环境变量 | 对应配置项 |
-|----------|-----------|
-| `ANTHROPIC_API_KEY` | anthropic_api_key |
-| `OPENAI_API_KEY` | openai_api_key |
-| `KEDO_PORT` | port |
-| `KEDO_HOST` | host |
-| `KEDO_PROVIDER` | llm_provider |
-| `KEDO_MODEL` | model |
+## 支持的 LLM
+
+| 提供商 | 配置值 | 说明 |
+|--------|--------|------|
+| Anthropic | `anthropic` | Claude 系列 |
+| Kimi Code | `kimi-code` | Kimi K2.5 编程专用 |
+| Kimi | `kimi` | Kimi K2.5 通用 |
+| OpenAI | `openai` | GPT 系列 |
+| Ollama | `ollama` | 本地模型 |
+| Mock | `mock` | 模拟模式，用于测试 |
 
 ## 项目结构
 
 ```
 kedo/
 ├── kedo.py                 # CLI 入口
-├── pyproject.toml          # 包配置
-├── requirements.txt        # 依赖
-├── config.yaml             # 默认配置
 ├── cli/
-│   ├── repl.py             # 交互式 REPL
-│   └── theme.py            # 终端主题 & 样式
+│   ├── repl.py             # 交互式 REPL（含续接检测）
+│   └── theme.py            # 终端主题
 ├── core/
-│   ├── agent_loop.py       # Agent 主循环（三层闭环）
-│   ├── planner.py          # 任务规划器
+│   ├── agent_loop.py       # Agent 主循环（智能续接 + 闭环）
+│   ├── planner.py          # 任务规划器（新建 + 续接两套 prompt）
 │   ├── evaluator.py        # 质量评估器
-│   ├── state_manager.py    # 状态管理
+│   ├── state_manager.py    # 状态管理（持久化任务索引）
 │   ├── version_manager.py  # 候选版本管理
 │   └── memory.py           # 上下文记忆
 ├── api/
-│   ├── server.py           # FastAPI 应用 & LLM 客户端
-│   ├── routes.py           # REST API 路由
-│   ├── schemas.py          # Pydantic 数据模型
-│   └── websocket.py        # WebSocket 事件推送
+│   ├── server.py           # FastAPI 应用
+│   ├── routes.py           # REST API（含环境检测、部署指南）
+│   ├── schemas.py          # 数据模型
+│   └── websocket.py        # WebSocket 推送
 ├── tools/
-│   ├── code_generator.py   # 代码生成工具
+│   ├── code_generator.py   # 代码生成
 │   ├── file_tool.py        # 文件操作
-│   ├── git_tool.py         # Git 操作
-│   ├── shell_executor.py   # Shell 命令执行
-│   └── test_runner.py      # 测试运行器
-├── pipeline/
-│   ├── builder.py          # 构建流水线
-│   ├── deployer.py         # 部署工具
-│   └── monitor.py          # 线上监控
+│   ├── shell_executor.py   # Shell 执行
+│   └── test_runner.py      # 测试运行
 └── dashboard/
-    └── index.html          # Web Dashboard（单页应用）
-```
-
-## API 接口
-
-主要 REST 端点：
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/tasks` | 创建新任务 |
-| GET | `/api/tasks` | 列出所有任务 |
-| GET | `/api/tasks/{id}` | 获取任务详情 |
-| GET | `/api/tasks/{id}/candidates` | 获取候选版本列表 |
-| POST | `/api/tasks/{id}/review` | 提交审查结果（approve/reject） |
-| GET | `/api/tasks/{id}/discussion` | 获取讨论状态 |
-| POST | `/api/tasks/{id}/discussion/input` | 提交讨论意见 |
-| GET | `/api/tasks/{id}/iterations` | 获取迭代历史 |
-| POST | `/api/tasks/{id}/pause` | 暂停任务 |
-| POST | `/api/tasks/{id}/resume` | 恢复任务 |
-| WS | `/ws` | WebSocket 实时事件流 |
-
-## 支持的 LLM
-
-| 提供商 | 配置值 | 说明 |
-|--------|--------|------|
-| Anthropic | `anthropic` | Claude 系列，默认推荐 |
-| OpenAI | `openai` | GPT 系列（需安装 openai 包） |
-| Ollama | `ollama` | 本地模型 |
-| Mock | `mock` | 模拟模式，无需 API Key，用于测试 |
-
-```bash
-# 安装 OpenAI 支持
-pip install kedo[openai]
-
-# 安装全部可选依赖
-pip install kedo[all]
+    └── index.html          # Web Dashboard
 ```
 
 ## 许可证
