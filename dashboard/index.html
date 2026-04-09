@@ -3000,13 +3000,54 @@
         // ============================================================
         // Task CRUD
         // ============================================================
+        // 续接意图关键词
+        const CONTINUE_KEYWORDS = ['继续', '接着', '上次', '之前的', '按之前', '接着做', '继续做',
+            '重新来', '再试', '上一个', '刚才的', '恢复之前',
+            'continue', 'resume', 'previous', 'last time', 'pick up'];
+
+        function detectContinuation(text) {
+            const lower = text.toLowerCase();
+            return CONTINUE_KEYWORDS.some(function(kw) { return lower.indexOf(kw) !== -1; });
+        }
+
         async function createTask(description) {
             if (!description.trim()) return;
+
+            // ★ 续接检测：包含"继续"等关键词时，尝试找历史任务续接
+            if (detectContinuation(description)) {
+                try {
+                    const resumableResp = await fetch(API_BASE + '/tasks/resumable');
+                    if (resumableResp.ok) {
+                        const resumable = await resumableResp.json();
+                        if (resumable && resumable.length > 0) {
+                            // 找到可续接任务，提示用户
+                            const task = resumable[0];
+                            const taskDesc = task.description.length > 50 ? task.description.substring(0, 47) + '...' : task.description;
+                            const confirmed = confirm(
+                                '检测到续接意图，找到历史任务:\n\n'
+                                + '[' + task.task_id + '] ' + taskDesc + '\n'
+                                + '状态: ' + task.status + '  进度: ' + (task.progress_percent || 0).toFixed(0) + '%\n\n'
+                                + '点击「确定」续接该任务（智能续接：只补缺失功能）\n'
+                                + '点击「取消」创建新任务'
+                            );
+                            if (confirmed) {
+                                await resumeFromCheckpoint(task.task_id, description);
+                                dom.taskInput.value = '';
+                                return;
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Continuation check failed:', e);
+                }
+            }
+
+            // 正常创建新任务
             try {
-                const response = await fetch(`${API_BASE}/tasks`, {
+                const response = await fetch(API_BASE + '/tasks', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ description })
+                    body: JSON.stringify({ description: description })
                 });
                 if (response.ok) {
                     const data = await response.json();
@@ -3021,7 +3062,7 @@
                         renderTaskList();
                         updateTaskCount();
                         dom.taskInput.value = '';
-                        addLog('任务创建', `新任务: ${description} [${newTask.id}]`, 'success');
+                        addLog('任务创建', '新任务: ' + description + ' [' + newTask.id + ']', 'success');
                     } else {
                         simulateTaskCreation(description);
                     }
@@ -3048,6 +3089,28 @@
                     updateTaskCount();
                 }
             } catch (e) { console.error('Failed to fetch tasks:', e); }
+        }
+
+        async function resumeFromCheckpoint(taskId, additionalContext) {
+            try {
+                addLog('智能续接', '正在从检查点恢复任务 [' + taskId + ']...', 'info');
+                const r = await fetch(API_BASE + '/tasks/' + taskId + '/resume-checkpoint', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ additional_context: additionalContext || '' })
+                });
+                if (r.ok) {
+                    const data = await r.json();
+                    appState.currentTaskId = taskId;
+                    addLog('智能续接', '已恢复任务 [' + taskId + '] 从步骤 ' + (data.resumed_from_step || 0) + ' 继续', 'success');
+                    getTasks();
+                } else {
+                    const err = await r.json().catch(function() { return {}; });
+                    addLog('续接失败', (err.detail || '未知错误'), 'error');
+                }
+            } catch (e) {
+                addLog('续接失败', e.toString(), 'error');
+            }
         }
 
         async function pauseTask(taskId) {
