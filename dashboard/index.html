@@ -1296,6 +1296,16 @@
                                 </tbody>
                             </table>
                         </div>
+                        <!-- 部署环境检查 -->
+                        <div class="monitor-table-wrap">
+                            <div class="monitor-table-title" style="display:flex;justify-content:space-between;align-items:center;">
+                                <span>部署环境检查</span>
+                                <button class="monitor-refresh-btn" onclick="refreshDeployEnv()" style="font-size:0.72rem;padding:0.2rem 0.6rem;">检测</button>
+                            </div>
+                            <div id="deployEnvList" style="font-size:0.85rem;">
+                                <div style="color:#888;padding:1rem;text-align:center;">点击「检测」扫描部署环境</div>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- 右侧抽拉面板 -->
@@ -1686,6 +1696,7 @@
                 dom.deployView.classList.add('active');
                 dom.deployView.style.display = 'flex';
                 refreshDeployData();
+                refreshDeployEnv();
             } else if (viewName === 'test') {
                 dom.testView.classList.add('active');
                 dom.testView.style.display = 'flex';
@@ -2110,6 +2121,82 @@
         // ============================================================
         // 部署监控
         // ============================================================
+        async function refreshDeployEnv() {
+            var list = document.getElementById('deployEnvList');
+            list.textContent = '';
+            var loading = document.createElement('div');
+            loading.style.cssText = 'color:#888;padding:1rem;text-align:center;';
+            loading.textContent = '\u68C0\u6D4B\u4E2D...';
+            list.appendChild(loading);
+
+            try {
+                var resp = await fetch(API_BASE + '/deploy/environment');
+                if (!resp.ok) throw new Error('API error');
+                var data = await resp.json();
+                list.textContent = '';
+
+                // 摘要
+                var summary = document.createElement('div');
+                summary.style.cssText = 'padding:0.5rem 1rem;display:flex;gap:1rem;font-size:0.8rem;margin-bottom:0.5rem;';
+                var readySpan = document.createElement('span');
+                readySpan.style.color = '#22c55e';
+                readySpan.textContent = '\u2705 \u5C31\u7EEA: ' + data.ready;
+                var missingSpan = document.createElement('span');
+                missingSpan.style.color = data.missing > 0 ? '#ef4444' : '#888';
+                missingSpan.textContent = (data.missing > 0 ? '\u274C' : '\u2705') + ' \u7F3A\u5931: ' + data.missing;
+                summary.appendChild(readySpan);
+                summary.appendChild(missingSpan);
+                if (data.manual_required > 0) {
+                    var manualSpan = document.createElement('span');
+                    manualSpan.style.color = '#f59e0b';
+                    manualSpan.textContent = '\u{1F6A7} \u9700\u4EBA\u5DE5\u51C6\u5907: ' + data.manual_required;
+                    summary.appendChild(manualSpan);
+                }
+                list.appendChild(summary);
+
+                // 每项检查
+                (data.checks || []).forEach(function(c) {
+                    var item = document.createElement('div');
+                    item.style.cssText = 'padding:0.5rem 1rem;border-bottom:1px solid rgba(100,200,255,0.05);display:flex;align-items:flex-start;gap:0.5rem;';
+
+                    var icon = document.createElement('span');
+                    icon.style.cssText = 'flex-shrink:0;font-size:0.9rem;';
+                    icon.textContent = c.status === 'ready' ? '\u2705' : '\u274C';
+
+                    var content = document.createElement('div');
+                    content.style.cssText = 'flex:1;min-width:0;';
+
+                    var title = document.createElement('div');
+                    title.style.cssText = 'font-weight:600;color:' + (c.status === 'ready' ? '#c9d1d9' : '#ef4444') + ';';
+                    title.textContent = c.name;
+                    content.appendChild(title);
+
+                    var desc = document.createElement('div');
+                    desc.style.cssText = 'font-size:0.75rem;color:#666;';
+                    desc.textContent = c.description + (c.version ? ' \u2014 ' + c.version : '');
+                    content.appendChild(desc);
+
+                    if (c.status === 'missing' && c.install_hint) {
+                        var hint = document.createElement('div');
+                        hint.style.cssText = 'margin-top:0.3rem;padding:0.4rem 0.6rem;background:rgba(239,68,68,0.1);border-left:3px solid #ef4444;border-radius:3px;font-size:0.72rem;color:#f59e0b;font-family:monospace;white-space:pre-wrap;';
+                        hint.textContent = '\u{1F4A1} ' + c.install_hint;
+                        content.appendChild(hint);
+                    }
+
+                    item.appendChild(icon);
+                    item.appendChild(content);
+                    list.appendChild(item);
+                });
+
+            } catch (e) {
+                list.textContent = '';
+                var err = document.createElement('div');
+                err.style.cssText = 'color:#ef4444;padding:1rem;text-align:center;';
+                err.textContent = '\u68C0\u6D4B\u5931\u8D25: ' + e;
+                list.appendChild(err);
+            }
+        }
+
         async function refreshDeployData() {
             try {
                 const resp = await fetch(`${API_BASE}/deploy/status`);

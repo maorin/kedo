@@ -904,6 +904,88 @@ def _scan_build_artifacts() -> list[dict]:
     artifacts.sort(key=lambda a: a.get("modified", ""), reverse=True)
     return artifacts
 
+@router.get("/deploy/environment")
+async def get_deploy_environment():
+    """检测部署环境依赖状态，标记哪些需要人工准备"""
+    import subprocess
+    import shutil
+
+    project = Path(_project_path)
+    checks = []
+
+    def check_cmd(name, cmd, desc, install_hint):
+        """检查命令是否可用"""
+        found = shutil.which(cmd) is not None
+        version = ""
+        if found:
+            try:
+                r = subprocess.run([cmd, "--version"], capture_output=True, text=True, timeout=5)
+                version = (r.stdout or r.stderr or "").strip().split("\n")[0][:80]
+            except Exception:
+                version = "installed"
+        checks.append({
+            "name": name,
+            "command": cmd,
+            "description": desc,
+            "status": "ready" if found else "missing",
+            "version": version,
+            "install_hint": install_hint if not found else "",
+            "manual": not found,
+        })
+
+    def check_file(name, path, desc, hint):
+        """检查文件是否存在"""
+        exists = Path(path).exists() if not path.startswith("/") else Path(path).exists()
+        # 相对于项目目录
+        if not Path(path).is_absolute():
+            exists = (project / path).exists()
+        checks.append({
+            "name": name,
+            "path": path,
+            "description": desc,
+            "status": "ready" if exists else "missing",
+            "install_hint": hint if not exists else "",
+            "manual": not exists,
+        })
+
+    # ---- 编译工具链 ----
+    check_cmd("Docker", "docker", "容器化构建环境", "curl -fsSL https://get.docker.com | sh")
+    check_cmd("Docker Compose", "docker-compose", "容器编排", "apt install docker-compose 或 pip install docker-compose")
+    check_cmd("Make", "make", "构建工具", "apt install build-essential")
+    check_cmd("Git", "git", "版本控制", "apt install git")
+
+    # ---- devkitPro (Switch 交叉编译) ----
+    devkitpro = os.environ.get("DEVKITPRO", "/opt/devkitpro")
+    check_file("devkitPro", devkitpro, "Switch 交叉编译工具链",
+               "参考 https://devkitpro.org/wiki/Getting_Started 安装\n"
+               "或使用 Docker: docker-compose build")
+    check_cmd("nxlink", "nxlink", "Switch WiFi 部署工具 (devkitPro)",
+              "安装 devkitPro 后自动包含，或 dkp-pacman -S switch-tools")
+
+    # ---- 项目文件 ----
+    check_file("Dockerfile", "docker-compose.yml", "Docker 构建配置", "kedo 应自动生成此文件")
+    check_file("Makefile", "Makefile", "项目构建脚本", "kedo 应自动生成此文件")
+    check_file("源代码", "source/main.cpp", "项目主入口", "kedo 应自动生成代码")
+
+    # ---- 部署目标 ----
+    check_file("构建产物", "switchvideo.nro", "Switch 可执行文件",
+               "执行 make 或 docker-compose run build 生成")
+
+    # 统计
+    ready_count = sum(1 for c in checks if c["status"] == "ready")
+    missing_count = sum(1 for c in checks if c["status"] == "missing")
+    manual_count = sum(1 for c in checks if c.get("manual"))
+
+    return {
+        "checks": checks,
+        "ready": ready_count,
+        "missing": missing_count,
+        "manual_required": manual_count,
+        "all_ready": missing_count == 0,
+        "project_path": str(project.resolve()),
+    }
+
+
 @router.get("/deploy/status")
 async def get_deploy_status():
     """获取部署监控状态汇总，含部署地址列表和 Agent 列表"""
