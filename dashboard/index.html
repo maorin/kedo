@@ -1049,61 +1049,84 @@
             </div>
 
             <!-- ====== 代码监控视图 ====== -->
-            <div class="monitor-view" id="codeView">
-                <div class="monitor-header">
-                    <h2>代码监控</h2>
-                    <button class="monitor-refresh-btn" onclick="refreshCodeData()">刷新</button>
-                </div>
-                <div class="monitor-cards">
-                    <div class="monitor-card">
-                        <div class="monitor-card-title">代码生成任务</div>
-                        <div class="monitor-card-value info" id="codeTotal">0</div>
-                    </div>
-                    <div class="monitor-card">
-                        <div class="monitor-card-title">已完成</div>
-                        <div class="monitor-card-value success" id="codeSuccess">0</div>
-                    </div>
-                    <div class="monitor-card">
-                        <div class="monitor-card-title">失败</div>
-                        <div class="monitor-card-value error" id="codeFailed">0</div>
-                    </div>
-                    <div class="monitor-card">
-                        <div class="monitor-card-title">进行中</div>
-                        <div class="monitor-card-value warning" id="codeRunning">0</div>
-                    </div>
-                </div>
-                <div class="monitor-table-wrap">
-                    <div class="monitor-table-title">代码生成记录</div>
-                    <table class="monitor-table">
-                        <thead>
-                            <tr>
-                                <th>任务</th>
-                                <th>文件数</th>
-                                <th>代码行数</th>
-                                <th>状态</th>
-                                <th>开始时间</th>
-                                <th>耗时</th>
-                            </tr>
-                        </thead>
-                        <tbody id="codeTableBody">
-                            <tr><td colspan="6" style="text-align:center;color:#888;padding:2rem;">暂无代码生成记录</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-                <!-- 文件树 & 代码预览 -->
-                <div style="display:flex;gap:1rem;margin-top:1rem;min-height:400px;" id="codeFilesWrap">
-                    <div style="width:280px;flex-shrink:0;background:var(--bg-tertiary,#1a1a2e);border-radius:8px;padding:0.5rem;overflow-y:auto;max-height:600px;">
-                        <div class="monitor-table-title" style="margin-bottom:0.5rem;padding:0 0.25rem;">资源管理器</div>
-                        <div id="codeFileList" style="font-size:0.82rem;font-family:'Menlo','Monaco','Consolas',monospace;">
-                            <div style="color:#888;padding:1rem;text-align:center;">暂无文件</div>
+            <div class="monitor-view" id="codeView" style="padding:0;overflow:hidden;">
+                <div class="deploy-layout">
+                    <!-- 左侧主内容：文件树 + 代码预览 -->
+                    <div class="deploy-main" style="display:flex;flex-direction:column;">
+                        <div class="monitor-header">
+                            <h2>代码监控</h2>
+                            <div style="display:flex;gap:0.5rem;">
+                                <button class="monitor-refresh-btn" onclick="toggleCodeDrawer()" id="codeDrawerBtn">统计 / 记录</button>
+                                <button class="monitor-refresh-btn" onclick="refreshCodeData()">刷新</button>
+                            </div>
+                        </div>
+                        <!-- 文件树 & 代码预览 -->
+                        <div style="display:flex;gap:1rem;flex:1;min-height:0;" id="codeFilesWrap">
+                            <div style="width:280px;flex-shrink:0;background:var(--bg-tertiary,#1a1a2e);border-radius:8px;padding:0.5rem;overflow-y:auto;">
+                                <div class="monitor-table-title" style="margin-bottom:0.5rem;padding:0 0.25rem;">资源管理器</div>
+                                <div id="codeFileList" style="font-size:0.82rem;font-family:'Menlo','Monaco','Consolas',monospace;">
+                                    <div style="color:#888;padding:1rem;text-align:center;">暂无文件</div>
+                                </div>
+                            </div>
+                            <div style="flex:1;background:var(--bg-tertiary,#1a1a2e);border-radius:8px;padding:0.75rem;overflow:auto;display:flex;flex-direction:column;">
+                                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;flex-shrink:0;">
+                                    <div class="monitor-table-title" id="codePreviewTitle" style="margin:0;">选择文件查看代码</div>
+                                    <span id="codePreviewMeta" style="font-size:0.8rem;color:#888;"></span>
+                                </div>
+                                <pre id="codePreviewContent" style="margin:0;padding:0.75rem;background:var(--bg-primary,#0d0d1a);border-radius:6px;font-size:0.82rem;line-height:1.5;overflow:auto;white-space:pre;color:#c9d1d9;flex:1;min-height:200px;"><code style="color:#888;">// 点击左侧文件查看代码内容</code></pre>
+                            </div>
                         </div>
                     </div>
-                    <div style="flex:1;background:var(--bg-tertiary,#1a1a2e);border-radius:8px;padding:0.75rem;overflow:auto;max-height:600px;">
-                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
-                            <div class="monitor-table-title" id="codePreviewTitle" style="margin:0;">选择文件查看代码</div>
-                            <span id="codePreviewMeta" style="font-size:0.8rem;color:#888;"></span>
+
+                    <!-- 右侧抽拉面板：统计卡片 + 生成记录 -->
+                    <div class="deploy-drawer" id="codeDrawer">
+                        <button class="deploy-drawer-toggle" onclick="toggleCodeDrawer()" title="展开/收起">&laquo;</button>
+                        <div class="deploy-drawer-inner">
+                            <div class="drawer-header">
+                                <h3>统计 / 记录</h3>
+                                <button class="drawer-close-btn" onclick="toggleCodeDrawer()">&times;</button>
+                            </div>
+
+                            <!-- 统计卡片 -->
+                            <div class="drawer-section">
+                                <div class="drawer-section-title">代码统计</div>
+                                <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;padding:0 0.5rem;">
+                                    <div style="background:rgba(15,23,42,0.6);border-radius:6px;padding:0.8rem;text-align:center;">
+                                        <div style="font-size:0.65rem;color:#888;text-transform:uppercase;letter-spacing:1px;">文件总数</div>
+                                        <div style="font-size:1.4rem;font-weight:700;color:#58a6ff;" id="codeTotal">0</div>
+                                    </div>
+                                    <div style="background:rgba(15,23,42,0.6);border-radius:6px;padding:0.8rem;text-align:center;">
+                                        <div style="font-size:0.65rem;color:#888;text-transform:uppercase;letter-spacing:1px;">已完成</div>
+                                        <div style="font-size:1.4rem;font-weight:700;color:#22c55e;" id="codeSuccess">0</div>
+                                    </div>
+                                    <div style="background:rgba(15,23,42,0.6);border-radius:6px;padding:0.8rem;text-align:center;">
+                                        <div style="font-size:0.65rem;color:#888;text-transform:uppercase;letter-spacing:1px;">失败</div>
+                                        <div style="font-size:1.4rem;font-weight:700;color:#ef4444;" id="codeFailed">0</div>
+                                    </div>
+                                    <div style="background:rgba(15,23,42,0.6);border-radius:6px;padding:0.8rem;text-align:center;">
+                                        <div style="font-size:0.65rem;color:#888;text-transform:uppercase;letter-spacing:1px;">进行中</div>
+                                        <div style="font-size:1.4rem;font-weight:700;color:#f59e0b;" id="codeRunning">0</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- 生成记录表格 -->
+                            <div class="drawer-section" style="border-bottom:none;">
+                                <div class="drawer-section-title">代码生成记录</div>
+                                <table class="drawer-table">
+                                    <thead>
+                                        <tr>
+                                            <th>任务</th>
+                                            <th>文件</th>
+                                            <th>状态</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="codeTableBody">
+                                        <tr><td colspan="3" class="drawer-empty">暂无代码生成记录</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
-                        <pre id="codePreviewContent" style="margin:0;padding:0.75rem;background:var(--bg-primary,#0d0d1a);border-radius:6px;font-size:0.82rem;line-height:1.5;overflow:auto;white-space:pre;color:#c9d1d9;min-height:200px;"><code style="color:#888;">// 点击左侧文件查看代码内容</code></pre>
                     </div>
                 </div>
             </div>
@@ -1580,7 +1603,7 @@
                 }
             } else if (viewName === 'code') {
                 dom.codeView.classList.add('active');
-                dom.codeView.style.display = 'block';
+                dom.codeView.style.display = 'flex';
                 refreshCodeData();
             } else if (viewName === 'build') {
                 dom.buildView.classList.add('active');
@@ -1626,8 +1649,8 @@
             if (!data.records || data.records.length === 0) {
                 const tr = document.createElement('tr');
                 const td = document.createElement('td');
-                td.colSpan = 6;
-                td.style.cssText = 'text-align:center;color:#888;padding:2rem;';
+                td.colSpan = 3;
+                td.className = 'drawer-empty';
                 td.textContent = '暂无代码生成记录';
                 tr.appendChild(td);
                 tbody.appendChild(tr);
@@ -1656,12 +1679,9 @@
             data.records.forEach(r => {
                 const tr = document.createElement('tr');
                 const cells = [
-                    { text: r.task || '-' },
-                    { text: String(r.files || 0) },
-                    { text: String(r.lines || 0) },
+                    { text: (r.task || '-').substring(0, 30) },
+                    { text: String(r.files || 0) + ' files' },
                     { badge: true, status: r.status },
-                    { text: r.start_time || '-' },
-                    { text: r.duration || '-' }
                 ];
                 cells.forEach(c => {
                     const td = document.createElement('td');
@@ -1993,7 +2013,14 @@
             const drawer = document.getElementById('deployDrawer');
             const toggle = drawer.querySelector('.deploy-drawer-toggle');
             drawer.classList.toggle('open');
-            toggle.textContent = drawer.classList.contains('open') ? '▶' : '◀';
+            toggle.textContent = drawer.classList.contains('open') ? '\u25B6' : '\u25C0';
+        }
+
+        function toggleCodeDrawer() {
+            const drawer = document.getElementById('codeDrawer');
+            const toggle = drawer.querySelector('.deploy-drawer-toggle');
+            drawer.classList.toggle('open');
+            toggle.textContent = drawer.classList.contains('open') ? '\u25B6' : '\u00AB';
         }
 
         function renderDeployEndpoints(endpoints) {
