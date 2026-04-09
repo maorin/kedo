@@ -210,6 +210,16 @@ class AgentLoop:
                              phase="planning", summary=f"{len(plan.subtasks)} 个子任务: {plan_detail}")
             await self._emit(task_id, EventType.STEP_COMPLETED, step="planning", subtask_count=len(plan.subtasks))
 
+            # ★ 计划生成后立即保存 checkpoint（让 Dashboard 能看到子任务列表）
+            await self.state.save_checkpoint(AgentCheckpoint(
+                task_id=task_id,
+                current_step_index=-1,
+                plan=plan,
+                memory_snapshot=self.memory.snapshot(),
+                code_changes=[],
+                test_results=None,
+            ))
+
             # 检查是否被暂停 (计划生成后的审查点)
             await self.state.wait_if_paused(task_id)
 

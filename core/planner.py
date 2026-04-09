@@ -165,6 +165,72 @@ class Planner:
         prompt = prompt.replace("{doc_templates}", doc_templates)
         return prompt
 
+    def _get_incremental_system_prompt(self, project_state: dict) -> str:
+        """已有项目的增量规划 prompt — 不包含固化文档步骤，只聚焦缺失部分"""
+        doc_lang = self._config.get("doc_language", "zh")
+
+        # 构建项目现状描述
+        state_lines = []
+        if project_state.get("has_source_code"):
+            state_lines.append(f"已有 {project_state.get('source_count', 0)} 个源码文件: {', '.join(project_state.get('source_files', [])[:10])}")
+        if project_state.get("has_docs"):
+            state_lines.append(f"已有文档: {', '.join(project_state.get('doc_files', [])[:8])}")
+        if project_state.get("has_build_artifacts"):
+            state_lines.append(f"已有构建产物: {', '.join(project_state.get('artifacts', []))}")
+        else:
+            state_lines.append("没有构建产物（可执行文件）")
+        if project_state.get("has_makefile") or project_state.get("has_cmake"):
+            state_lines.append("有构建脚本")
+        else:
+            state_lines.append("没有构建脚本（Makefile/CMakeLists.txt）")
+        last_eval = project_state.get("last_eval")
+        if last_eval:
+            state_lines.append(f"上次评估: {last_eval.get('score', 0)}/100")
+            missed = last_eval.get("requirements_missed", [])
+            if missed:
+                state_lines.append(f"缺失需求: {', '.join(missed[:5])}")
+
+        state_text = "\n".join(f"- {s}" for s in state_lines)
+
+        return f"""你是 kedo 的增量规划器。这是一个**已有内容的项目**，不是从零开始。
+
+## 项目现状
+{state_text}
+
+## 核心规则（必须严格遵守）
+
+1. **绝对禁止重新生成已有的文档和代码** — docs/ 下的文档已存在，不要再生成
+2. **只做用户要求的事** — 分析用户的提示词，只做他要求的
+3. **如果用户提到构建/打包问题** — 只生成或修复 Makefile/CMakeLists.txt，不要动其他文件
+4. **如果用户提到某个功能缺失** — 只补充该功能的代码
+5. **如果用户没有明确说要做什么** — 根据"缺失需求"和"没有构建产物"来判断该做什么
+6. **计划精简** — 通常 3-8 个步骤，绝不超过 10 步
+7. **末尾必须有** build + test + evaluate
+
+## 输出格式
+
+JSON 数组，每个元素:
+- title: 简短描述
+- description: 详细说明（包含文件路径）
+- step_type: "code_generate" | "build" | "test" | "evaluate"
+- dependencies: 依赖的 subtask id 列表（字符串数组如 ["subtask_0"]）
+
+## 标准目录结构
+
+源代码: src/，构建产物: build/，文档: docs/
+
+## 禁止事项
+
+- ❌ 不要生成 docs/requirement/ 下的任何文件
+- ❌ 不要生成 docs/sdd/ 下的任何文件
+- ❌ 不要生成 docs/deploy/ 下的任何文件
+- ❌ 不要生成 docs/test/ 下的任何文件
+- ❌ 不要重写已有的源码文件（除非用户明确要求修改）
+- ❌ 不要生成超过 10 个步骤的计划
+
+文档语言: {doc_lang}
+"""
+
     async def create_plan(
         self,
         task_id: str,
@@ -182,13 +248,26 @@ class Planner:
             description: 自然语言需求描述
             project_context: 项目上下文 (文件结构、已有代码等)
         """
+        # ★ 根据项目状态选择系统 prompt
+        project_state = project_context.get("project_state", {}) if project_context else {}
+        is_existing_project = project_state.get("has_source_code") or project_state.get("has_docs")
+
+        if is_existing_project:
+            # 已有项目 → 使用续接模式的 prompt（不包含固化文档步骤）
+            system_prompt = self._get_incremental_system_prompt(project_state)
+        else:
+            # 空项目 → 使用完整五步流程 prompt
+            system_prompt = self._get_system_prompt()
+
         messages = [
-            {"role": "system", "content": self._get_system_prompt()},
+            {"role": "system", "content": system_prompt},
         ]
 
         # 添加项目上下文
         if project_context:
-            context_str = json.dumps(project_context, indent=2, ensure_ascii=False)
+            # 去掉 project_state 避免重复（已注入到系统 prompt）
+            ctx = {k: v for k, v in project_context.items() if k != "project_state"}
+            context_str = json.dumps(ctx, indent=2, ensure_ascii=False)
             messages.append({
                 "role": "user",
                 "content": f"Project context:\n{context_str}",
@@ -206,49 +285,10 @@ class Planner:
                 "content": f"Relevant past experiences:\n{exp_str}",
             })
 
-        # ★ 根据项目状态自动判断：从头做 vs 增量做
-        project_state = project_context.get("project_state", {}) if project_context else {}
-        state_hint = ""
-        if project_state.get("has_source_code") or project_state.get("has_docs"):
-            # 项目已有内容 → 提示 Planner 做增量而非从头
-            state_parts = []
-            if project_state.get("has_source_code"):
-                state_parts.append(f"已有 {project_state.get('source_count', 0)} 个源码文件: {', '.join(project_state.get('source_files', [])[:10])}")
-            if project_state.get("has_docs"):
-                state_parts.append(f"已有文档: {', '.join(project_state.get('doc_files', [])[:8])}")
-            if project_state.get("has_build_artifacts"):
-                state_parts.append(f"已有构建产物: {', '.join(project_state.get('artifacts', []))}")
-            elif project_state.get("has_source_code"):
-                state_parts.append("注意: 没有构建产物，需要确保构建脚本正确")
-            if not project_state.get("has_makefile") and not project_state.get("has_cmake"):
-                state_parts.append("注意: 没有构建脚本（Makefile/CMakeLists.txt），需要生成")
-            last_eval = project_state.get("last_eval")
-            if last_eval:
-                state_parts.append(f"上次评估: {last_eval.get('score', 0)}/100")
-                missed = last_eval.get("requirements_missed", [])
-                if missed:
-                    state_parts.append(f"缺失需求: {', '.join(missed[:5])}")
-                suggestions = last_eval.get("suggestions", [])
-                if suggestions:
-                    state_parts.append(f"改进建议: {', '.join(suggestions[:3])}")
-
-            state_hint = (
-                "\n\n=== 项目现状 ===\n"
-                + "\n".join(f"- {s}" for s in state_parts)
-                + "\n\n=== 重要 ===\n"
-                "根据以上项目现状和用户的需求，你需要自主判断：\n"
-                "1. 如果用户是全新需求且项目为空 → 按五步流程从头生成\n"
-                "2. 如果项目已有代码/文档且用户想继续 → 只生成缺失的部分，不重新生成已有文件\n"
-                "3. 如果用户提到构建/打包问题 → 只修复构建脚本，不重新生成所有代码\n"
-                "4. 如果用户提到某个具体功能缺失 → 只补充该功能\n"
-                "5. 如果有上次评估结果 → 优先修复评估中指出的问题\n"
-            )
-
         messages.append({
             "role": "user",
             "content": (
                 f"Task: {description}\n\n"
-                f"请根据用户需求和项目现状生成执行计划。{state_hint}\n"
                 f"Generate the execution plan as JSON."
             ),
         })
