@@ -904,6 +904,149 @@ def _scan_build_artifacts() -> list[dict]:
     artifacts.sort(key=lambda a: a.get("modified", ""), reverse=True)
     return artifacts
 
+@router.get("/deploy/guide")
+async def get_deploy_guide():
+    """根据项目类型生成部署指南：目标、准备步骤、注意事项"""
+    project = Path(_project_path)
+
+    # 检测项目类型
+    has_dockerfile = (project / "docker-compose.yml").exists() or (project / "Dockerfile").exists()
+    has_makefile = (project / "Makefile").exists()
+    has_nro = any(project.glob("*.nro"))
+    has_switch_source = (project / "source" / "main.cpp").exists()
+    has_package_json = (project / "package.json").exists()
+    has_go_mod = (project / "go.mod").exists()
+    has_cargo = (project / "Cargo.toml").exists()
+
+    # 读取部署文档获取额外信息
+    deploy_doc = ""
+    deploy_path = project / "docs" / "deploy" / "deployment.md"
+    if deploy_path.exists():
+        try:
+            deploy_doc = deploy_path.read_text(encoding="utf-8")[:2000]
+        except Exception:
+            pass
+
+    # 根据项目类型生成指南
+    if has_switch_source or has_nro:
+        target = {
+            "platform": "Nintendo Switch",
+            "description": "将编译后的 .nro 文件部署到 Nintendo Switch 游戏机上运行",
+            "icon": "\U0001F3AE",
+            "requirements": [
+                "一台已破解的 Nintendo Switch 游戏机（支持 Atmosphere 自定义固件）",
+                "一台用于编译代码的服务器或电脑（本机或远程服务器）",
+                "Switch 和服务器在同一局域网内（用于 WiFi 部署）",
+            ],
+        }
+        steps = [
+            {
+                "step": 1,
+                "title": "准备编译环境",
+                "description": "安装 devkitPro 交叉编译工具链，或使用 Docker 容器化构建",
+                "manual": not has_dockerfile,
+                "commands": [
+                    "# 方式一：Docker（推荐）",
+                    "docker-compose build",
+                    "",
+                    "# 方式二：本地安装 devkitPro",
+                    "# 参考 https://devkitpro.org/wiki/Getting_Started",
+                ],
+                "status": "ready" if has_dockerfile else "todo",
+            },
+            {
+                "step": 2,
+                "title": "编译项目",
+                "description": "使用 make 编译源代码，生成 switchvideo.nro 可执行文件",
+                "manual": not has_makefile,
+                "commands": [
+                    "# Docker 方式",
+                    "docker-compose run --rm build make",
+                    "",
+                    "# 本地方式",
+                    "make clean && make",
+                ],
+                "status": "ready" if has_nro else ("todo" if has_makefile else "blocked"),
+                "note": "当前缺少 Makefile" if not has_makefile else None,
+            },
+            {
+                "step": 3,
+                "title": "准备 Switch 游戏机",
+                "description": "确保 Switch 已安装 Atmosphere 自定义固件和 hbmenu",
+                "manual": True,
+                "commands": [
+                    "# Switch 需要:",
+                    "# 1. Atmosphere 自定义固件 (https://github.com/Atmosphere-NX/Atmosphere)",
+                    "# 2. hbmenu (Homebrew Menu，Atmosphere 自带)",
+                    "# 3. SD 卡上有 /switch/ 目录",
+                ],
+                "status": "manual",
+            },
+            {
+                "step": 4,
+                "title": "部署到 Switch",
+                "description": "通过 SD 卡复制或 WiFi 推送 .nro 文件到 Switch",
+                "manual": True,
+                "commands": [
+                    "# 方式一：SD 卡（简单可靠）",
+                    "# 1. 关机取出 SD 卡，插入电脑",
+                    "# 2. 复制 switchvideo.nro 到 SD 卡 /switch/ 目录",
+                    "# 3. SD 卡插回 Switch，启动 hbmenu",
+                    "",
+                    "# 方式二：WiFi 推送（开发调试）",
+                    "# 1. Switch 启动 hbmenu，按 Y 开启 nxlink 监听",
+                    "# 2. 记录 Switch 显示的 IP 地址",
+                    "nxlink -a <switch_ip> switchvideo.nro",
+                ],
+                "status": "manual",
+            },
+            {
+                "step": 5,
+                "title": "运行和验证",
+                "description": "在 Switch 上启动 hbmenu，找到 switchvideo 并运行",
+                "manual": True,
+                "commands": [
+                    "# 1. 在 hbmenu 中找到 switchvideo",
+                    "# 2. 按 A 启动",
+                    "# 3. 验证 NFS 连接、视频播放等功能",
+                    "# 4. 如需调试日志，使用 nxlink 的 -s 参数查看",
+                    "nxlink -a <switch_ip> -s switchvideo.nro",
+                ],
+                "status": "manual",
+            },
+        ]
+    elif has_package_json:
+        target = {
+            "platform": "Node.js",
+            "description": "部署 Node.js 应用到服务器",
+            "icon": "\U0001F7E9",
+            "requirements": ["Node.js 运行环境", "目标服务器"],
+        }
+        steps = [
+            {"step": 1, "title": "安装依赖", "description": "npm install", "commands": ["npm install"], "status": "todo", "manual": False},
+            {"step": 2, "title": "构建", "description": "npm run build", "commands": ["npm run build"], "status": "todo", "manual": False},
+            {"step": 3, "title": "部署", "description": "部署到服务器", "commands": ["npm start"], "status": "todo", "manual": True},
+        ]
+    else:
+        target = {
+            "platform": "通用",
+            "description": "将构建产物部署到目标环境",
+            "icon": "\U0001F4E6",
+            "requirements": ["目标服务器或运行环境"],
+        }
+        steps = [
+            {"step": 1, "title": "编译", "description": "构建项目", "commands": ["make"], "status": "todo", "manual": False},
+            {"step": 2, "title": "部署", "description": "复制到目标环境", "commands": [], "status": "todo", "manual": True},
+        ]
+
+    return {
+        "target": target,
+        "steps": steps,
+        "project_path": str(project.resolve()),
+        "deploy_doc_exists": bool(deploy_doc),
+    }
+
+
 @router.get("/deploy/environment")
 async def get_deploy_environment():
     """检测部署环境依赖状态，标记哪些需要人工准备"""

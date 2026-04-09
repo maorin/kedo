@@ -1256,7 +1256,7 @@
                         <div class="monitor-header">
                             <h2>部署监控</h2>
                             <div style="display:flex;gap:0.5rem;">
-                                <button class="monitor-refresh-btn" onclick="toggleDeployDrawer()" id="deployDrawerBtn">地址 / Agent</button>
+                                <button class="monitor-refresh-btn" onclick="toggleDeployDrawer()" id="deployDrawerBtn">部署指南</button>
                                 <button class="monitor-refresh-btn" onclick="refreshDeployData()">刷新</button>
                             </div>
                         </div>
@@ -1308,45 +1308,49 @@
                         </div>
                     </div>
 
-                    <!-- 右侧抽拉面板 -->
+                    <!-- 右侧抽拉面板：部署指南 -->
                     <div class="deploy-drawer" id="deployDrawer">
                         <button class="deploy-drawer-toggle" onclick="toggleDeployDrawer()" title="展开/收起">◀</button>
                         <div class="deploy-drawer-inner">
                             <div class="drawer-header">
-                                <h3>详情面板</h3>
+                                <h3>部署指南</h3>
                                 <button class="drawer-close-btn" onclick="toggleDeployDrawer()">✕</button>
                             </div>
 
-                            <!-- 部署地址 -->
+                            <!-- 部署目标 -->
                             <div class="drawer-section">
-                                <div class="drawer-section-title">部署地址与状态</div>
-                                <table class="drawer-table">
-                                    <thead>
-                                        <tr>
-                                            <th>服务</th>
-                                            <th>地址</th>
-                                            <th>状态</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody id="deployEndpointBody">
-                                        <tr><td colspan="3" class="drawer-empty">暂无部署地址</td></tr>
-                                    </tbody>
-                                </table>
+                                <div class="drawer-section-title">部署目标</div>
+                                <div id="deployGuideTarget" style="padding:0 0.5rem;font-size:0.82rem;color:#c9d1d9;line-height:1.6;">
+                                    <div style="color:#888;">加载中...</div>
+                                </div>
                             </div>
 
-                            <!-- Agent 列表 -->
+                            <!-- 分步指南 -->
+                            <div class="drawer-section">
+                                <div class="drawer-section-title">准备步骤</div>
+                                <div id="deployGuideSteps" style="padding:0 0.3rem;font-size:0.82rem;">
+                                    <div style="color:#888;padding:0.5rem;">加载中...</div>
+                                </div>
+                            </div>
+
+                            <!-- 环境检测结果 -->
                             <div class="drawer-section" style="border-bottom:none;">
-                                <div class="drawer-section-title">Agent 列表</div>
+                                <div class="drawer-section-title" style="display:flex;justify-content:space-between;align-items:center;">
+                                    <span>环境检测</span>
+                                    <button class="monitor-refresh-btn" onclick="refreshDeployEnvDrawer()" style="font-size:0.68rem;padding:0.15rem 0.5rem;">检测</button>
+                                </div>
+                                <div id="deployEnvDrawerList" style="font-size:0.8rem;">
+                                    <div style="color:#888;padding:0.5rem;text-align:center;">点击检测</div>
+                                </div>
+                            </div>
+
+                            <!-- 部署地址 -->
+                            <div class="drawer-section" style="border-bottom:none;">
+                                <div class="drawer-section-title">部署地址</div>
                                 <table class="drawer-table">
-                                    <thead>
-                                        <tr>
-                                            <th>名称</th>
-                                            <th>阶段</th>
-                                            <th>状态</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody id="deployAgentBody">
-                                        <tr><td colspan="3" class="drawer-empty">暂无 Agent 信息</td></tr>
+                                    <thead><tr><th>服务</th><th>地址</th><th>状态</th></tr></thead>
+                                    <tbody id="deployEndpointBody">
+                                        <tr><td colspan="3" class="drawer-empty">暂无部署地址</td></tr>
                                     </tbody>
                                 </table>
                             </div>
@@ -1697,6 +1701,8 @@
                 dom.deployView.style.display = 'flex';
                 refreshDeployData();
                 refreshDeployEnv();
+                refreshDeployGuide();
+                refreshDeployEnvDrawer();
             } else if (viewName === 'test') {
                 dom.testView.classList.add('active');
                 dom.testView.style.display = 'flex';
@@ -2121,6 +2127,161 @@
         // ============================================================
         // 部署监控
         // ============================================================
+        async function refreshDeployGuide() {
+            try {
+                var resp = await fetch(API_BASE + '/deploy/guide');
+                if (!resp.ok) return;
+                var data = await resp.json();
+
+                // 渲染部署目标
+                var targetEl = document.getElementById('deployGuideTarget');
+                targetEl.textContent = '';
+                var t = data.target;
+
+                var iconLine = document.createElement('div');
+                iconLine.style.cssText = 'font-size:1.5rem;margin-bottom:0.5rem;';
+                iconLine.textContent = (t.icon || '') + ' ' + (t.platform || '');
+                targetEl.appendChild(iconLine);
+
+                var descLine = document.createElement('div');
+                descLine.style.cssText = 'color:#aaa;margin-bottom:0.75rem;';
+                descLine.textContent = t.description || '';
+                targetEl.appendChild(descLine);
+
+                var reqTitle = document.createElement('div');
+                reqTitle.style.cssText = 'color:#f59e0b;font-weight:600;font-size:0.78rem;margin-bottom:0.3rem;';
+                reqTitle.textContent = '\u{1F6A7} \u4F60\u9700\u8981\u51C6\u5907:';
+                targetEl.appendChild(reqTitle);
+
+                (t.requirements || []).forEach(function(r) {
+                    var li = document.createElement('div');
+                    li.style.cssText = 'padding:0.2rem 0 0.2rem 1rem;color:#c9d1d9;font-size:0.8rem;';
+                    li.textContent = '\u2022 ' + r;
+                    targetEl.appendChild(li);
+                });
+
+                // 渲染分步指南
+                var stepsEl = document.getElementById('deployGuideSteps');
+                stepsEl.textContent = '';
+
+                (data.steps || []).forEach(function(s) {
+                    var stepDiv = document.createElement('div');
+                    stepDiv.style.cssText = 'padding:0.6rem 0.5rem;border-bottom:1px solid rgba(100,200,255,0.05);';
+
+                    // 标题行
+                    var header = document.createElement('div');
+                    header.style.cssText = 'display:flex;align-items:center;gap:0.5rem;margin-bottom:0.3rem;';
+
+                    var numBadge = document.createElement('span');
+                    var statusColor = s.status === 'ready' ? '#22c55e' : s.status === 'manual' ? '#f59e0b' : s.status === 'blocked' ? '#ef4444' : '#888';
+                    numBadge.style.cssText = 'width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:0.7rem;font-weight:700;flex-shrink:0;border:2px solid ' + statusColor + ';color:' + statusColor + ';';
+                    numBadge.textContent = s.step;
+                    header.appendChild(numBadge);
+
+                    var titleSpan = document.createElement('span');
+                    titleSpan.style.cssText = 'font-weight:600;color:#e0e0e0;font-size:0.82rem;';
+                    titleSpan.textContent = s.title;
+                    header.appendChild(titleSpan);
+
+                    if (s.manual) {
+                        var manualTag = document.createElement('span');
+                        manualTag.style.cssText = 'font-size:0.65rem;padding:1px 5px;border-radius:3px;background:rgba(245,158,11,0.15);color:#f59e0b;';
+                        manualTag.textContent = '\u4EBA\u5DE5';
+                        header.appendChild(manualTag);
+                    }
+                    if (s.status === 'ready') {
+                        var readyTag = document.createElement('span');
+                        readyTag.style.cssText = 'font-size:0.65rem;padding:1px 5px;border-radius:3px;background:rgba(34,197,94,0.15);color:#22c55e;';
+                        readyTag.textContent = '\u5C31\u7EEA';
+                        header.appendChild(readyTag);
+                    }
+
+                    stepDiv.appendChild(header);
+
+                    // 描述
+                    var descDiv = document.createElement('div');
+                    descDiv.style.cssText = 'font-size:0.78rem;color:#888;margin-left:32px;margin-bottom:0.3rem;';
+                    descDiv.textContent = s.description;
+                    stepDiv.appendChild(descDiv);
+
+                    // 备注
+                    if (s.note) {
+                        var noteDiv = document.createElement('div');
+                        noteDiv.style.cssText = 'margin-left:32px;padding:0.3rem 0.5rem;background:rgba(239,68,68,0.1);border-left:3px solid #ef4444;border-radius:3px;font-size:0.72rem;color:#f59e0b;';
+                        noteDiv.textContent = '\u26A0 ' + s.note;
+                        stepDiv.appendChild(noteDiv);
+                    }
+
+                    // 命令块（折叠）
+                    if (s.commands && s.commands.length > 0) {
+                        var toggleBtn = document.createElement('div');
+                        toggleBtn.style.cssText = 'margin-left:32px;margin-top:0.3rem;cursor:pointer;font-size:0.72rem;color:#58a6ff;user-select:none;';
+                        toggleBtn.textContent = '\u25B6 \u67E5\u770B\u547D\u4EE4';
+                        var cmdBlock = document.createElement('pre');
+                        cmdBlock.style.cssText = 'display:none;margin:0.3rem 0 0 32px;padding:0.4rem 0.6rem;background:rgba(0,0,0,0.3);border-radius:4px;font-size:0.72rem;color:#aaa;line-height:1.5;overflow-x:auto;white-space:pre;';
+                        cmdBlock.textContent = s.commands.join('\n');
+
+                        var expanded = false;
+                        toggleBtn.addEventListener('click', function() {
+                            expanded = !expanded;
+                            cmdBlock.style.display = expanded ? 'block' : 'none';
+                            toggleBtn.textContent = (expanded ? '\u25BC' : '\u25B6') + ' \u67E5\u770B\u547D\u4EE4';
+                        });
+
+                        stepDiv.appendChild(toggleBtn);
+                        stepDiv.appendChild(cmdBlock);
+                    }
+
+                    stepsEl.appendChild(stepDiv);
+                });
+
+            } catch (e) {
+                console.warn('Failed to load deploy guide:', e);
+            }
+        }
+
+        async function refreshDeployEnvDrawer() {
+            var list = document.getElementById('deployEnvDrawerList');
+            list.textContent = '';
+            var loading = document.createElement('div');
+            loading.style.cssText = 'color:#888;padding:0.5rem;text-align:center;font-size:0.8rem;';
+            loading.textContent = '\u68C0\u6D4B\u4E2D...';
+            list.appendChild(loading);
+
+            try {
+                var resp = await fetch(API_BASE + '/deploy/environment');
+                if (!resp.ok) throw new Error('API error');
+                var data = await resp.json();
+                list.textContent = '';
+
+                (data.checks || []).forEach(function(c) {
+                    var item = document.createElement('div');
+                    item.style.cssText = 'padding:0.3rem 0.3rem;display:flex;align-items:center;gap:0.4rem;font-size:0.78rem;';
+                    var icon = document.createElement('span');
+                    icon.textContent = c.status === 'ready' ? '\u2705' : '\u274C';
+                    icon.style.fontSize = '0.75rem';
+                    var name = document.createElement('span');
+                    name.style.color = c.status === 'ready' ? '#aaa' : '#ef4444';
+                    name.textContent = c.name;
+                    item.appendChild(icon);
+                    item.appendChild(name);
+                    if (c.version) {
+                        var ver = document.createElement('span');
+                        ver.style.cssText = 'color:#555;font-size:0.68rem;margin-left:auto;';
+                        ver.textContent = c.version.substring(0, 30);
+                        item.appendChild(ver);
+                    }
+                    list.appendChild(item);
+                });
+            } catch (e) {
+                list.textContent = '';
+                var err = document.createElement('div');
+                err.style.cssText = 'color:#ef4444;padding:0.5rem;font-size:0.78rem;';
+                err.textContent = '\u68C0\u6D4B\u5931\u8D25';
+                list.appendChild(err);
+            }
+        }
+
         async function refreshDeployEnv() {
             var list = document.getElementById('deployEnvList');
             list.textContent = '';
