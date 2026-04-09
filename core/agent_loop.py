@@ -402,8 +402,16 @@ class AgentLoop:
 
             # ★ 强制注入不完整文档的补全步骤（不依赖 LLM 决策）
             if incomplete_docs:
+                # 构建项目摘要供文档生成使用
+                src_files_hint = ", ".join(f["path"] for f in existing_code_summary[:10])
+                project_hint = (
+                    f"项目需求: {original_description}\n"
+                    f"项目源码文件: {src_files_hint}\n"
+                    f"项目路径: {project_path}"
+                )
+
                 existing_titles = {s.title.lower() for s in plan.subtasks}
-                inject_at = 0  # 插入到计划最前面
+                inject_at = 0
                 for doc in incomplete_docs:
                     doc_path = doc["path"]
                     title = f"补全文档 {doc_path}"
@@ -412,8 +420,9 @@ class AgentLoop:
                             id=f"subtask_inject_{inject_at}",
                             title=title,
                             description=(
-                                f"重新生成 {doc_path}（当前内容不完整: {doc['reason']}）。"
-                                f"必须生成完整内容，严格按照 kedo 文档模板结构。"
+                                f"重新生成完整的 {doc_path}（当前内容不完整: {doc['reason']}）。\n"
+                                f"必须根据项目实际情况生成完整内容，不能只写标题。\n"
+                                f"{project_hint}\n"
                                 f"文件路径: {doc_path}"
                             ),
                             step_type=StepType.CODE_GENERATE,

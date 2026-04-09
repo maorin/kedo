@@ -109,6 +109,16 @@ class CodeGeneratorTool(BaseTool):
             else:
                 target = target.resolve()
             target.parent.mkdir(parents=True, exist_ok=True)
+
+            # 检查是否疑似截断（.md 文档：内容以冒号/未完成句子结尾）
+            is_doc = target.suffix.lower() in (".md", ".txt", ".rst")
+            if is_doc and generated_code.strip():
+                stripped = generated_code.rstrip()
+                last_line = stripped.split("\n")[-1].strip()
+                truncation_signs = ("：", ":", "如下：", "following:", "below:", "as follows:")
+                if any(last_line.endswith(s) for s in truncation_signs):
+                    logger.warning(f"Document may be truncated: {file_path} (ends with: '{last_line[-40:]}')")
+
             target.write_text(generated_code, encoding="utf-8")
 
             # 生成 diff
