@@ -1050,10 +1050,11 @@ class AgentLoop:
                 )
                 # 如果无法检测测试框架，不算失败
                 if not result.success and "Could not detect test framework" in (result.error or ""):
-                    logger.info("No test framework detected, skipping test step")
+                    logger.warning("No test framework detected, marking as failed")
                     return ToolResult(
-                        success=True,
-                        output="No test framework detected — step skipped",
+                        success=False,
+                        output="No test framework detected — cannot verify code quality",
+                        error="No test framework detected. Need to set up tests.",
                         data={"test_result": {"total": 0, "passed": 0, "failed": 0, "coverage_percent": 0}},
                     )
                 return result
@@ -1166,7 +1167,7 @@ class AgentLoop:
 
         # Node.js
         if (p / "package.json").exists():
-            return "npm run build 2>/dev/null || echo 'Build: OK (no build script)'"
+            return "npm run build"
 
         # Go
         if (p / "go.mod").exists():
@@ -1176,8 +1177,8 @@ class AgentLoop:
         if (p / "Cargo.toml").exists():
             return "cargo build"
 
-        # 默认 — 不执行危险命令，只做确认
-        return "echo 'Build: OK (no build system detected)'"
+        # 默认 — 没有构建系统，返回失败命令
+        return "echo 'ERROR: No build system detected (Makefile, CMakeLists.txt, package.json, etc.)' && exit 1"
 
     def _infer_deploy_command(self, project_path: str, description: str) -> str:
         """推断部署命令（默认安全占位）"""
