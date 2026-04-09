@@ -906,144 +906,265 @@ def _scan_build_artifacts() -> list[dict]:
 
 @router.get("/deploy/guide")
 async def get_deploy_guide():
-    """根据项目类型生成部署指南：目标、准备步骤、注意事项"""
+    """
+    从部署文档（docs/deploy/deployment.md）解析部署指南。
+    优先使用缓存的 deploy_manifest.json，否则从文档解析并缓存。
+    """
     project = Path(_project_path)
+    manifest_path = project / ".kedo" / "deploy_manifest.json"
 
-    # 检测项目类型
-    has_dockerfile = (project / "docker-compose.yml").exists() or (project / "Dockerfile").exists()
-    has_makefile = (project / "Makefile").exists()
-    has_nro = any(project.glob("*.nro"))
-    has_switch_source = (project / "source" / "main.cpp").exists()
-    has_package_json = (project / "package.json").exists()
-    has_go_mod = (project / "go.mod").exists()
-    has_cargo = (project / "Cargo.toml").exists()
+    # 优先读取缓存
+    if manifest_path.exists():
+        try:
+            import json as _json
+            cached = _json.loads(manifest_path.read_text(encoding="utf-8"))
+            # 检查部署文档是否更新了
+            deploy_path = project / "docs" / "deploy" / "deployment.md"
+            if deploy_path.exists():
+                doc_mtime = deploy_path.stat().st_mtime
+                if cached.get("_doc_mtime", 0) >= doc_mtime:
+                    cached["project_path"] = str(project.resolve())
+                    cached["from_cache"] = True
+                    return cached
+        except Exception:
+            pass
 
-    # 读取部署文档获取额外信息
+    # 读取部署文档
     deploy_doc = ""
     deploy_path = project / "docs" / "deploy" / "deployment.md"
     if deploy_path.exists():
         try:
-            deploy_doc = deploy_path.read_text(encoding="utf-8")[:2000]
+            deploy_doc = deploy_path.read_text(encoding="utf-8")
         except Exception:
             pass
 
-    # 根据项目类型生成指南
-    if has_switch_source or has_nro:
-        target = {
-            "platform": "Nintendo Switch",
-            "description": "将编译后的 .nro 文件部署到 Nintendo Switch 游戏机上运行",
-            "icon": "\U0001F3AE",
-            "requirements": [
-                "一台已破解的 Nintendo Switch 游戏机（支持 Atmosphere 自定义固件）",
-                "一台用于编译代码的服务器或电脑（本机或远程服务器）",
-                "Switch 和服务器在同一局域网内（用于 WiFi 部署）",
-            ],
-        }
+    # 读取需求文档获取项目描述
+    req_doc = ""
+    for req_path in [project / "docs" / "requirement" / "requirement.md", project / ".kedo" / "requirement.md"]:
+        if req_path.exists():
+            try:
+                req_doc = req_path.read_text(encoding="utf-8")[:1500]
+            except Exception:
+                pass
+            break
+
+    # 扫描项目文件类型
+    project_files = [str(f.relative_to(project)) for f in project.rglob("*") if f.is_file()
+                     and not any(p in f.relative_to(project).parts for p in {".kedo", ".git", ".venv", "node_modules", "__pycache__"})][:50]
+
+    guide = _parse_deploy_guide(deploy_doc, req_doc, project_files, project)
+
+    # 缓存
+    try:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        import json as _json
+        guide["_doc_mtime"] = deploy_path.stat().st_mtime if deploy_path.exists() else 0
+        manifest_path.write_text(_json.dumps(guide, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+    guide["project_path"] = str(project.resolve())
+    guide["from_cache"] = False
+    return guide
+
+
+def _parse_deploy_guide(deploy_doc: str, req_doc: str, project_files: list, project: Path) -> dict:
+    """从部署文档解析出结构化部署指南"""
+    import re
+
+    # 从文档中提取章节
+    sections = {}
+    current_section = ""
+    current_content = []
+    for line in deploy_doc.split("\n"):
+        if line.startswith("## "):
+            if current_section:
+                sections[current_section] = "\n".join(current_content).strip()
+            current_section = line[3:].strip()
+            current_content = []
+        else:
+            current_content.append(line)
+    if current_section:
+        sections[current_section] = "\n".join(current_content).strip()
+
+    # 从需求文档提取项目描述
+    project_desc = ""
+    if req_doc:
+        lines = req_doc.split("\n")
+        for line in lines[:20]:
+            if line.strip() and not line.startswith("#"):
+                project_desc = line.strip()
+                break
+
+    # 检测部署目标平台
+    all_text = (deploy_doc + " " + req_doc).lower()
+    file_list_str = " ".join(project_files).lower()
+
+    if "switch" in all_text or ".nro" in file_list_str or "devkitpro" in all_text:
+        platform = "Nintendo Switch"
+        icon = "\U0001F3AE"
+        platform_desc = "将编译后的 .nro 自制程序部署到 Nintendo Switch 游戏机上运行"
+    elif "android" in all_text or ".apk" in file_list_str:
+        platform = "Android"
+        icon = "\U0001F4F1"
+        platform_desc = "将 APK 安装到 Android 设备"
+    elif "ios" in all_text or "xcode" in all_text:
+        platform = "iOS"
+        icon = "\U0001F34E"
+        platform_desc = "将应用部署到 iOS 设备"
+    elif "docker" in all_text or "docker-compose.yml" in file_list_str:
+        platform = "Docker / 服务器"
+        icon = "\U0001F433"
+        platform_desc = "通过 Docker 容器化部署到服务器"
+    elif "package.json" in file_list_str:
+        platform = "Node.js"
+        icon = "\U0001F7E9"
+        platform_desc = "部署 Node.js 应用到服务器"
+    elif "go.mod" in file_list_str:
+        platform = "Go"
+        icon = "\U0001F4E6"
+        platform_desc = "编译 Go 应用并部署到服务器"
+    else:
+        platform = "通用"
+        icon = "\U0001F4E6"
+        platform_desc = "构建并部署到目标环境"
+
+    # 从部署文档的章节中提取步骤
+    steps = []
+    step_num = 0
+
+    # 部署架构 → 概述
+    arch_section = sections.get("部署架构", sections.get("Deployment Architecture", ""))
+
+    # 环境配置 → 准备步骤
+    env_section = sections.get("环境配置", sections.get("Environment Configuration",
+                  sections.get("环境要求", "")))
+
+    # 部署流程 → 执行步骤
+    flow_section = sections.get("部署流程", sections.get("Deployment Process",
+                   sections.get("部署步骤", "")))
+
+    # 监控和调试
+    monitor_section = sections.get("监控与调试计划", sections.get("Monitoring",
+                      sections.get("监控和调试", sections.get("监控与调试方案", ""))))
+
+    # 如果文档有内容，从中提取步骤
+    if env_section or flow_section:
+        # 提取列表项作为步骤
+        for section_name, section_content in [("环境准备", env_section), ("部署执行", flow_section), ("监控调试", monitor_section)]:
+            if not section_content:
+                continue
+            # 解析 markdown 列表项和子标题
+            items = re.findall(r'(?:^|\n)(?:[-*]|\d+\.)\s+(.+)', section_content)
+            sub_titles = re.findall(r'(?:^|\n)###?\s+(.+)', section_content)
+
+            if sub_titles:
+                for title in sub_titles:
+                    step_num += 1
+                    # 获取该子标题下的内容
+                    idx = section_content.find(title)
+                    next_idx = len(section_content)
+                    for st in sub_titles:
+                        si = section_content.find(st)
+                        if si > idx and si < next_idx:
+                            next_idx = si
+                    sub_content = section_content[idx + len(title):next_idx].strip()
+                    sub_items = re.findall(r'(?:^|\n)(?:[-*]|\d+\.)\s+(.+)', sub_content)
+
+                    steps.append({
+                        "step": step_num,
+                        "title": title.strip(),
+                        "description": "\n".join(sub_items[:3]) if sub_items else sub_content[:150],
+                        "commands": [item.strip() for item in sub_items if item.strip().startswith(("apt", "docker", "make", "npm", "pip", "curl", "wget", "git", "scp", "ssh", "nxlink", "dkp-"))],
+                        "manual": section_name != "部署执行",
+                        "status": "todo",
+                    })
+            elif items:
+                step_num += 1
+                steps.append({
+                    "step": step_num,
+                    "title": section_name,
+                    "description": "\n".join(items[:5]),
+                    "commands": [item.strip() for item in items if any(item.strip().startswith(cmd) for cmd in ("apt", "docker", "make", "npm", "pip", "curl", "wget", "git", "scp", "ssh", "nxlink", "dkp-"))],
+                    "manual": section_name != "部署执行",
+                    "status": "todo",
+                })
+
+    # 如果文档太短或没有解析出步骤，用文件检测生成基本步骤
+    if not steps:
+        has_dockerfile = (project / "docker-compose.yml").exists() or (project / "Dockerfile").exists()
+        has_makefile = (project / "Makefile").exists()
+
         steps = [
             {
                 "step": 1,
-                "title": "准备编译环境",
-                "description": "安装 devkitPro 交叉编译工具链，或使用 Docker 容器化构建",
+                "title": "搭建编译环境",
+                "description": "安装项目所需的编译工具链和依赖" + ("\n已检测到 Docker 配置文件，推荐使用 Docker" if has_dockerfile else ""),
+                "commands": ["docker-compose build"] if has_dockerfile else [],
                 "manual": not has_dockerfile,
-                "commands": [
-                    "# 方式一：Docker（推荐）",
-                    "docker-compose build",
-                    "",
-                    "# 方式二：本地安装 devkitPro",
-                    "# 参考 https://devkitpro.org/wiki/Getting_Started",
-                ],
                 "status": "ready" if has_dockerfile else "todo",
             },
             {
                 "step": 2,
-                "title": "编译项目",
-                "description": "使用 make 编译源代码，生成 switchvideo.nro 可执行文件",
-                "manual": not has_makefile,
-                "commands": [
-                    "# Docker 方式",
-                    "docker-compose run --rm build make",
-                    "",
-                    "# 本地方式",
-                    "make clean && make",
-                ],
-                "status": "ready" if has_nro else ("todo" if has_makefile else "blocked"),
-                "note": "当前缺少 Makefile" if not has_makefile else None,
+                "title": "编译构建",
+                "description": "编译源代码生成可执行文件或部署包",
+                "commands": ["make"] if has_makefile else (["docker-compose run --rm build make"] if has_dockerfile else []),
+                "manual": False,
+                "status": "ready" if has_makefile or has_dockerfile else "blocked",
+                "note": "需要先创建构建脚本（Makefile 等）" if not has_makefile and not has_dockerfile else None,
             },
             {
                 "step": 3,
-                "title": "准备 Switch 游戏机",
-                "description": "确保 Switch 已安装 Atmosphere 自定义固件和 hbmenu",
+                "title": "准备目标设备/环境",
+                "description": "确保部署目标（设备、服务器、容器环境）已就绪",
+                "commands": [],
                 "manual": True,
-                "commands": [
-                    "# Switch 需要:",
-                    "# 1. Atmosphere 自定义固件 (https://github.com/Atmosphere-NX/Atmosphere)",
-                    "# 2. hbmenu (Homebrew Menu，Atmosphere 自带)",
-                    "# 3. SD 卡上有 /switch/ 目录",
-                ],
                 "status": "manual",
             },
             {
                 "step": 4,
-                "title": "部署到 Switch",
-                "description": "通过 SD 卡复制或 WiFi 推送 .nro 文件到 Switch",
+                "title": "部署",
+                "description": "将构建产物传输到目标环境并启动",
+                "commands": [],
                 "manual": True,
-                "commands": [
-                    "# 方式一：SD 卡（简单可靠）",
-                    "# 1. 关机取出 SD 卡，插入电脑",
-                    "# 2. 复制 switchvideo.nro 到 SD 卡 /switch/ 目录",
-                    "# 3. SD 卡插回 Switch，启动 hbmenu",
-                    "",
-                    "# 方式二：WiFi 推送（开发调试）",
-                    "# 1. Switch 启动 hbmenu，按 Y 开启 nxlink 监听",
-                    "# 2. 记录 Switch 显示的 IP 地址",
-                    "nxlink -a <switch_ip> switchvideo.nro",
-                ],
                 "status": "manual",
             },
             {
                 "step": 5,
-                "title": "运行和验证",
-                "description": "在 Switch 上启动 hbmenu，找到 switchvideo 并运行",
+                "title": "验证",
+                "description": "在目标环境上验证功能是否正常",
+                "commands": [],
                 "manual": True,
-                "commands": [
-                    "# 1. 在 hbmenu 中找到 switchvideo",
-                    "# 2. 按 A 启动",
-                    "# 3. 验证 NFS 连接、视频播放等功能",
-                    "# 4. 如需调试日志，使用 nxlink 的 -s 参数查看",
-                    "nxlink -a <switch_ip> -s switchvideo.nro",
-                ],
                 "status": "manual",
             },
         ]
-    elif has_package_json:
-        target = {
-            "platform": "Node.js",
-            "description": "部署 Node.js 应用到服务器",
-            "icon": "\U0001F7E9",
-            "requirements": ["Node.js 运行环境", "目标服务器"],
-        }
-        steps = [
-            {"step": 1, "title": "安装依赖", "description": "npm install", "commands": ["npm install"], "status": "todo", "manual": False},
-            {"step": 2, "title": "构建", "description": "npm run build", "commands": ["npm run build"], "status": "todo", "manual": False},
-            {"step": 3, "title": "部署", "description": "部署到服务器", "commands": ["npm start"], "status": "todo", "manual": True},
+
+    # 构建需求列表
+    requirements = []
+    if "switch" in platform.lower():
+        requirements = [
+            "一台已破解的 Nintendo Switch 游戏机（Atmosphere 自定义固件）",
+            "一台编译服务器（已安装 Docker 或 devkitPro）",
+            "Switch 和服务器在同一局域网（用于 WiFi 部署）或 SD 卡读卡器",
         ]
+    elif "docker" in platform.lower() or "服务器" in platform.lower():
+        requirements = ["目标服务器（已安装 Docker）", "SSH 访问权限"]
+    elif "android" in platform.lower():
+        requirements = ["Android 设备（开启开发者模式）", "USB 数据线或 ADB WiFi"]
     else:
-        target = {
-            "platform": "通用",
-            "description": "将构建产物部署到目标环境",
-            "icon": "\U0001F4E6",
-            "requirements": ["目标服务器或运行环境"],
-        }
-        steps = [
-            {"step": 1, "title": "编译", "description": "构建项目", "commands": ["make"], "status": "todo", "manual": False},
-            {"step": 2, "title": "部署", "description": "复制到目标环境", "commands": [], "status": "todo", "manual": True},
-        ]
+        requirements = ["目标运行环境", "网络或物理访问权限"]
 
     return {
-        "target": target,
+        "target": {
+            "platform": platform,
+            "description": platform_desc,
+            "icon": icon,
+            "project_description": project_desc,
+            "requirements": requirements,
+        },
         "steps": steps,
-        "project_path": str(project.resolve()),
         "deploy_doc_exists": bool(deploy_doc),
+        "deploy_doc_sections": list(sections.keys()),
     }
 
 
