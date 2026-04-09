@@ -1720,6 +1720,18 @@
 
             // 收集所有生成文件
             const allFiles = [];
+            const projectPath = data.project_path || '';
+
+            // 绝对路径转相对路径的辅助函数
+            function toRelPath(absPath) {
+                if (projectPath && absPath.indexOf(projectPath) === 0) {
+                    var rel = absPath.substring(projectPath.length);
+                    if (rel.charAt(0) === '/') rel = rel.substring(1);
+                    return rel || absPath;
+                }
+                return absPath;
+            }
+
             data.records.forEach(r => {
                 const tr = document.createElement('tr');
                 const cells = [
@@ -1741,19 +1753,26 @@
                 });
                 tbody.appendChild(tr);
 
-                // 收集生成文件
+                // 收集生成文件（绝对路径转相对路径）
                 if (r.generated_files) {
                     r.generated_files.forEach(f => {
-                        allFiles.push({ ...f, task_id: r.id, task_name: r.task });
+                        allFiles.push({
+                            path: f.path,
+                            rel_path: toRelPath(f.path),
+                            name: f.path.split('/').pop(),
+                            action: f.action || 'create',
+                            lines: f.lines || 0,
+                            task_id: r.id,
+                        });
                     });
                 }
             });
 
             // ★ 始终合并磁盘扫描的项目文件（去重）
             if (data.project_files && data.project_files.length > 0) {
-                const existingPaths = new Set(allFiles.map(f => f.path));
+                const existingRelPaths = new Set(allFiles.map(f => f.rel_path));
                 data.project_files.forEach(f => {
-                    if (!existingPaths.has(f.abs_path)) {
+                    if (!existingRelPaths.has(f.path)) {
                         allFiles.push({
                             path: f.abs_path,
                             rel_path: f.path,
