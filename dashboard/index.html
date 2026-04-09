@@ -1054,10 +1054,7 @@
                     <!-- 左侧主内容：文件树 + 代码预览 -->
                     <div class="deploy-main" style="display:flex;flex-direction:column;">
                         <div class="monitor-header">
-                            <div>
-                                <h2 style="margin:0;">代码监控</h2>
-                                <div id="codeProjectPath" style="font-size:0.75rem;color:#666;font-family:'Menlo','Monaco','Consolas',monospace;margin-top:2px;"></div>
-                            </div>
+                            <h2>代码监控</h2>
                             <div style="display:flex;gap:0.5rem;">
                                 <button class="monitor-refresh-btn" onclick="toggleCodeDrawer()" id="codeDrawerBtn">统计 / 记录</button>
                                 <button class="monitor-refresh-btn" onclick="refreshCodeData()">刷新</button>
@@ -1066,7 +1063,8 @@
                         <!-- 文件树 & 代码预览 -->
                         <div style="display:flex;gap:1rem;flex:1;min-height:0;" id="codeFilesWrap">
                             <div style="width:280px;flex-shrink:0;background:var(--bg-tertiary,#1a1a2e);border-radius:8px;padding:0.5rem;overflow-y:auto;">
-                                <div class="monitor-table-title" style="margin-bottom:0.5rem;padding:0 0.25rem;">资源管理器</div>
+                                <div class="monitor-table-title" style="margin-bottom:0.25rem;padding:0 0.25rem;">资源管理器</div>
+                                <div id="codeProjectPath" style="font-size:0.68rem;color:#555;font-family:'Menlo','Monaco','Consolas',monospace;padding:0 0.25rem 0.4rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:default;" title=""></div>
                                 <div id="codeFileList" style="font-size:0.82rem;font-family:'Menlo','Monaco','Consolas',monospace;">
                                     <div style="color:#888;padding:1rem;text-align:center;">暂无文件</div>
                                 </div>
@@ -1649,7 +1647,10 @@
 
             // 显示项目根目录
             const pathEl = document.getElementById('codeProjectPath');
-            if (data.project_path) pathEl.textContent = data.project_path;
+            if (data.project_path) {
+                pathEl.textContent = data.project_path;
+                pathEl.title = data.project_path;
+            }
 
             const tbody = document.getElementById('codeTableBody');
             tbody.textContent = '';
