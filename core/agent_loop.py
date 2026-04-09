@@ -358,6 +358,9 @@ class AgentLoop:
             # 检测目录结构是否规范
             dir_issues = self._check_directory_structure(project_path)
 
+            # 分析构建状态（是否真正产生了构建产物）
+            build_issues = self._check_build_artifacts(project_path, checkpoint)
+
             # 从 checkpoint 提取历史信息
             prev_eval = checkpoint.eval_report
             prev_plan = checkpoint.plan
@@ -377,6 +380,7 @@ class AgentLoop:
                 prev_code_changes=prev_code_changes,
                 incomplete_docs=incomplete_docs,
                 dir_issues=dir_issues,
+                build_issues=build_issues,
             )
 
             await self._emit(task_id, EventType.STEP_COMPLETED,
@@ -538,6 +542,7 @@ class AgentLoop:
         prev_code_changes: list[CodeChange],
         incomplete_docs: list[dict] = None,
         dir_issues: list[dict] = None,
+        build_issues: list[dict] = None,
     ) -> str:
         """构建续接上下文文本，供 Planner 使用"""
         parts = []
@@ -552,6 +557,14 @@ class AgentLoop:
             parts.append(
                 f"## 目录结构不规范（需要重构）\n"
                 f"以下目录不符合 kedo 标准（src/ + build/），请在续接计划的最前面加入重构步骤：\n{issue_list}"
+            )
+
+        if build_issues:
+            issue_list = "\n".join(f"- {d['issue']}: {d['detail']}" for d in build_issues)
+            parts.append(
+                f"## 构建问题（必须优先修复）\n"
+                f"上次构建没有产生有效的可执行文件。以下是诊断出的问题，请在续接计划中修复：\n{issue_list}\n"
+                f"注意：不要重新生成所有代码，只修复构建相关的问题（如缺少 Makefile、构建脚本错误等）。"
             )
 
         if completed_steps:
@@ -704,6 +717,122 @@ class AgentLoop:
                 continue
 
         return incomplete
+
+    def _check_build_artifacts(self, project_path: str, checkpoint: AgentCheckpoint) -> list[dict]:
+        """
+        检查构建是否真正产生了可执行文件。
+        如果没有，诊断原因（缺少构建脚本、构建脚本错误、依赖缺失等）。
+        """
+        from pathlib import Path as _Path
+        project = _Path(project_path)
+        issues = []
+
+        # 检查是否有 build 步骤
+        has_build_step = False
+        if checkpoint.plan and checkpoint.plan.subtasks:
+            has_build_step = any(s.step_type == StepType.BUILD for s in checkpoint.plan.subtasks)
+
+        if not has_build_step:
+            return []  # 没有 build 步骤的任务不检查
+
+        # 检查构建产物是否存在
+        artifact_patterns = ["*.nro", "*.elf", "*.exe", "*.bin", "*.so", "*.dll",
+                             "*.jar", "*.whl", "*.wasm", "*.a", "*.dylib"]
+        found_artifacts = []
+        for pattern in artifact_patterns:
+            found_artifacts.extend(project.rglob(pattern))
+        # 排除 .kedo 等目录
+        skip_dirs = {".kedo", ".git", ".venv", "node_modules"}
+        found_artifacts = [f for f in found_artifacts
+                          if not any(p in f.relative_to(project).parts for p in skip_dirs)]
+
+        if found_artifacts:
+            return []  # 有构建产物，没问题
+
+        # 没有构建产物 → 诊断原因
+        # 1. 检查是否有构建脚本
+        has_makefile = (project / "Makefile").exists()
+        has_cmake = (project / "CMakeLists.txt").exists()
+        has_package_json = (project / "package.json").exists()
+        has_cargo = (project / "Cargo.toml").exists()
+
+        if not has_makefile and not has_cmake and not has_package_json and not has_cargo:
+            issues.append({
+                "issue": "缺少构建脚本",
+                "detail": "项目中没有 Makefile、CMakeLists.txt 或其他构建配置文件。"
+                          "需要创建一个正确的构建脚本，将所有源码文件编译为可执行文件。"
+            })
+        else:
+            # 有构建脚本但没产物 → 脚本可能有问题
+            script_name = "Makefile" if has_makefile else "CMakeLists.txt" if has_cmake else "package.json"
+            script_path = project / script_name
+            try:
+                script_content = script_path.read_text(encoding="utf-8", errors="replace")
+                script_lines = len(script_content.splitlines())
+                if script_lines < 5:
+                    issues.append({
+                        "issue": f"构建脚本 {script_name} 内容过少（{script_lines}行）",
+                        "detail": f"{script_name} 只有 {script_lines} 行，可能是不完整或 mock 生成的。"
+                                  f"需要重新生成正确的构建脚本。"
+                    })
+                else:
+                    issues.append({
+                        "issue": f"构建脚本 {script_name} 存在但未产生可执行文件",
+                        "detail": f"{script_name} 有 {script_lines} 行但构建没有产物。"
+                                  f"可能的原因：编译错误、依赖缺失、输出路径配置错误。"
+                                  f"请检查并修复构建脚本。"
+                    })
+            except Exception:
+                pass
+
+        # 2. 检查 checkpoint 中 code_changes 是否包含构建脚本
+        has_build_script_in_changes = False
+        for c in (checkpoint.code_changes or []):
+            fp = (c.file_path or "").lower()
+            if "makefile" in fp or "cmakelists" in fp or "package.json" in fp or "cargo.toml" in fp:
+                has_build_script_in_changes = True
+                content = c.content or ""
+                if len(content) < 50:
+                    issues.append({
+                        "issue": f"生成的构建脚本内容异常（仅 {len(content)} 字符）",
+                        "detail": f"LLM 生成的 {c.file_path} 内容过短，可能是 mock 或截断。需要重新生成。"
+                    })
+                break
+
+        if not has_build_script_in_changes and not has_makefile and not has_cmake:
+            issues.append({
+                "issue": "上次任务没有生成构建脚本",
+                "detail": "code_changes 中没有 Makefile/CMakeLists.txt，"
+                          "需要在续接计划中生成正确的构建脚本。"
+            })
+
+        # 3. 检查 Docker 配置是否正确
+        docker_compose = project / "docker-compose.yml"
+        if docker_compose.exists():
+            try:
+                dc_content = docker_compose.read_text(encoding="utf-8", errors="replace")
+                if "FROM" in dc_content and "services" not in dc_content.lower():
+                    issues.append({
+                        "issue": "docker-compose.yml 内容异常",
+                        "detail": "docker-compose.yml 包含 FROM 指令（应该是 Dockerfile 的内容），"
+                                  "说明 LLM 把 Dockerfile 内容错误地写入了 docker-compose.yml。"
+                                  "需要分别正确生成 Dockerfile 和 docker-compose.yml。"
+                    })
+            except Exception:
+                pass
+
+        # 4. 检查源码文件是否存在
+        src_exts = {".cpp", ".c", ".py", ".js", ".ts", ".java", ".go", ".rs"}
+        src_files = [f for f in project.rglob("*")
+                     if f.is_file() and f.suffix.lower() in src_exts
+                     and not any(p in f.relative_to(project).parts for p in skip_dirs)]
+        if not src_files:
+            issues.append({
+                "issue": "项目中没有源码文件",
+                "detail": "没有找到任何源码文件（.cpp/.py/.js 等），构建无法进行。"
+            })
+
+        return issues
 
     def _check_directory_structure(self, project_path: str) -> list[dict]:
         """检测项目目录结构是否符合 kedo 标准（src/ + build/）"""
