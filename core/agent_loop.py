@@ -861,7 +861,7 @@ class AgentLoop:
             return ToolResult(success=False, error=f"Unknown step type: {step_type}")
 
     def _infer_file_name(self, subtask: SubTask, project_path: str) -> str:
-        """从子任务描述中推断有意义的文件名，而非直接用 subtask.title
+        """从子任务 title + description 中推断有意义的文件名
 
         返回的始终是相对于 project_path 的相对路径，避免绝对路径被重复拼接。
         """
@@ -869,9 +869,11 @@ class AgentLoop:
 
         desc = subtask.description.lower()
 
-        # 如果描述中明确提到了文件名 (xxx.py, xxx.js 等)
-        # 使用 ASCII 字符集避免匹配中文等 Unicode 字符
-        file_match = re.search(r'[a-zA-Z0-9_/\\.-]+\.[a-zA-Z0-9]{1,5}', subtask.description)
+        # 合并 title 和 description 搜索文件路径（title 中常包含明确路径）
+        search_text = subtask.title + " " + subtask.description
+
+        # 如果文本中明确提到了文件名 (xxx.py, xxx.js, docs/xxx.md 等)
+        file_match = re.search(r'[a-zA-Z0-9_/\\.-]+\.[a-zA-Z0-9]{1,5}', search_text)
         if file_match:
             matched = file_match.group(0)
             # 清理前导的 ./
