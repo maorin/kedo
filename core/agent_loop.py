@@ -1158,9 +1158,10 @@ class AgentLoop:
         """根据项目类型智能推断构建命令（按优先级排列）"""
         p = Path(project_path)
 
-        # devkitPro Switch 项目（检测 devkitPro 环境）
-        devkitpro = Path(os.environ.get("DEVKITPRO", "/opt/devkitpro"))
-        if (p / "CMakeLists.txt").exists() and devkitpro.exists():
+        # devkitPro Switch 项目（从环境变量检测）
+        devkitpro_env = os.environ.get("DEVKITPRO", "")
+        devkitpro = Path(devkitpro_env) if devkitpro_env else None
+        if (p / "CMakeLists.txt").exists() and devkitpro and devkitpro.exists():
             # 检查 CMakeLists 或项目是否是 Switch 项目
             cmake_content = ""
             try:
