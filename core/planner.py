@@ -206,13 +206,14 @@ class Planner:
 5. **如果用户没有明确说要做什么** — 根据"缺失需求"和"没有构建产物"来判断该做什么
 6. **计划精简** — 通常 3-8 个步骤，绝不超过 10 步
 7. **末尾必须有** build + test + evaluate
+8. **如果用户明确提到"部署/装到/推到/deploy/install/push to ..."等关键词，或项目 .kedo/project_profile.json 里有 deploy 字段** —— 在 evaluate 之前加一个 `deploy` 类型的子任务，把 build 产物送到目标设备。**`deploy` 是独立的 step_type，不要错写成 evaluate。**
 
 ## 输出格式
 
 JSON 数组，每个元素:
 - title: 简短描述
 - description: 详细说明（包含文件路径）
-- step_type: "code_generate" | "build" | "test" | "evaluate"
+- step_type: "code_generate" | "build" | "test" | "deploy" | "evaluate"
 - dependencies: 依赖的 subtask id 列表（字符串数组如 ["subtask_0"]）
 
 ## 标准目录结构
@@ -532,8 +533,10 @@ JSON 数组，每个元素:
 返回 JSON 数组，每个元素：
 - title: 简短描述
 - description: 详细说明（包含完整文件路径、具体要修改/新增什么内容）
-- step_type: "code_generate" | "build" | "test" | "evaluate"
+- step_type: "code_generate" | "build" | "test" | "deploy" | "evaluate"
 - dependencies: 依赖的 subtask id 列表
+
+注意: 如果用户提到"部署/装到/推到/deploy/install/push to ..."等关键词，或项目 .kedo/project_profile.json 里有 deploy 字段，**在 evaluate 之前加一个 `deploy` 类型的子任务**。`deploy` 是独立的 step_type，**不要错写成 evaluate**。
 
 ## 标准目录结构
 
