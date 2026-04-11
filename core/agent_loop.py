@@ -273,6 +273,25 @@ class AgentLoop:
                     task_id, subtask, project_path, code_changes
                 )
 
+                # ★ 步骤失败感知：除 EVALUATE/PLAN 外，关键步骤失败后需要 escalate
+                # （EVALUATE 由分数低分支处理；PLAN 即便失败 dispatch 已 auto-pass 视为成功）
+                if (
+                    not result.success
+                    and subtask.step_type not in (StepType.EVALUATE, StepType.PLAN)
+                ):
+                    should_continue = await self._on_step_unrecoverable(
+                        task_id=task_id,
+                        plan=plan,
+                        subtask=subtask,
+                        result=result,
+                        code_changes=code_changes,
+                        project_path=project_path,
+                    )
+                    if not should_continue:
+                        # 默认行为：暂停任务等待人工，wait_if_paused 会阻塞直到人工 resume
+                        await self.state.wait_if_paused(task_id)
+                        # 人工 resume 后继续走原逻辑（不再重跑该步骤；如果想重跑应在 hook 内自行实现）
+
                 # 收集结果
                 if subtask.step_type == StepType.CODE_GENERATE and result.success:
                     change = CodeChange(
@@ -928,6 +947,287 @@ class AgentLoop:
         return issues
 
     # ==========================================================
+    # 步骤失败的最后防线
+    # ==========================================================
+
+    async def _on_step_unrecoverable(
+        self,
+        task_id: str,
+        plan: TaskPlan,
+        subtask: SubTask,
+        result: ToolResult,
+        code_changes: list[CodeChange],
+        project_path: str,
+    ) -> bool:
+        """
+        关键步骤经过 auto_fix 仍失败时调用。
+
+        默认行为：emit STEP_FAILED + pause task，把控制权交给人工。
+
+        【方案 3 接入点】未来若要在此触发自动 replan：
+          - 把 _handle_eval_failure_loop 泛化成接受非 EvalReport 的失败上下文
+          - 在这里调用它，并 return True 表示已自愈、外层应继续后续 subtask
+
+        Returns:
+            False — 默认。表示外层 loop 应停下来等待人工（pause + wait_if_paused）。
+            True  — 该 hook 已自愈/重新规划，外层 loop 应继续推进。
+        """
+        error_msg = result.error or "Step failed"
+        failure_kind = "unknown"
+        if isinstance(result.data, dict):
+            failure_kind = result.data.get("failure_kind", "unknown")
+
+        logger.error(
+            f"Step '{subtask.title}' unrecoverable after auto_fix "
+            f"(kind={failure_kind}): {error_msg[:200]}"
+        )
+
+        await self._emit(
+            task_id, EventType.STEP_FAILED,
+            step=subtask.title,
+            error=error_msg[:500],
+            error_type=failure_kind,
+            escalation="paused_for_human",
+            suggestion=(
+                "Auto-fix exhausted. Inspect the error and either fix manually + resume, "
+                "or stop the task and refine the plan."
+            ),
+        )
+        self.memory.add_message(
+            "system",
+            f"[Escalation] Step '{subtask.title}' failed unrecoverably ({failure_kind}). "
+            f"Task paused for human review. Last error: {error_msg[:300]}",
+        )
+
+        # 默认：暂停任务，等人工 resume
+        await self.state.pause_task(task_id)
+        return False
+
+    # ==========================================================
+    # LLM 驱动的失败修复
+    # ==========================================================
+
+    # 失败修复时优先查看的"项目脉络文件"清单（按相对优先级）
+    _FIX_CONTEXT_BUILD_MANIFESTS = [
+        "CMakeLists.txt", "Makefile", "makefile", "build.gradle",
+        "build.gradle.kts", "package.json", "pyproject.toml", "setup.py",
+        "Cargo.toml", "go.mod", "BUILD.bazel", "BUILD",
+    ]
+
+    def _gather_fix_context(self, subtask: SubTask, project_path: str) -> list[tuple[str, str]]:
+        """
+        采集与失败步骤相关的项目文件，用于 LLM 失败诊断。
+
+        策略：
+          - 总是包含项目根目录下的构建清单文件（CMakeLists.txt 等）
+          - CODE_GENERATE 失败：附带 subtask 描述里提到的目标文件（如果存在）
+          - TEST 失败：列出 tests/ 或 test/ 目录的文件名
+        返回 [(relative_path, content)] 列表，单文件最大 8KB。
+        """
+        from pathlib import Path as _P
+        proj = _P(project_path)
+        max_per_file = 8192
+        results: list[tuple[str, str]] = []
+
+        # 1) 构建清单
+        for name in self._FIX_CONTEXT_BUILD_MANIFESTS:
+            f = proj / name
+            if f.exists() and f.is_file():
+                try:
+                    results.append((name, f.read_text(encoding="utf-8", errors="replace")[:max_per_file]))
+                except Exception:
+                    pass
+
+        # 2) 子任务描述里指明的目标文件（CODE_GENERATE 失败时常用）
+        try:
+            file_name = self._infer_file_name(subtask, project_path)
+            target = proj / file_name
+            if target.exists() and target.is_file() and file_name not in [r[0] for r in results]:
+                results.append(
+                    (file_name, target.read_text(encoding="utf-8", errors="replace")[:max_per_file])
+                )
+        except Exception:
+            pass
+
+        # 3) TEST 失败时附上 tests 目录清单
+        if subtask.step_type == StepType.TEST:
+            for tdir_name in ("tests", "test"):
+                tdir = proj / tdir_name
+                if tdir.exists() and tdir.is_dir():
+                    try:
+                        listing = "\n".join(
+                            sorted(p.name for p in tdir.iterdir() if not p.name.startswith("."))[:50]
+                        )
+                        results.append((f"{tdir_name}/ (listing)", listing))
+                    except Exception:
+                        pass
+                    break
+
+        return results
+
+    def _build_fix_prompt(
+        self,
+        subtask: SubTask,
+        error_text: str,
+        context_files: list[tuple[str, str]],
+    ) -> list[dict]:
+        """构造失败诊断 + 修复建议的 LLM 消息。"""
+        files_block = "\n\n".join(
+            f"=== {path} ===\n{content}" for path, content in context_files
+        ) or "(no relevant files found in project root)"
+
+        system = (
+            "You are a senior build/test debugging expert embedded inside an automated "
+            "software engineering pipeline. A pipeline step has just failed. Your job is "
+            "to diagnose the root cause and propose ONE concrete file change that will "
+            "let the step succeed on the next attempt.\n\n"
+            "CRITICAL RULES:\n"
+            "1. Read the error output and the project files carefully before deciding.\n"
+            "2. If a single file edit can fix the failure, output the COMPLETE new "
+            "content of that file. Do not output a diff or partial snippet.\n"
+            "3. If the failure is structural (the wrong tool is being used, the test "
+            "cannot run in this configuration, the plan itself is wrong, dependencies "
+            "are missing at the system level, etc.) and CANNOT be fixed by editing one "
+            "project file, respond with the unfixable schema instead. Do NOT hallucinate "
+            "a fake fix.\n"
+            "4. Prefer minimal, targeted edits over rewrites.\n"
+            "5. Use forward slashes in file paths, relative to project root.\n\n"
+            "Output STRICTLY one of these two JSON shapes (no markdown, no commentary):\n"
+            '{\n'
+            '  "diagnosis": "<one-sentence root cause>",\n'
+            '  "file_to_fix": "<relative/path>",\n'
+            '  "action": "create" | "modify",\n'
+            '  "new_content": "<complete new file content>"\n'
+            '}\n'
+            "OR\n"
+            '{"unfixable": true, "reason": "<why a single-file edit cannot fix this>"}\n'
+        )
+
+        user = (
+            f"Failed step: {subtask.title}\n"
+            f"Step type: {subtask.step_type.value}\n"
+            f"Step description: {subtask.description}\n\n"
+            f"Error output:\n{error_text[:4000]}\n\n"
+            f"Relevant project files:\n{files_block}\n\n"
+            f"Diagnose the root cause and respond with the JSON."
+        )
+
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+
+    def _parse_fix_response(self, response: str) -> Optional[dict]:
+        """解析 LLM 修复响应，返回 dict 或 None（无效响应/unfixable）。"""
+        import json as _json
+        import re as _re
+        if not response:
+            return None
+        text = response.strip()
+        # 去掉 ```json 包裹
+        if "```" in text:
+            m = _re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+            if m:
+                text = m.group(1).strip()
+        # 取第一个完整 JSON 对象
+        start = text.find("{")
+        if start < 0:
+            return None
+        depth = 0
+        end = -1
+        for i in range(start, len(text)):
+            c = text[i]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if end < 0:
+            return None
+        try:
+            data = _json.loads(text[start:end])
+        except Exception as e:
+            logger.warning(f"_parse_fix_response: JSON decode failed: {e}")
+            return None
+        if data.get("unfixable"):
+            return {"unfixable": True, "reason": data.get("reason", "")}
+        if not all(k in data for k in ("file_to_fix", "new_content")):
+            return None
+        return data
+
+    async def _attempt_llm_fix(
+        self,
+        task_id: str,
+        subtask: SubTask,
+        error_text: str,
+        project_path: str,
+    ) -> Optional[dict]:
+        """
+        失败修复入口：调 LLM 分析错误 → 应用文件级修改 → 返回 patch dict 或 None。
+
+        返回：
+          - dict {"file_to_fix", "action", "new_content", "diagnosis"}: 已应用修改
+          - {"unfixable": True, "reason": ...}: LLM 明确表示单文件修不了
+          - None: LLM 调用失败 / 响应无效
+        """
+        try:
+            context_files = self._gather_fix_context(subtask, project_path)
+            messages = self._build_fix_prompt(subtask, error_text, context_files)
+            await self._emit(
+                task_id, EventType.LLM_REQUEST,
+                phase="auto_fix",
+                prompt_summary=f"诊断 {subtask.title} 的失败原因",
+                model=self._get_model_name(),
+            )
+            response = await self.planner._llm.chat(messages)
+        except Exception as e:
+            logger.warning(f"_attempt_llm_fix: LLM call failed: {e}")
+            return None
+
+        patch = self._parse_fix_response(response)
+        if patch is None:
+            logger.warning(f"_attempt_llm_fix: LLM response not parseable for '{subtask.title}'")
+            return None
+        if patch.get("unfixable"):
+            logger.warning(
+                f"_attempt_llm_fix: LLM declared unfixable for '{subtask.title}': "
+                f"{patch.get('reason')}"
+            )
+            await self._emit(
+                task_id, EventType.LLM_RESPONSE,
+                phase="auto_fix",
+                summary=f"LLM 判定单文件修不了: {patch.get('reason', '')[:200]}",
+            )
+            return patch
+
+        # 应用文件修改
+        from pathlib import Path as _P
+        rel = patch["file_to_fix"].lstrip("/").replace("\\", "/")
+        target = _P(project_path) / rel
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(patch["new_content"], encoding="utf-8")
+        except Exception as e:
+            logger.error(f"_attempt_llm_fix: failed to write {target}: {e}")
+            return None
+
+        diagnosis = patch.get("diagnosis", "")[:200]
+        logger.info(f"_attempt_llm_fix: edited {rel} — {diagnosis}")
+        await self._emit(
+            task_id, EventType.LLM_RESPONSE,
+            phase="auto_fix",
+            summary=f"已修改 {rel}: {diagnosis}",
+        )
+        self.memory.add_message(
+            "system",
+            f"[auto_fix] Step '{subtask.title}' failed → LLM diagnosed: {diagnosis}. "
+            f"Modified {rel}.",
+        )
+        return patch
+
+    # ==========================================================
     # 子任务执行
     # ==========================================================
 
@@ -1005,7 +1305,7 @@ class AgentLoop:
 
                 if self.auto_fix_enabled and attempt < subtask.max_retries - 1:
                     # ★ 重复错误早停：如果新的 stderr 和上一次几乎一样，
-                    # 说明 LLM 上一轮的修改没动到根因，再试一次也是浪费 token
+                    # 说明 LLM 上一轮的修复没动到根因，再试一次也是浪费 token
                     fp = self._stderr_fingerprint(stderr_text)
                     if stderr_fingerprints and self._stderr_similar(fp, stderr_fingerprints[-1]):
                         abort_msg = (
@@ -1026,14 +1326,56 @@ class AgentLoop:
                     stderr_fingerprints.append(fp)
 
                     logger.warning(
-                        f"Step '{subtask.title}' failed (attempt {attempt+1}), auto-fixing..."
+                        f"Step '{subtask.title}' failed (attempt {attempt+1}), invoking LLM auto_fix..."
                     )
                     await self._emit(task_id, EventType.LLM_RESPONSE,
                                      phase="auto_fix",
-                                     summary=f"失败 (第{attempt+1}次), 自动修复中: {(result.error or '')[:100]}")
-                    self.memory.add_message(
-                        "tool", f"Error in {subtask.title}: {result.error}"
+                                     summary=f"失败 (第{attempt+1}次), LLM 诊断中: {(result.error or '')[:100]}")
+
+                    # ★★★ 调 LLM 真修 ★★★
+                    patch = await self._attempt_llm_fix(
+                        task_id=task_id,
+                        subtask=subtask,
+                        error_text=stderr_text,
+                        project_path=project_path,
                     )
+
+                    if patch is None:
+                        # LLM 调用失败 / 响应无法解析 → 退化为静默重试，保持原行为
+                        self.memory.add_message(
+                            "tool", f"Error in {subtask.title}: {result.error}"
+                        )
+                    elif patch.get("unfixable"):
+                        # LLM 明确表示单文件修不了 → 立刻 abort，escalate 给外层处理
+                        reason = patch.get("reason", "")
+                        abort_msg = (
+                            f"LLM 判定该失败无法通过单文件修复（结构性问题），需人工或重新规划。\n"
+                            f"原因: {reason}\n"
+                            f"原始错误片段: {stderr_text[:300]}"
+                        )
+                        subtask.status = TaskStatus.FAILED
+                        subtask.result = {"error": abort_msg, "failure_kind": "needs_human"}
+                        await self._emit(
+                            task_id, EventType.STEP_FAILED,
+                            step=subtask.title, error=abort_msg,
+                            error_type="needs_human",
+                        )
+                        return ToolResult(
+                            success=False, error=abort_msg,
+                            data={"failure_kind": "needs_human", "unfixable_reason": reason},
+                        )
+                    else:
+                        # LLM 已应用 patch → 把改动登记为 CodeChange，让 evaluator 看得见
+                        try:
+                            existing_changes.append(CodeChange(
+                                file_path=patch["file_to_fix"],
+                                action=patch.get("action", "modify"),
+                                content=patch.get("new_content", ""),
+                                diff="",
+                            ))
+                        except Exception:
+                            pass
+
                     subtask.retry_count = attempt + 1
                     continue
 
