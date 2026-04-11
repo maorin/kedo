@@ -1038,6 +1038,8 @@ class AgentLoop:
         采集与失败步骤相关的项目文件，用于 LLM 失败诊断。
 
         策略：
+          - 最高优先：.kedo/project_profile.json（如果存在），因为 BUILD/TEST 命令
+            来自 profile，profile 写错时 LLM 必须能直接看到并修这个文件
           - 总是包含项目根目录下的构建清单文件（CMakeLists.txt 等）
           - CODE_GENERATE 失败：附带 subtask 描述里提到的目标文件（如果存在）
           - TEST 失败：列出 tests/ 或 test/ 目录的文件名
@@ -1047,6 +1049,15 @@ class AgentLoop:
         proj = _P(project_path)
         max_per_file = 8192
         results: list[tuple[str, str]] = []
+
+        # 0) project_profile.json — 最高优先级，因为 build/test 命令来自它
+        profile_file = proj / ".kedo" / "project_profile.json"
+        if profile_file.exists() and profile_file.is_file():
+            try:
+                content = profile_file.read_text(encoding="utf-8", errors="replace")[:max_per_file]
+                results.append((".kedo/project_profile.json", content))
+            except Exception:
+                pass
 
         # 1) 构建清单
         for name in self._FIX_CONTEXT_BUILD_MANIFESTS:
@@ -1104,13 +1115,19 @@ class AgentLoop:
             "1. Read the error output and the project files carefully before deciding.\n"
             "2. If a single file edit can fix the failure, output the COMPLETE new "
             "content of that file. Do not output a diff or partial snippet.\n"
-            "3. If the failure is structural (the wrong tool is being used, the test "
+            "3. If you see `.kedo/project_profile.json` in the relevant files, that JSON "
+            "is the source of truth for build/test commands. If the build error matches "
+            "a wrong path/command in that profile (e.g., a toolchain file path that does "
+            "not exist, a missing flag, a wrong working directory), edit the profile JSON "
+            "directly — do not try to work around it by editing other files. The profile "
+            "is editable just like any other file.\n"
+            "4. If the failure is structural (the wrong tool is being used, the test "
             "cannot run in this configuration, the plan itself is wrong, dependencies "
             "are missing at the system level, etc.) and CANNOT be fixed by editing one "
             "project file, respond with the unfixable schema instead. Do NOT hallucinate "
             "a fake fix.\n"
-            "4. Prefer minimal, targeted edits over rewrites.\n"
-            "5. Use forward slashes in file paths, relative to project root.\n\n"
+            "5. Prefer minimal, targeted edits over rewrites.\n"
+            "6. Use forward slashes in file paths, relative to project root.\n\n"
             "Output STRICTLY one of these two JSON shapes (no markdown, no commentary):\n"
             '{\n'
             '  "diagnosis": "<one-sentence root cause>",\n'
@@ -1231,6 +1248,12 @@ class AgentLoop:
         except Exception as e:
             logger.error(f"_attempt_llm_fix: failed to write {target}: {e}")
             return None
+
+        # 如果 LLM 改的是 profile.json，必须 invalidate 内存缓存，
+        # 否则下次 ensure() 会返回旧的 profile 内容
+        if rel == ".kedo/project_profile.json":
+            self.profile_manager.invalidate(project_path)
+            logger.info("_attempt_llm_fix: invalidated profile cache after LLM edit")
 
         diagnosis = patch.get("diagnosis", "")[:200]
         logger.info(f"_attempt_llm_fix: edited {rel} — {diagnosis}")
@@ -1506,8 +1529,46 @@ class AgentLoop:
 
             # 失败计数：profile build 多次失败 → 记录到 profile 用于 W 兜底
             if profile and not result.success:
+                stderr = result.error or (result.data.get("stderr", "") if result.data else "")
                 fc = self.profile_manager.mark_failure(project_path)
                 logger.warning(f"profile build failure count = {fc}")
+
+                # ★★★ P1: profile 第 2 次失败 → 强制重新生成 + 立刻重试一次
+                # 这是 Z 方案的自我修复：当 LLM 第一版 profile 写错了，
+                # 把错误信息作为 hint 让 LLM 看着 stderr 重新写一版
+                if fc >= 2:
+                    logger.warning(
+                        f"profile failed {fc} times, regenerating with error hint..."
+                    )
+                    try:
+                        new_profile = await self.profile_manager.ensure(
+                            project_path,
+                            self.planner._llm,
+                            force_regenerate=True,
+                            previous_error=stderr,
+                        )
+                    except Exception as e:
+                        logger.warning(f"profile regeneration raised: {e}")
+                        new_profile = None
+
+                    if new_profile and new_profile.build_command:
+                        new_cmd = os.path.expandvars(new_profile.build_command)
+                        if new_cmd != build_cmd:
+                            self.profile_manager.apply_required_env(new_profile)
+                            logger.info(
+                                f"Retrying build with regenerated profile: {new_cmd[:120]}"
+                            )
+                            result = await self.tools.execute(
+                                "shell_execute",
+                                command=new_cmd,
+                                working_dir=project_path,
+                            )
+                            if result.success:
+                                self.profile_manager.reset_failures(project_path)
+                        else:
+                            logger.info(
+                                "Regenerated profile produced same build command, skip retry"
+                            )
             elif profile and result.success:
                 self.profile_manager.reset_failures(project_path)
 

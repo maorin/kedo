@@ -248,12 +248,14 @@ class ProjectProfileManager:
         project_path: str,
         llm_client,
         force_regenerate: bool = False,
+        previous_error: Optional[str] = None,
     ) -> Optional[ProjectProfile]:
         """
         加载或生成 profile。
 
         - 已存在且未过期 → 直接返回（0 LLM 调用）
         - 不存在或 stale → 调 LLM 生成
+        - force_regenerate=True → 强制重新生成（可带 previous_error 作为修复 hint）
         - LLM 失败 → 返回 None，调用方应回退到原推断逻辑
         """
         if not force_regenerate:
@@ -267,7 +269,7 @@ class ProjectProfileManager:
             return None
 
         try:
-            profile = await self._generate_via_llm(llm_client, manifests)
+            profile = await self._generate_via_llm(llm_client, manifests, previous_error=previous_error)
         except Exception as e:
             logger.warning(f"ProjectProfile generation failed: {e}")
             return None
@@ -288,14 +290,32 @@ class ProjectProfileManager:
         self,
         llm_client,
         manifests: list[tuple[str, str]],
+        previous_error: Optional[str] = None,
     ) -> Optional[ProjectProfile]:
         files_block = "\n\n".join(f"=== {name} ===\n{content}" for name, content in manifests)
+        user_content = (
+            f"Project manifest files:\n\n{files_block}\n\n"
+            f"Output the JSON profile."
+        )
+        if previous_error:
+            user_content = (
+                f"A previously generated profile caused a build failure. Use this "
+                f"failure context to produce a CORRECTED profile — do not repeat the "
+                f"same mistake.\n\n"
+                f"Build failure stderr:\n```\n{previous_error[:3000]}\n```\n\n"
+                f"Common pitfalls based on this kind of error:\n"
+                f"  - Wrong CMake toolchain file path (e.g. $DEVKITPRO/switch.cmake "
+                f"vs the correct $DEVKITPRO/cmake/Switch.cmake — note capital S and "
+                f"the cmake/ subdirectory)\n"
+                f"  - Missing -DCMAKE_TOOLCHAIN_FILE flag entirely, causing host "
+                f"compiler to be picked\n"
+                f"  - Wrong working directory or missing mkdir step\n"
+                f"  - Forgetting elf2nro / packaging post-build for Switch homebrew\n\n"
+                f"{user_content}"
+            )
         messages = [
             {"role": "system", "content": PROFILE_SYSTEM_PROMPT},
-            {"role": "user", "content": (
-                f"Project manifest files:\n\n{files_block}\n\n"
-                f"Output the JSON profile."
-            )},
+            {"role": "user", "content": user_content},
         ]
         response = await llm_client.chat(messages)
         return self._parse_response(response)
