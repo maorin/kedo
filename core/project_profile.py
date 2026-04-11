@@ -83,6 +83,13 @@ CRITICAL RULES:
    environment variables that the host must provide. Pick a working directory
    relative to project root.
 
+   **Build commands MUST start by cleaning any stale build artifacts** (e.g.
+   `rm -rf build && mkdir -p build && ...` for CMake projects). This is
+   non-negotiable: a stale CMake cache will silently ignore a newly passed
+   `-DCMAKE_TOOLCHAIN_FILE` and fall back to the host compiler, which is
+   the most common source of cross-compilation build failures. Even for
+   non-CMake projects, prefer commands that produce clean output.
+
 3. **Required env**: List every environment variable the build command depends on,
    along with hint paths where the toolchain is typically installed. Include a
    small "verify_file" relative to the env-var path so the host can confirm the
@@ -304,9 +311,14 @@ class ProjectProfileManager:
                 f"same mistake.\n\n"
                 f"Build failure stderr:\n```\n{previous_error[:3000]}\n```\n\n"
                 f"Common pitfalls based on this kind of error:\n"
+                f"  - **Stale build/ cache**: failing to `rm -rf build` before "
+                f"re-running cmake. CMake will use the previously cached toolchain "
+                f"setting and ignore -DCMAKE_TOOLCHAIN_FILE. ALWAYS start the build "
+                f"command with `rm -rf build && mkdir -p build && cd build && ...`\n"
                 f"  - Wrong CMake toolchain file path (e.g. $DEVKITPRO/switch.cmake "
-                f"vs the correct $DEVKITPRO/cmake/Switch.cmake — note capital S and "
-                f"the cmake/ subdirectory)\n"
+                f"or $DEVKITPRO/devkitA64.cmake — both wrong. The correct path is "
+                f"$DEVKITPRO/cmake/Switch.cmake — note capital S and the cmake/ "
+                f"subdirectory)\n"
                 f"  - Missing -DCMAKE_TOOLCHAIN_FILE flag entirely, causing host "
                 f"compiler to be picked\n"
                 f"  - Wrong working directory or missing mkdir step\n"
