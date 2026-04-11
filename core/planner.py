@@ -313,6 +313,9 @@ JSON 数组，每个元素:
         if not is_existing_project:
             subtasks = self._ensure_doc_steps(subtasks, description)
 
+        # ★ 子任务质量校验：发现描述过短/过于泛化时注入父需求上下文
+        subtasks = self._validate_subtask_quality(subtasks, description)
+
         plan = TaskPlan(
             task_id=task_id,
             subtasks=subtasks,
@@ -323,6 +326,89 @@ JSON 数组，每个元素:
 
         logger.info(f"Plan created for task {task_id}: {len(subtasks)} subtasks")
         return plan
+
+    # 描述质量评估的常量
+    _MIN_DESCRIPTION_LEN = 20
+    _GENERIC_VERB_PHRASES = {
+        "create file", "write code", "implement", "add function",
+        "build project", "run tests", "generate code", "fix bug",
+        "create file.", "write code.", "implement.", "implement it.",
+        "fix it.", "do it.", "todo",
+    }
+
+    def _validate_subtask_quality(
+        self, subtasks: list[SubTask], parent_description: str
+    ) -> list[SubTask]:
+        """
+        子任务描述质量校验。
+
+        目的：避免 planner 输出空泛/缺信息的子任务，导致下游 code_generate 拿不到
+        足够上下文。检查是发现性的（不删/不重排子任务），只在描述过差时注入父需求
+        上下文作为补充。
+
+        检查项：
+          - 描述长度 >= _MIN_DESCRIPTION_LEN
+          - 描述不是 title 的逐字复制（信息量为 0）
+          - 描述不是泛化动词短语（"implement it" 之类）
+          - CODE_GENERATE 类型描述应能定位到具体文件或组件
+        """
+        if not subtasks:
+            logger.warning("Planner produced empty subtask list")
+            return subtasks
+
+        issues_found: list[tuple[str, str]] = []  # (subtask_id, issue)
+        parent_hint = (parent_description or "").strip()
+
+        for st in subtasks:
+            desc = (st.description or "").strip()
+            title = (st.title or "").strip()
+            problems: list[str] = []
+
+            if len(desc) < self._MIN_DESCRIPTION_LEN:
+                problems.append(f"描述过短 ({len(desc)} chars)")
+
+            if desc and title and desc.lower() == title.lower():
+                problems.append("描述与标题完全相同，零信息量")
+
+            normalized = desc.lower().rstrip(".。 ")
+            if normalized in self._GENERIC_VERB_PHRASES:
+                problems.append(f"描述为泛化动词短语: '{desc}'")
+
+            # CODE_GENERATE 类型应能定位到具体文件/组件
+            if st.step_type == StepType.CODE_GENERATE and len(desc) >= self._MIN_DESCRIPTION_LEN:
+                import re as _re
+                has_file_ref = bool(_re.search(r"[a-zA-Z0-9_/-]+\.[a-zA-Z]{1,5}", desc))
+                has_path_ref = bool(_re.search(r"(?:src/|docs/|build/|include/|lib/)", desc))
+                has_component_ref = any(
+                    kw in desc.lower()
+                    for kw in ("class ", "function ", "module ", "类", "函数", "模块", "接口", "endpoint")
+                )
+                if not (has_file_ref or has_path_ref or has_component_ref):
+                    problems.append("code_generate 描述未指向任何具体文件/组件")
+
+            if problems:
+                issues_found.append((st.id or "?", "; ".join(problems)))
+                # 注入父需求作为补充上下文，让下游至少有方向
+                if parent_hint and parent_hint not in desc:
+                    st.description = (
+                        f"{desc}\n\n[planner 自检注入] 父需求背景: {parent_hint[:300]}"
+                    )
+
+        if issues_found:
+            logger.warning(
+                f"Planner self-check flagged {len(issues_found)} low-quality subtask(s): "
+                + "; ".join(f"{sid}: {iss}" for sid, iss in issues_found[:5])
+            )
+            self._memory.add_message(
+                "system",
+                f"[Planner self-check] {len(issues_found)} subtask(s) had quality issues, "
+                f"父需求已作为补充上下文注入。问题: "
+                + "; ".join(f"{sid}({iss})" for sid, iss in issues_found[:3]),
+            )
+        else:
+            logger.info(f"Planner self-check passed: all {len(subtasks)} subtasks look specific enough")
+
+        return subtasks
 
     def _ensure_doc_steps(
         self, subtasks: list[SubTask], description: str

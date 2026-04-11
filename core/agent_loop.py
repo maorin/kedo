@@ -941,6 +941,9 @@ class AgentLoop:
         """执行单个子任务 (带重试)"""
         await self._emit(task_id, EventType.STEP_STARTED, step=subtask.title, type=subtask.step_type.value)
 
+        # 历史失败指纹：用于判断 LLM 是否在反复修一个修不动的错误
+        stderr_fingerprints: list[str] = []
+
         for attempt in range(subtask.max_retries):
             try:
                 # 发出工具执行事件
@@ -979,7 +982,49 @@ class AgentLoop:
                     subtask.result = {"error": result.error}
                     return result
 
+                # ★ 工具链/环境故障短路：LLM 改代码救不了，直接 abort
+                stderr_text = result.error or ""
+                if result.data and isinstance(result.data, dict):
+                    stderr_text = stderr_text or result.data.get("stderr", "")
+                failure_kind, failure_reason = self._classify_failure(stderr_text)
+                if failure_kind == "toolchain":
+                    abort_msg = (
+                        f"环境/工具链故障 ({failure_reason}) — 已中止 auto_fix。"
+                        f"LLM 无法通过修改项目代码解决此类故障，请检查工具链安装。\n"
+                        f"原始错误片段: {stderr_text[:300]}"
+                    )
+                    logger.error(f"Step '{subtask.title}' aborted due to toolchain failure: {failure_reason}")
+                    subtask.status = TaskStatus.FAILED
+                    subtask.result = {"error": abort_msg, "failure_kind": "toolchain"}
+                    await self._emit(
+                        task_id, EventType.STEP_FAILED,
+                        step=subtask.title, error=abort_msg,
+                        error_type="toolchain_failure",
+                    )
+                    return ToolResult(success=False, error=abort_msg, data={"failure_kind": "toolchain"})
+
                 if self.auto_fix_enabled and attempt < subtask.max_retries - 1:
+                    # ★ 重复错误早停：如果新的 stderr 和上一次几乎一样，
+                    # 说明 LLM 上一轮的修改没动到根因，再试一次也是浪费 token
+                    fp = self._stderr_fingerprint(stderr_text)
+                    if stderr_fingerprints and self._stderr_similar(fp, stderr_fingerprints[-1]):
+                        abort_msg = (
+                            f"连续 2 次 auto_fix 后错误未变化，判定 LLM 无法修复，提前中止。\n"
+                            f"原始错误片段: {stderr_text[:300]}"
+                        )
+                        logger.error(
+                            f"Step '{subtask.title}' aborted: stderr unchanged after fix attempt"
+                        )
+                        subtask.status = TaskStatus.FAILED
+                        subtask.result = {"error": abort_msg, "failure_kind": "stuck"}
+                        await self._emit(
+                            task_id, EventType.STEP_FAILED,
+                            step=subtask.title, error=abort_msg,
+                            error_type="auto_fix_stuck",
+                        )
+                        return ToolResult(success=False, error=abort_msg, data={"failure_kind": "stuck"})
+                    stderr_fingerprints.append(fp)
+
                     logger.warning(
                         f"Step '{subtask.title}' failed (attempt {attempt+1}), auto-fixing..."
                     )
@@ -1109,18 +1154,20 @@ class AgentLoop:
                 )
 
         elif step_type == StepType.EVALUATE:
-            # 从当前任务中获取描述（通过 task_id 查找，不是 subtask.id）
+            # 评分依据 = 当前子任务 scope；全局需求作为背景上下文传给 evaluator
             task_id = self._find_task_id_for_subtask(subtask)
             task_data = self.state._tasks.get(task_id, {})
-            description = task_data.get("description", subtask.description)
+            parent_goal = task_data.get("description", "")
+            scoped_requirement = subtask.description
             async def _on_eval_token(token):
                 await self._emit(task_id, EventType.LLM_TOKEN, token=token, phase="evaluate")
             try:
                 report = await self.evaluator.evaluate(
-                    original_requirement=description,
+                    original_requirement=scoped_requirement,
                     code_changes=existing_changes,
                     project_path=project_path,
                     on_token=_on_eval_token,
+                    parent_goal=parent_goal,
                 )
                 return ToolResult(
                     success=report.score >= self.min_eval_score,
@@ -1195,6 +1242,74 @@ class AgentLoop:
             name = f"step_{subtask.id or 'unknown'}"
 
         return f"{name}.py"
+
+    # 工具链/环境故障的特征模式 — 命中后直接 abort，不进 LLM 修复循环
+    # 这些故障 LLM 改项目代码救不了，必须由用户在环境层修
+    _TOOLCHAIN_FAILURE_PATTERNS = [
+        # pip 装的工具自身崩溃（cmake / black / ruff 等通过 ~/.local/bin 的入口脚本）
+        (
+            r"Traceback \(most recent call last\):[\s\S]*?(?:/\.local/bin/|site-packages/)",
+            "Python 工具链自身崩溃",
+        ),
+        # 解释器/工具二进制找不到
+        (r"command not found", "命令未安装"),
+        (r"No such file or directory.*?(?:cmake|make|gcc|g\+\+|clang|python|node|java|rustc|cargo)", "工具二进制缺失"),
+        # 动态库链接器故障（不是项目代码导致的）
+        (r"error while loading shared libraries", "动态库缺失"),
+        # 段错误来自工具链而非项目代码
+        (r"(?:cmake|gcc|g\+\+|clang|ld): .*?[Ss]egmentation fault", "工具链段错误"),
+        # PATH 或 shebang 解析失败
+        (r"bad interpreter: No such file", "解释器路径失效"),
+    ]
+
+    def _stderr_fingerprint(self, stderr: str) -> str:
+        """
+        把 stderr 归一化成指纹，用于判断两次失败是否本质上是同一个错误。
+        去掉行号、绝对路径前缀、PID、临时文件名、ANSI 颜色码、空白差异。
+        """
+        if not stderr:
+            return ""
+        import re as _re
+        s = stderr
+        s = _re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", s)              # ANSI
+        s = _re.sub(r"line \d+", "line N", s)                      # py 行号
+        s = _re.sub(r":\d+:\d+", ":N:N", s)                        # file:line:col
+        s = _re.sub(r":\d+:", ":N:", s)                            # file:line
+        s = _re.sub(r"/tmp/[A-Za-z0-9_./-]+", "/tmp/X", s)         # 临时路径
+        s = _re.sub(r"0x[0-9a-fA-F]+", "0xADDR", s)                # 内存地址
+        s = _re.sub(r"\bpid[= ]\d+", "pid=N", s, flags=_re.I)
+        s = _re.sub(r"\s+", " ", s).strip()
+        # 太长就只看前后各 1KB（开头通常含定位信息，结尾含 root cause）
+        if len(s) > 2000:
+            s = s[:1000] + " ... " + s[-1000:]
+        return s
+
+    def _stderr_similar(self, a: str, b: str, threshold: float = 0.85) -> bool:
+        """两个 stderr 指纹是否相似（默认 85%）。"""
+        if not a or not b:
+            return False
+        if a == b:
+            return True
+        from difflib import SequenceMatcher
+        return SequenceMatcher(None, a, b).ratio() >= threshold
+
+    def _classify_failure(self, stderr: str) -> tuple[str, str]:
+        """
+        把失败 stderr 分类成 (kind, reason)。
+
+        kind:
+          - "toolchain": 环境/工具链故障，LLM 修不了，应直接 abort
+          - "code":      项目代码问题，可以进 auto_fix 循环
+        """
+        if not stderr:
+            return ("code", "")
+
+        import re as _re
+        for pattern, reason in self._TOOLCHAIN_FAILURE_PATTERNS:
+            if _re.search(pattern, stderr, _re.IGNORECASE):
+                return ("toolchain", reason)
+
+        return ("code", "")
 
     # 已知的环境变量 → 路径探测规则
     _ENV_AUTO_DETECT = {

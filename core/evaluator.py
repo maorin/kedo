@@ -32,9 +32,16 @@ DEFAULT_DIMENSIONS = [
 
 EVAL_SYSTEM_PROMPT = """You are a senior code reviewer performing a multi-dimensional evaluation.
 
-Evaluate the code changes against the original requirements across these 4 dimensions:
+CRITICAL SCOPING RULE:
+You will be given a "Scoped Requirement" — this is the SPECIFIC sub-task whose output you must score.
+You may also be given a "Parent Goal" — this is the wider project goal for context only.
+Score `requirement_match` SOLELY against the Scoped Requirement. Do NOT penalize for things that
+belong to the Parent Goal but are out of scope for this sub-task. If the Parent Goal mentions X
+but the Scoped Requirement does not, X being absent is NOT a missed requirement.
 
-1. **requirement_match** (weight 0.35): Does the code fulfill all stated requirements?
+Evaluate the code changes against the Scoped Requirement across these 4 dimensions:
+
+1. **requirement_match** (weight 0.35): Does the code fulfill the Scoped Requirement?
 2. **code_quality** (weight 0.25): Is the code clean, readable, well-structured, and following best practices?
 3. **test_coverage** (weight 0.20): Are there adequate tests? Are edge cases covered?
 4. **security** (weight 0.20): Are there any security vulnerabilities, injection risks, or unsafe patterns?
@@ -79,9 +86,14 @@ class Evaluator:
         test_results: Optional[TestResult] = None,
         project_path: str = ".",
         on_token=None,
+        parent_goal: str = "",
     ) -> EvalReport:
         """
         多维度评估代码变更
+
+        Args:
+            original_requirement: 当前子任务的 scope（评分依据）
+            parent_goal: 上层任务/全局需求，仅作为背景上下文，不参与 requirement_match 评分
 
         流程: 静态检查 → LLM 评估 → 合并报告
         """
@@ -92,6 +104,7 @@ class Evaluator:
         llm_report = await self._llm_evaluate(
             original_requirement, code_changes, test_results, static_checks,
             on_token=on_token,
+            parent_goal=parent_goal,
         )
 
         # Step 3: 合并为最终报告
@@ -257,6 +270,7 @@ class Evaluator:
         test_results: Optional[TestResult],
         static_checks: dict,
         on_token=None,
+        parent_goal: str = "",
     ) -> dict:
         """调用 LLM 进行多维度评估"""
         # 构建代码变更摘要
@@ -311,16 +325,26 @@ class Evaluator:
             if parts:
                 static_info = "\n\nStatic Check Results:\n  " + "\n  ".join(parts)
 
+        # parent_goal 仅作为背景上下文呈现，不参与 requirement_match 评分
+        parent_section = ""
+        if parent_goal and parent_goal.strip() and parent_goal.strip() != requirement.strip():
+            parent_section = (
+                f"Parent Goal (BACKGROUND ONLY — do NOT score against this):\n"
+                f"{parent_goal}\n\n"
+            )
+
         messages = [
             {"role": "system", "content": EVAL_SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": (
-                    f"Original Requirement:\n{requirement}\n\n"
+                    f"{parent_section}"
+                    f"Scoped Requirement (THIS is what you score against):\n{requirement}\n\n"
                     f"Code Changes:\n{changes_str}"
                     f"{test_info}"
                     f"{static_info}\n\n"
-                    f"Evaluate these changes across all 4 dimensions. Output JSON."
+                    f"Evaluate these changes across all 4 dimensions, scoring requirement_match "
+                    f"ONLY against the Scoped Requirement above. Output JSON."
                 ),
             },
         ]
