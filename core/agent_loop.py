@@ -1660,7 +1660,20 @@ class AgentLoop:
                 )
 
         elif step_type == StepType.DEPLOY:
-            deploy_cmd = self._infer_deploy_command(project_path, subtask.description)
+            # ★★★ 方案 Z：profile.deploy.command 优先，没有就回退到 _infer_deploy_command ★★★
+            profile = self.profile_manager.load(project_path)
+            deploy_cmd = None
+            if profile:
+                deploy_section = profile.get("deploy") or {}
+                cmd = deploy_section.get("command")
+                if cmd:
+                    # required_env 也对 deploy 有效（go-mtpfs 可能需要 PATH 等）
+                    self.profile_manager.apply_required_env(profile)
+                    deploy_cmd = os.path.expandvars(cmd)
+                    logger.info(f"DEPLOY using profile.deploy.command: {deploy_cmd[:120]}")
+            if deploy_cmd is None:
+                deploy_cmd = self._infer_deploy_command(project_path, subtask.description)
+                logger.info(f"DEPLOY using inferred command (no profile.deploy): {deploy_cmd[:120]}")
             return await self.tools.execute(
                 "shell_execute",
                 command=deploy_cmd,

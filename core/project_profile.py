@@ -106,6 +106,13 @@ CRITICAL RULES:
 
 5. **Be specific about paths and commands**. No placeholders like "<your_command_here>".
 
+6. **Deploy** (optional but recommended for projects targeting external devices):
+   If the project produces an artifact that needs to be transferred to an external
+   device (Switch SD card, Android device, embedded board, etc.), include a `deploy`
+   field with the shell command. The command runs after a successful build. Leave
+   the field out for projects that don't have an external deploy target (e.g. host
+   libraries, host CLI tools).
+
 OUTPUT STRICT JSON (no markdown, no commentary), exactly this shape:
 {
   "type": "<concise project type, e.g. switch_homebrew, android_native, cpp_host, rust_embedded>",
@@ -118,6 +125,11 @@ OUTPUT STRICT JSON (no markdown, no commentary), exactly this shape:
     "strategy": "skip" | "ctest" | "pytest" | "go_test" | "cargo_test" | "npm_test" | "custom",
     "reason": "<one sentence explaining why this strategy>",
     "command": "<shell command, or null if strategy=skip>"
+  },
+  "deploy": {
+    "method": "<short label, e.g. switch_dbi_mtp, adb_push, scp, none>",
+    "command": "<full shell command, or null if method=none>",
+    "notes": "<one sentence: prerequisites or known quirks>"
   },
   "required_env": [
     {"name": "<ENV_VAR>", "search_paths": ["<abs path 1>", "<abs path 2>"], "verify_file": "<rel path inside the toolchain root>"}
