@@ -1,0 +1,416 @@
+"""
+ProjectProfileManager — LLM 驱动的项目能力档案
+
+为每个项目生成并持久化一份"profile"，描述：
+  - 项目类型 (switch_homebrew / android_native / cpp_host / ...)
+  - 构建命令和产物
+  - 测试策略（关键：交叉编译类项目可声明 test.strategy=skip）
+  - 必需的环境变量及典型安装路径
+  - 部署方式（可选）
+
+设计理念（kedo 改进计划方案 Z）：
+  - 把"懂 toolchain"这件事的存储位置从代码迁移到 LLM context + 落盘 profile
+  - 不维护 toolchain 注册表，新项目类型靠 LLM 推断 0 成本支持
+  - profile 一旦生成就 freeze 到 .kedo/project_profile.json，下次直接读取
+  - manifest 文件 hash 变化时自动失效重新生成
+  - LLM profile 失败 → 用户可手工编辑 JSON 作为 W 兜底
+
+profile 文件示例（switchvideo）：
+{
+  "version": 1,
+  "type": "switch_homebrew",
+  "build": {
+    "command": "mkdir -p build && cd build && cmake -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/Switch.cmake .. && make -j$(nproc)",
+    "working_dir": ".",
+    "artifacts": ["build/*.nro"]
+  },
+  "test": {
+    "strategy": "skip",
+    "reason": "Cross-compiled to aarch64-none-elf; host cannot execute test binaries",
+    "command": null
+  },
+  "required_env": [
+    {"name": "DEVKITPRO", "search_paths": ["/opt/devkitpro", "/usr/local/devkitpro", "~/devkitpro"], "verify_file": "cmake/Switch.cmake"}
+  ],
+  "notes": "Use elf2nro POST_BUILD step to package the .nro artifact",
+  "generated_by": "llm",
+  "human_verified": false,
+  "manifest_fingerprint": "sha256:...",
+  "fail_count": 0
+}
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import re
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
+
+PROFILE_VERSION = 1
+PROFILE_FILE = ".kedo/project_profile.json"
+
+# 构建清单文件——按重要度顺序读取，截断到合理大小喂 LLM
+MANIFEST_FILES = [
+    "CMakeLists.txt", "Makefile", "makefile", "GNUmakefile",
+    "build.gradle", "build.gradle.kts", "settings.gradle",
+    "package.json", "pyproject.toml", "setup.py", "setup.cfg",
+    "Cargo.toml", "go.mod", "BUILD.bazel", "BUILD", "WORKSPACE",
+    "platformio.ini", "Pipfile", "requirements.txt",
+    "Dockerfile", "flake.nix", "shell.nix", "devbox.json",
+]
+
+MAX_MANIFEST_BYTES = 6000
+MAX_MANIFESTS_TO_INCLUDE = 6
+
+PROFILE_SYSTEM_PROMPT = """You are a build system expert embedded in an AI development pipeline.
+Given the manifest files of a software project, output a JSON profile describing
+how to build, test, and deploy it.
+
+CRITICAL RULES:
+
+1. **Cross-compile awareness**: If the project is cross-compiled and the host
+   CANNOT execute its outputs (e.g., Nintendo Switch homebrew, embedded firmware,
+   kernel modules, ESP-IDF, ARM bare-metal), you MUST set test.strategy="skip"
+   with a clear reason. Do NOT propose host-side test commands for such projects.
+
+2. **Build commands must be self-contained shell snippets**. Use $ENV_VAR for
+   environment variables that the host must provide. Pick a working directory
+   relative to project root.
+
+3. **Required env**: List every environment variable the build command depends on,
+   along with hint paths where the toolchain is typically installed. Include a
+   small "verify_file" relative to the env-var path so the host can confirm the
+   tool is actually installed there.
+
+4. **Test strategy must be one of**:
+   - "skip"      : do not run any tests (use this for cross-compile targets)
+   - "ctest"     : run via ctest in build directory
+   - "pytest"    : run pytest
+   - "go_test"   : run go test ./...
+   - "cargo_test": run cargo test
+   - "npm_test"  : run npm test
+   - "custom"    : provide a custom command in test.command
+
+5. **Be specific about paths and commands**. No placeholders like "<your_command_here>".
+
+OUTPUT STRICT JSON (no markdown, no commentary), exactly this shape:
+{
+  "type": "<concise project type, e.g. switch_homebrew, android_native, cpp_host, rust_embedded>",
+  "build": {
+    "command": "<full shell command>",
+    "working_dir": ".",
+    "artifacts": ["<glob patterns relative to project root>"]
+  },
+  "test": {
+    "strategy": "skip" | "ctest" | "pytest" | "go_test" | "cargo_test" | "npm_test" | "custom",
+    "reason": "<one sentence explaining why this strategy>",
+    "command": "<shell command, or null if strategy=skip>"
+  },
+  "required_env": [
+    {"name": "<ENV_VAR>", "search_paths": ["<abs path 1>", "<abs path 2>"], "verify_file": "<rel path inside the toolchain root>"}
+  ],
+  "notes": "<anything else humans should know about building/testing this project>"
+}
+"""
+
+
+class ProjectProfile(dict):
+    """Profile 是个 dict，加了几个语义访问器。"""
+
+    @property
+    def build_command(self) -> str:
+        return ((self.get("build") or {}).get("command")) or ""
+
+    @property
+    def test_strategy(self) -> str:
+        return ((self.get("test") or {}).get("strategy")) or "auto"
+
+    @property
+    def test_command(self) -> Optional[str]:
+        return (self.get("test") or {}).get("command")
+
+    @property
+    def test_reason(self) -> str:
+        return (self.get("test") or {}).get("reason") or ""
+
+    @property
+    def required_env(self) -> list[dict]:
+        return self.get("required_env") or []
+
+    @property
+    def fail_count(self) -> int:
+        return int(self.get("fail_count") or 0)
+
+    @property
+    def human_verified(self) -> bool:
+        return bool(self.get("human_verified"))
+
+
+class ProjectProfileManager:
+    """
+    管理项目能力 profile 的生成、加载、持久化、失效。
+
+    集成方式（agent_loop 调用）：
+        profile = await pm.ensure(project_path, llm_client)
+        if profile:
+            build_cmd = profile.build_command
+            ...
+    """
+
+    def __init__(self):
+        self._cache: dict[str, ProjectProfile] = {}
+
+    # ----------------------------------------------------------
+    # 加载/保存
+    # ----------------------------------------------------------
+
+    def _profile_path(self, project_path: str) -> Path:
+        return Path(project_path) / PROFILE_FILE
+
+    def load(self, project_path: str) -> Optional[ProjectProfile]:
+        """从磁盘读 profile，找不到/损坏返回 None。"""
+        cached = self._cache.get(project_path)
+        if cached is not None:
+            return cached
+        path = self._profile_path(project_path)
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning(f"ProjectProfile: failed to read {path}: {e}")
+            return None
+        if not isinstance(data, dict):
+            return None
+        profile = ProjectProfile(data)
+        self._cache[project_path] = profile
+        return profile
+
+    def save(self, project_path: str, profile: ProjectProfile) -> None:
+        path = self._profile_path(project_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        profile["updated_at"] = datetime.utcnow().isoformat()
+        path.write_text(json.dumps(profile, indent=2, ensure_ascii=False), encoding="utf-8")
+        self._cache[project_path] = profile
+        logger.info(f"ProjectProfile saved: type={profile.get('type')} → {path}")
+
+    def invalidate(self, project_path: str) -> None:
+        self._cache.pop(project_path, None)
+
+    # ----------------------------------------------------------
+    # 生成 / 失效检测
+    # ----------------------------------------------------------
+
+    def _read_manifests(self, project_path: str) -> list[tuple[str, str]]:
+        """读取项目根目录下的构建 manifest 文件。"""
+        proj = Path(project_path)
+        results: list[tuple[str, str]] = []
+        for name in MANIFEST_FILES:
+            f = proj / name
+            if f.exists() and f.is_file():
+                try:
+                    text = f.read_text(encoding="utf-8", errors="replace")
+                    if len(text) > MAX_MANIFEST_BYTES:
+                        text = text[:MAX_MANIFEST_BYTES] + "\n... (truncated)"
+                    results.append((name, text))
+                    if len(results) >= MAX_MANIFESTS_TO_INCLUDE:
+                        break
+                except Exception as e:
+                    logger.debug(f"manifest read failed {name}: {e}")
+        return results
+
+    def _fingerprint(self, manifests: list[tuple[str, str]]) -> str:
+        """对 manifest 内容做 SHA256 指纹，用于检测 staleness。"""
+        h = hashlib.sha256()
+        for name, content in sorted(manifests):
+            h.update(name.encode("utf-8"))
+            h.update(b"\0")
+            h.update(content.encode("utf-8"))
+            h.update(b"\0")
+        return "sha256:" + h.hexdigest()[:32]
+
+    def is_stale(self, profile: ProjectProfile, project_path: str) -> bool:
+        """判断 profile 是否过期（manifest 文件有变化）。"""
+        if profile.human_verified:
+            return False  # 人工验证过的 profile 永不自动失效
+        manifests = self._read_manifests(project_path)
+        current_fp = self._fingerprint(manifests)
+        return profile.get("manifest_fingerprint") != current_fp
+
+    async def ensure(
+        self,
+        project_path: str,
+        llm_client,
+        force_regenerate: bool = False,
+    ) -> Optional[ProjectProfile]:
+        """
+        加载或生成 profile。
+
+        - 已存在且未过期 → 直接返回（0 LLM 调用）
+        - 不存在或 stale → 调 LLM 生成
+        - LLM 失败 → 返回 None，调用方应回退到原推断逻辑
+        """
+        if not force_regenerate:
+            existing = self.load(project_path)
+            if existing and not self.is_stale(existing, project_path):
+                return existing
+
+        manifests = self._read_manifests(project_path)
+        if not manifests:
+            logger.info(f"ProjectProfile: no manifests found in {project_path}, skip generation")
+            return None
+
+        try:
+            profile = await self._generate_via_llm(llm_client, manifests)
+        except Exception as e:
+            logger.warning(f"ProjectProfile generation failed: {e}")
+            return None
+
+        if profile is None:
+            return None
+
+        profile["manifest_fingerprint"] = self._fingerprint(manifests)
+        profile["generated_by"] = "llm"
+        profile["human_verified"] = False
+        profile["fail_count"] = 0
+        profile.setdefault("version", PROFILE_VERSION)
+        profile.setdefault("created_at", datetime.utcnow().isoformat())
+        self.save(project_path, profile)
+        return profile
+
+    async def _generate_via_llm(
+        self,
+        llm_client,
+        manifests: list[tuple[str, str]],
+    ) -> Optional[ProjectProfile]:
+        files_block = "\n\n".join(f"=== {name} ===\n{content}" for name, content in manifests)
+        messages = [
+            {"role": "system", "content": PROFILE_SYSTEM_PROMPT},
+            {"role": "user", "content": (
+                f"Project manifest files:\n\n{files_block}\n\n"
+                f"Output the JSON profile."
+            )},
+        ]
+        response = await llm_client.chat(messages)
+        return self._parse_response(response)
+
+    def _parse_response(self, response: str) -> Optional[ProjectProfile]:
+        if not response:
+            return None
+        text = response.strip()
+        # 去掉 ```json 包裹
+        if "```" in text:
+            m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+            if m:
+                text = m.group(1).strip()
+        # 取首个完整 JSON 对象
+        start = text.find("{")
+        if start < 0:
+            return None
+        depth = 0
+        end = -1
+        in_str = False
+        esc = False
+        for i in range(start, len(text)):
+            c = text[i]
+            if esc:
+                esc = False
+                continue
+            if c == "\\":
+                esc = True
+                continue
+            if c == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if end < 0:
+            return None
+        try:
+            data = json.loads(text[start:end])
+        except Exception as e:
+            logger.warning(f"ProjectProfile: parse failed: {e}")
+            return None
+        if not isinstance(data, dict):
+            return None
+        # 最小 schema 校验
+        if "build" not in data or not isinstance(data.get("build"), dict):
+            logger.warning("ProjectProfile: missing 'build' object")
+            return None
+        if not data["build"].get("command"):
+            logger.warning("ProjectProfile: build.command is empty")
+            return None
+        if "test" not in data or not isinstance(data.get("test"), dict):
+            data["test"] = {"strategy": "skip", "reason": "no test strategy from LLM", "command": None}
+        return ProjectProfile(data)
+
+    # ----------------------------------------------------------
+    # 失败计数 + W 兜底
+    # ----------------------------------------------------------
+
+    def mark_failure(self, project_path: str) -> int:
+        """记录一次基于 profile 的 build 失败，返回累计失败次数。"""
+        profile = self.load(project_path)
+        if profile is None:
+            return 0
+        profile["fail_count"] = profile.fail_count + 1
+        self.save(project_path, profile)
+        return profile["fail_count"]
+
+    def reset_failures(self, project_path: str) -> None:
+        profile = self.load(project_path)
+        if profile is None:
+            return
+        if profile.fail_count > 0:
+            profile["fail_count"] = 0
+            self.save(project_path, profile)
+
+    # ----------------------------------------------------------
+    # required_env 主动探测
+    # ----------------------------------------------------------
+
+    def apply_required_env(self, profile: ProjectProfile) -> dict[str, str]:
+        """
+        遍历 profile.required_env，对每个未设置的环境变量主动探测安装路径。
+        命中即写入 os.environ，返回新设置的 {var: path} 字典。
+        """
+        applied: dict[str, str] = {}
+        for entry in profile.required_env:
+            name = entry.get("name")
+            if not name or os.environ.get(name):
+                continue
+            verify = entry.get("verify_file") or ""
+            for raw in entry.get("search_paths") or []:
+                p = Path(os.path.expanduser(raw))
+                if not p.exists():
+                    continue
+                if verify and not (p / verify).exists():
+                    continue
+                os.environ[name] = str(p)
+                applied[name] = str(p)
+                logger.info(f"ProjectProfile: auto-set {name}={p}")
+                # 衍生路径：DEVKITPRO 特殊处理（兼容 _auto_fix_build_env 的逻辑）
+                if name == "DEVKITPRO":
+                    devkita64 = p / "devkitA64"
+                    if devkita64.exists() and not os.environ.get("DEVKITA64"):
+                        os.environ["DEVKITA64"] = str(devkita64)
+                    cur_path = os.environ.get("PATH", "")
+                    for bin_dir in (p / "tools" / "bin", devkita64 / "bin"):
+                        if bin_dir.exists() and str(bin_dir) not in cur_path:
+                            cur_path = str(bin_dir) + ":" + cur_path
+                    os.environ["PATH"] = cur_path
+                break
+        return applied

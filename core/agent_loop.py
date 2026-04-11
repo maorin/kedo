@@ -33,6 +33,7 @@ from api.schemas import (
 from core.evaluator import Evaluator
 from core.memory import AgentMemory
 from core.planner import Planner
+from core.project_profile import ProjectProfileManager
 from core.state_manager import StateManager
 from core.version_manager import VersionManager
 from tools.base import ToolRegistry, ToolResult
@@ -73,6 +74,7 @@ class AgentLoop:
         self.memory = memory
         self.versions = version_manager or VersionManager()
         self.config = config or {}
+        self.profile_manager = ProjectProfileManager()
 
         # 运行时状态
         self._running_tasks: dict[str, asyncio.Task] = {}
@@ -983,16 +985,32 @@ class AgentLoop:
             f"(kind={failure_kind}): {error_msg[:200]}"
         )
 
+        # ★★★ 方案 W：profile build 失败 → 把"用户可以手工修 profile"作为明确出口
+        suggestion = (
+            "Auto-fix exhausted. Inspect the error and either fix manually + resume, "
+            "or stop the task and refine the plan."
+        )
+        if subtask.step_type in (StepType.BUILD, StepType.TEST):
+            profile = self.profile_manager.load(project_path)
+            if profile is not None:
+                profile_path = Path(project_path) / ".kedo" / "project_profile.json"
+                suggestion = (
+                    f"Auto-fix exhausted (profile fail_count={profile.fail_count}). "
+                    f"The LLM-generated project profile may be wrong. You can:\n"
+                    f"  1. Manually edit {profile_path} (set human_verified=true to "
+                    f"prevent auto-regeneration), then resume the task.\n"
+                    f"  2. Delete the file to force LLM to regenerate from scratch.\n"
+                    f"  3. Inspect the actual error below and fix the source code, "
+                    f"then resume."
+                )
+
         await self._emit(
             task_id, EventType.STEP_FAILED,
             step=subtask.title,
             error=error_msg[:500],
             error_type=failure_kind,
             escalation="paused_for_human",
-            suggestion=(
-                "Auto-fix exhausted. Inspect the error and either fix manually + resume, "
-                "or stop the task and refine the plan."
-            ),
+            suggestion=suggestion,
         )
         self.memory.add_message(
             "system",
@@ -1447,31 +1465,86 @@ class AgentLoop:
             )
 
         elif step_type == StepType.BUILD:
-            # 智能推断构建命令
-            build_cmd = self._infer_build_command(project_path, subtask.description)
+            # ★★★ 方案 Z：先 ensure project profile，再用 profile.build.command ★★★
+            # profile 不存在时调 LLM 生成；存在时直接用，0 LLM 调用
+            try:
+                profile = await self.profile_manager.ensure(project_path, self.planner._llm)
+            except Exception as e:
+                logger.warning(f"profile.ensure failed: {e}, falling back to inference")
+                profile = None
+
+            if profile and profile.build_command:
+                # profile 命中：先把 required_env 主动应用到当前进程
+                applied_env = self.profile_manager.apply_required_env(profile)
+                if applied_env:
+                    logger.info(f"profile applied env: {applied_env}")
+                # build_cmd 用 shell expansion 让 $DEVKITPRO 等变量被解析
+                build_cmd = os.path.expandvars(profile.build_command)
+                logger.info(f"BUILD using profile (type={profile.get('type')}): {build_cmd[:120]}")
+            else:
+                # 没 profile 或 LLM 失败：回退原推断逻辑
+                build_cmd = self._infer_build_command(project_path, subtask.description)
+                logger.info(f"BUILD using inferred command (no profile): {build_cmd[:120]}")
+
             result = await self.tools.execute(
                 "shell_execute",
                 command=build_cmd,
                 working_dir=project_path,
             )
 
-            # ★ build 失败时自动诊断并修复环境
+            # ★ build 失败时自动诊断并修复环境（保留原 _auto_fix_build_env 作为补充）
             if not result.success:
-                stderr = result.error or result.data.get("stderr", "") if result.data else ""
+                stderr = result.error or (result.data.get("stderr", "") if result.data else "")
                 env_fixed = self._auto_fix_build_env(stderr, project_path)
                 if env_fixed:
                     logger.info(f"Auto-fixed build env: {env_fixed}, retrying build...")
-                    # 重新推断构建命令（环境变量可能影响路径）
-                    build_cmd = self._infer_build_command(project_path, subtask.description)
                     result = await self.tools.execute(
                         "shell_execute",
                         command=build_cmd,
                         working_dir=project_path,
                     )
 
+            # 失败计数：profile build 多次失败 → 记录到 profile 用于 W 兜底
+            if profile and not result.success:
+                fc = self.profile_manager.mark_failure(project_path)
+                logger.warning(f"profile build failure count = {fc}")
+            elif profile and result.success:
+                self.profile_manager.reset_failures(project_path)
+
             return result
 
         elif step_type == StepType.TEST:
+            # ★★★ 方案 Z：profile.test.strategy 决定测试行为 ★★★
+            profile = self.profile_manager.load(project_path)
+            if profile:
+                strategy = profile.test_strategy
+                # 交叉编译类项目（如 Switch homebrew）声明 skip → 直接通过
+                # 这解决了"host 上跑不了 cross-compile test"的根本矛盾
+                if strategy == "skip":
+                    reason = profile.test_reason or "Profile says test skipped"
+                    logger.info(f"TEST skipped per profile: {reason}")
+                    return ToolResult(
+                        success=True,
+                        output=f"Test skipped per project profile: {reason}",
+                        data={
+                            "test_result": {
+                                "total": 0, "passed": 0, "failed": 0,
+                                "skipped": 1, "coverage_percent": 0,
+                            },
+                            "skip_reason": reason,
+                        },
+                    )
+                # custom 命令优先于 test_run 工具的自动检测
+                if strategy == "custom" and profile.test_command:
+                    cmd = os.path.expandvars(profile.test_command)
+                    logger.info(f"TEST using profile.custom command: {cmd[:120]}")
+                    return await self.tools.execute(
+                        "shell_execute",
+                        command=cmd,
+                        working_dir=project_path,
+                    )
+                # 其他策略 (ctest/pytest/go_test/...) 走原 test_run 工具的自动检测路径
+
             # 尝试运行测试，如果没有测试框架则跳过（视为成功）
             try:
                 result = await self.tools.execute(
