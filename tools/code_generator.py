@@ -282,13 +282,16 @@ class CodeGeneratorTool(BaseTool):
     _VALIDATION_RULES = {
         "CMakeLists.txt": {
             "required": ["cmake_minimum_required", "project(", "add_executable"],
-            "forbidden_prefix": ["#", "##", "flowchart", "```"],
+            # CMake 用 # 做注释，绝对不能把 # / ## 列入 forbidden_prefix。
+            # 这里只过滤明确的 markdown/mermaid 残留。
+            "forbidden_prefix": ["flowchart", "```"],
             "min_lines": 10,
             "description": "CMake 构建脚本",
         },
         "Makefile": {
             "required": [":", "\t"],  # Makefile 必须有 target: 和 tab 缩进
-            "forbidden_prefix": ["##", "flowchart", "```"],
+            # 同理：Makefile 用 # 做注释，不能 forbid。
+            "forbidden_prefix": ["flowchart", "```"],
             "min_lines": 5,
             "description": "Make 构建脚本",
         },
