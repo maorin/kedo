@@ -966,17 +966,20 @@ class AgentLoop:
         project_path: str,
     ) -> bool:
         """
-        关键步骤经过 auto_fix 仍失败时调用。
+        关键步骤经过 auto_fix + profile regen 仍失败时调用，作为失败边界 hook。
 
-        默认行为：emit STEP_FAILED + pause task，把控制权交给人工。
+        默认且唯一行为：emit STEP_FAILED + pause task，把控制权交给人工。
 
-        【方案 3 接入点】未来若要在此触发自动 replan：
-          - 把 _handle_eval_failure_loop 泛化成接受非 EvalReport 的失败上下文
-          - 在这里调用它，并 return True 表示已自愈、外层应继续后续 subtask
+        注意：不要尝试在这里自动 replan。step 失败是"具体的局部 bug"，不是
+        "架构性分歧"，replan 路径（_handle_eval_failure_loop）是为 eval 评分
+        偏低的意图错位设计的，把它硬接到步骤失败上是工具错配：简单 bug 会被
+        包装成 proposals 丢进讨论 loop，并引入无限 replan 风险。想改善失败
+        处理的方向应该是 (a) 升级 escalation 的信息密度让用户一屏看完上下文，
+        或 (b) 让 auto_fix 本身更聪明（看得到 prior_attempts / profile）——
+        这两条都不改变本 hook 的行为。
 
         Returns:
-            False — 默认。表示外层 loop 应停下来等待人工（pause + wait_if_paused）。
-            True  — 该 hook 已自愈/重新规划，外层 loop 应继续推进。
+            False — 表示外层 loop 应停下来等待人工（pause + wait_if_paused）。
         """
         error_msg = result.error or "Step failed"
         failure_kind = "unknown"
