@@ -95,6 +95,73 @@ async def get_task(task_id: str):
 
 
 # ============================================================
+# 产品需求智能总结
+# ============================================================
+
+@router.get("/product-summary")
+async def product_summary():
+    """
+    智能总结所有任务对话，生成当前产品最新需求提示词。
+
+    收集所有任务的描述 + 状态 + 关键结果，调用 LLM 生成一份
+    结构化的产品需求文档。前端在讨论面板展示。
+    """
+    tasks = _state_manager.list_tasks()
+    if not tasks:
+        return {"summary": "暂无任务，请先创建任务。", "task_count": 0}
+
+    # 构建任务上下文
+    task_lines = []
+    for t in tasks:
+        status = t.get("status", "unknown")
+        desc = t.get("description", "")[:500]
+        task_id = t.get("task_id", t.get("id", "?"))
+        # 尝试获取详细状态（含 plan subtasks）
+        detail = _state_manager.get_task_status(task_id)
+        subtask_info = ""
+        if detail and hasattr(detail, "plan") and detail.plan:
+            subs = detail.plan.subtasks if hasattr(detail.plan, "subtasks") else []
+            completed = sum(1 for s in subs if getattr(s, "status", "") == "completed")
+            subtask_info = f" ({completed}/{len(subs)} 步骤完成)"
+        task_lines.append(f"- [{status}{subtask_info}] {desc}")
+
+    tasks_context = "\n".join(task_lines)
+
+    # 调用 LLM 生成需求总结
+    llm = _agent_loop.planner._llm
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是一个产品需求分析师。根据用户与 AI 开发工具的历史对话（每条对话是一个开发任务），"
+                "生成一份**当前产品的最新需求提示词**。\n\n"
+                "要求：\n"
+                "1. 提炼核心功能需求（已实现的标 ✅，进行中的标 🔧，失败的标 ❌）\n"
+                "2. 总结产品当前状态（一句话）\n"
+                "3. 生成一份可以直接用于下次开发的**需求提示词**（如果要从零开始重新描述这个产品应该怎么写）\n"
+                "4. 列出可能的下一步改进方向\n\n"
+                "输出格式用 Markdown。语言：中文。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"以下是该项目的所有历史任务对话：\n\n{tasks_context}\n\n请生成产品需求总结。",
+        },
+    ]
+
+    try:
+        summary = await llm.chat(messages)
+    except Exception as e:
+        summary = f"LLM 总结生成失败: {e}"
+
+    return {
+        "summary": summary,
+        "task_count": len(tasks),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ============================================================
 # 项目管理 API
 # ============================================================
 

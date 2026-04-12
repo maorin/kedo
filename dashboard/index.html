@@ -1017,7 +1017,7 @@
                 <div class="header-left">
                     <div class="logo">⚡ KEDO</div>
                     <div class="view-switcher">
-                        <button class="view-btn active" data-view="pipeline">Pipeline</button>
+                        <button class="view-btn active" data-view="pipeline">工作台</button>
                         <button class="view-btn" data-view="docs">文档</button>
                         <button class="view-btn" data-view="code">代码</button>
                         <button class="view-btn" data-view="build">打包</button>
@@ -1067,9 +1067,9 @@
                     </div>
                     <!-- 底部固定的新建任务栏 -->
                     <div id="newTaskBar" style="flex-shrink:0;border-top:1px solid rgba(100,200,255,0.15);padding:0.75rem 1rem;background:rgba(10,14,26,0.95);display:flex;gap:0.5rem;align-items:center;">
-                        <input type="text" class="task-input" id="taskInput" placeholder="\u8F93\u5165\u65B0\u4EFB\u52A1\u63CF\u8FF0\uFF0C\u56DE\u8F66\u6216\u70B9 \u521B\u5EFA \u63D0\u4EA4\u2026" style="flex:1;min-width:0;">
-                        <button class="task-button" id="createTaskBtn" style="flex-shrink:0;">\u521B\u5EFA</button>
-                        <button class="task-action-btn stop" style="flex-shrink:0;font-size:0.72rem;padding:0.35rem 0.7rem;" onclick="clearProject()">\u6E05\u7A7A\u9879\u76EE</button>
+                        <input type="text" class="task-input" id="taskInput" placeholder="输入新任务描述，回车或点 创建 提交…" style="flex:1;min-width:0;">
+                        <button class="task-button" id="createTaskBtn" style="flex-shrink:0;">创建</button>
+                        <button class="task-action-btn stop" style="flex-shrink:0;font-size:0.72rem;padding:0.35rem 0.7rem;" onclick="clearProject()">清空项目</button>
                     </div>
                 </div>
 
@@ -3594,6 +3594,10 @@
                         task.status = newStatus;
                         renderTaskList();
                         addLog('任务状态', `${task.description}: ${newStatus}`, 'info');
+                        // 任务完成或失败时自动刷新产品需求总结
+                        if (newStatus === 'completed' || newStatus === 'failed') {
+                            fetchProductSummary(true);
+                        }
                     } else {
                         appState.tasks.push({ id: message.task_id, description: '任务 ' + message.task_id, status: newStatus });
                         appState.currentTaskId = message.task_id;
@@ -4459,35 +4463,143 @@
         function renderCandidates() { /* removed: review gate no longer exists */ }
         function renderReviewPanel() { /* removed */ }
 
-        function renderDiscussion() {
-            dom.discussionContent.innerHTML = '';
-            if (!appState.discussion) {
-                dom.discussionContent.innerHTML = '<div class="no-data">暂无讨论</div>';
-                return;
+        let _productSummaryCache = null;
+        let _productSummaryLoading = false;
+
+        async function fetchProductSummary(force) {
+            if (_productSummaryLoading) return;
+            if (!force && _productSummaryCache) return;
+            _productSummaryLoading = true;
+            renderDiscussion();
+            try {
+                var r = await fetch(API_BASE + '/product-summary');
+                if (r.ok) { _productSummaryCache = await r.json(); }
+            } catch (e) {
+                _productSummaryCache = { summary: 'Failed: ' + e, task_count: 0 };
             }
-            if (appState.discussion.issues && appState.discussion.issues.length > 0) {
-                const title = document.createElement('div');
-                title.className = 'sidebar-title';
-                title.style.padding = '0.5rem 0';
-                title.textContent = '问题列表';
-                dom.discussionContent.appendChild(title);
-                appState.discussion.issues.forEach(issue => {
-                    const el = document.createElement('div');
+            _productSummaryLoading = false;
+            renderDiscussion();
+        }
+
+        function renderMarkdownText(parent, md) {
+            if (!md) return;
+            md.split('\n').forEach(function(line) {
+                var el;
+                if (line.startsWith('### ')) {
+                    el = document.createElement('h4');
+                    el.style.cssText = 'color:#64b5f6;margin:0.8rem 0 0.3rem;font-size:0.85rem;';
+                    el.textContent = line.substring(4);
+                } else if (line.startsWith('## ')) {
+                    el = document.createElement('h3');
+                    el.style.cssText = 'color:#00d9ff;margin:1rem 0 0.4rem;font-size:0.9rem;';
+                    el.textContent = line.substring(3);
+                } else if (line.startsWith('# ')) {
+                    el = document.createElement('h2');
+                    el.style.cssText = 'color:#0099cc;margin:1rem 0 0.5rem;font-size:1rem;';
+                    el.textContent = line.substring(2);
+                } else if (line.startsWith('- ')) {
+                    el = document.createElement('div');
+                    el.style.cssText = 'padding-left:1rem;font-size:0.8rem;color:#ddd;line-height:1.5;';
+                    el.textContent = '\u2022 ' + line.substring(2);
+                } else if (line.trim() === '') {
+                    el = document.createElement('br');
+                } else {
+                    el = document.createElement('div');
+                    el.style.cssText = 'font-size:0.8rem;color:#ddd;line-height:1.5;';
+                    el.textContent = line;
+                }
+                parent.appendChild(el);
+            });
+        }
+
+        function renderDiscussion() {
+            dom.discussionContent.textContent = '';
+
+            // ---- 产品需求总结 ----
+            var summarySection = document.createElement('div');
+            summarySection.style.cssText = 'margin-bottom:1rem;';
+
+            var summaryHeader = document.createElement('div');
+            summaryHeader.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0;';
+            var summaryTitle = document.createElement('div');
+            summaryTitle.className = 'sidebar-title';
+            summaryTitle.textContent = '\u4EA7\u54C1\u9700\u6C42\u603B\u7ED3';
+            summaryHeader.appendChild(summaryTitle);
+
+            var refreshBtn = document.createElement('button');
+            refreshBtn.style.cssText = 'padding:0.3rem 0.8rem;background:rgba(0,209,178,0.15);color:#00d1b2;border:1px solid rgba(0,209,178,0.3);border-radius:4px;font-size:0.72rem;cursor:pointer;';
+            refreshBtn.textContent = _productSummaryLoading ? '\u751F\u6210\u4E2D...' : '\u5237\u65B0\u603B\u7ED3';
+            refreshBtn.disabled = _productSummaryLoading;
+            refreshBtn.addEventListener('click', function() { fetchProductSummary(true); });
+            summaryHeader.appendChild(refreshBtn);
+            summarySection.appendChild(summaryHeader);
+
+            if (_productSummaryLoading) {
+                var loading = document.createElement('div');
+                loading.style.cssText = 'color:#888;font-size:0.8rem;padding:1rem;text-align:center;';
+                loading.textContent = '\u6B63\u5728\u8C03\u7528 LLM \u751F\u6210\u4EA7\u54C1\u9700\u6C42\u603B\u7ED3...';
+                summarySection.appendChild(loading);
+            } else if (_productSummaryCache && _productSummaryCache.summary) {
+                var content = document.createElement('div');
+                content.style.cssText = 'padding:0.5rem;background:rgba(30,41,59,0.5);border-radius:6px;max-height:500px;overflow-y:auto;';
+                renderMarkdownText(content, _productSummaryCache.summary);
+                summarySection.appendChild(content);
+                if (_productSummaryCache.generated_at) {
+                    var ts = document.createElement('div');
+                    ts.style.cssText = 'font-size:0.65rem;color:#555;margin-top:0.3rem;text-align:right;';
+                    ts.textContent = '\u751F\u6210\u4E8E ' + new Date(_productSummaryCache.generated_at).toLocaleString() + ' | ' + _productSummaryCache.task_count + ' \u4E2A\u4EFB\u52A1';
+                    summarySection.appendChild(ts);
+                }
+            } else {
+                var empty = document.createElement('div');
+                empty.style.cssText = 'color:#666;font-size:0.8rem;padding:1rem;text-align:center;';
+                empty.textContent = '\u70B9\u51FB\u201C\u5237\u65B0\u603B\u7ED3\u201D\u751F\u6210\u4EA7\u54C1\u9700\u6C42\u5206\u6790';
+                summarySection.appendChild(empty);
+            }
+            dom.discussionContent.appendChild(summarySection);
+
+            // ---- 分隔线 + 原有讨论记录 ----
+            if (appState.discussion) {
+                var hr = document.createElement('div');
+                hr.style.cssText = 'border-top:1px solid rgba(100,200,255,0.1);margin:0.5rem 0;';
+                dom.discussionContent.appendChild(hr);
+            }
+            if (appState.discussion && appState.discussion.issues && appState.discussion.issues.length > 0) {
+                var issTitle = document.createElement('div');
+                issTitle.className = 'sidebar-title';
+                issTitle.style.padding = '0.5rem 0';
+                issTitle.textContent = '\u95EE\u9898\u5217\u8868';
+                dom.discussionContent.appendChild(issTitle);
+                appState.discussion.issues.forEach(function(issue) {
+                    var el = document.createElement('div');
                     el.className = 'discussion-item fade-in';
-                    el.innerHTML = `<div class="issue-title">${issue.title}</div><div>${issue.description}</div>`;
+                    var t = document.createElement('div');
+                    t.className = 'issue-title';
+                    t.textContent = issue.title || '';
+                    el.appendChild(t);
+                    var d = document.createElement('div');
+                    d.textContent = issue.description || '';
+                    el.appendChild(d);
                     dom.discussionContent.appendChild(el);
                 });
             }
-            if (appState.discussion.proposals && appState.discussion.proposals.length > 0) {
-                const title = document.createElement('div');
-                title.className = 'sidebar-title';
-                title.style.padding = '1rem 0 0.5rem 0';
-                title.textContent = '解决方案';
-                dom.discussionContent.appendChild(title);
-                appState.discussion.proposals.forEach(p => {
-                    const el = document.createElement('div');
+            if (appState.discussion && appState.discussion.proposals && appState.discussion.proposals.length > 0) {
+                var propTitle = document.createElement('div');
+                propTitle.className = 'sidebar-title';
+                propTitle.style.padding = '1rem 0 0.5rem 0';
+                propTitle.textContent = '\u89E3\u51B3\u65B9\u6848';
+                dom.discussionContent.appendChild(propTitle);
+                appState.discussion.proposals.forEach(function(p) {
+                    var el = document.createElement('div');
                     el.className = 'proposal-item fade-in';
-                    el.innerHTML = `<div style="font-weight:600;color:#0099cc;">${p.title}</div><div class="proposal-text">${p.description}</div>`;
+                    var pt = document.createElement('div');
+                    pt.style.cssText = 'font-weight:600;color:#0099cc;';
+                    pt.textContent = p.title || '';
+                    el.appendChild(pt);
+                    var pd = document.createElement('div');
+                    pd.className = 'proposal-text';
+                    pd.textContent = p.description || '';
+                    el.appendChild(pd);
                     dom.discussionContent.appendChild(el);
                 });
             }
