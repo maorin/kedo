@@ -1638,6 +1638,10 @@ class AgentLoop:
             scoped_requirement = subtask.description
             async def _on_eval_token(token):
                 await self._emit(task_id, EventType.LLM_TOKEN, token=token, phase="evaluate")
+            # 把 profile 的 test.strategy 透传给 evaluator：strategy=skip 时跳过
+            # test_coverage 维度，避免交叉编译项目被"无单测"硬顶 40 分拖进 discussion loop。
+            profile_for_eval = self.profile_manager.load(project_path)
+            eval_test_strategy = profile_for_eval.test_strategy if profile_for_eval else "auto"
             try:
                 report = await self.evaluator.evaluate(
                     original_requirement=scoped_requirement,
@@ -1645,6 +1649,7 @@ class AgentLoop:
                     project_path=project_path,
                     on_token=_on_eval_token,
                     parent_goal=parent_goal,
+                    test_strategy=eval_test_strategy,
                 )
                 return ToolResult(
                     success=report.score >= self.min_eval_score,

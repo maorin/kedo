@@ -87,6 +87,7 @@ class Evaluator:
         project_path: str = ".",
         on_token=None,
         parent_goal: str = "",
+        test_strategy: str = "auto",
     ) -> EvalReport:
         """
         多维度评估代码变更
@@ -94,8 +95,9 @@ class Evaluator:
         Args:
             original_requirement: 当前子任务的 scope（评分依据）
             parent_goal: 上层任务/全局需求，仅作为背景上下文，不参与 requirement_match 评分
-
-        流程: 静态检查 → LLM 评估 → 合并报告
+            test_strategy: 来自 project_profile.test.strategy。值为 "skip" 时表示项目
+                无法在主机侧跑测试（交叉编译/嵌入式），test_coverage 维度将从加权中剔除
+                并把其权重按比例分摊给其他维度，避免主观分被无谓拉低进 discussion loop。
         """
         # Step 1: 静态检查（客观数据）
         static_checks = await self._run_static_checks(code_changes, project_path)
@@ -108,7 +110,7 @@ class Evaluator:
         )
 
         # Step 3: 合并为最终报告
-        report = self._merge_report(llm_report, static_checks, test_results)
+        report = self._merge_report(llm_report, static_checks, test_results, test_strategy=test_strategy)
 
         # 记录评估结果
         dim_summary = ", ".join(
@@ -390,18 +392,35 @@ class Evaluator:
         llm_report: dict,
         static_checks: dict,
         test_results: Optional[TestResult],
+        test_strategy: str = "auto",
     ) -> EvalReport:
         """合并 LLM 评估和静态检查为最终报告"""
         # 构建维度列表
         dimensions = []
         llm_dims = {d["name"]: d for d in llm_report.get("dimensions", [])}
 
-        for dim_config in self._dimensions:
+        # profile 声明 test.strategy=skip 时（交叉编译/嵌入式项目），test_coverage
+        # 维度无意义，从加权中剔除并把其权重按比例分摊到其他维度。
+        active_dims = list(self._dimensions)
+        if test_strategy == "skip":
+            dropped = [d for d in active_dims if d["name"] == "test_coverage"]
+            active_dims = [d for d in active_dims if d["name"] != "test_coverage"]
+            if dropped and active_dims:
+                dropped_weight = dropped[0]["weight"]
+                total_remaining = sum(d["weight"] for d in active_dims)
+                if total_remaining > 0:
+                    active_dims = [
+                        {**d, "weight": d["weight"] + dropped_weight * (d["weight"] / total_remaining)}
+                        for d in active_dims
+                    ]
+
+        for dim_config in active_dims:
             name = dim_config["name"]
             weight = dim_config["weight"]
             llm_dim = llm_dims.get(name, {})
 
-            score = float(llm_dim.get("score", 60))
+            # 默认 75：与 LLM 打分中位数对齐，避免 LLM 漏报某维度时被默认 60 无谓拉低总分
+            score = float(llm_dim.get("score", 75))
             details = llm_dim.get("details", "")
 
             # 用静态检查结果修正分数
