@@ -90,6 +90,9 @@ class AgentLoop:
         self.min_eval_score = self.config.get("min_eval_score", 70)
         self.max_iterations = self.config.get("max_iterations", 5)
         self.auto_discussion = self.config.get("auto_discussion", True)  # AI自动选方案 vs 等人工
+        # profile 被 LLM 重生成的次数上限：超过就不再自动 regen，直接走人工 escalation。
+        # 跨 regen 持久化（存在 profile.total_regens 字段里），所以 kedo 重启也记得。
+        self.MAX_PROFILE_REGENS = self.config.get("max_profile_regens", 3)
 
         # ★ 启动时加载之前自动检测到的环境变量
         self._load_auto_detected_env()
@@ -994,14 +997,23 @@ class AgentLoop:
             profile = self.profile_manager.load(project_path)
             if profile is not None:
                 profile_path = Path(project_path) / ".kedo" / "project_profile.json"
+                regen_hint = ""
+                if profile.total_regens >= self.MAX_PROFILE_REGENS:
+                    regen_hint = (
+                        f"\n  NOTE: profile has already been LLM-regenerated "
+                        f"{profile.total_regens} times (cap={self.MAX_PROFILE_REGENS}). "
+                        f"Auto-regeneration is now disabled for this project; manual "
+                        f"intervention is required."
+                    )
                 suggestion = (
-                    f"Auto-fix exhausted (profile fail_count={profile.fail_count}). "
+                    f"Auto-fix exhausted (profile fail_count={profile.fail_count}, "
+                    f"total_regens={profile.total_regens}). "
                     f"The LLM-generated project profile may be wrong. You can:\n"
                     f"  1. Manually edit {profile_path} (set human_verified=true to "
                     f"prevent auto-regeneration), then resume the task.\n"
                     f"  2. Delete the file to force LLM to regenerate from scratch.\n"
                     f"  3. Inspect the actual error below and fix the source code, "
-                    f"then resume."
+                    f"then resume.{regen_hint}"
                 )
 
         await self._emit(
@@ -1530,15 +1542,28 @@ class AgentLoop:
             # 失败计数：profile build 多次失败 → 记录到 profile 用于 W 兜底
             if profile and not result.success:
                 stderr = result.error or (result.data.get("stderr", "") if result.data else "")
-                fc = self.profile_manager.mark_failure(project_path)
-                logger.warning(f"profile build failure count = {fc}")
+                # 传入 stderr + build_cmd，让本次失败快照进入 prior_attempts（跨 regen 持久化）
+                fc = self.profile_manager.mark_failure(
+                    project_path,
+                    stderr=stderr,
+                    build_command=build_cmd,
+                )
+                logger.warning(
+                    f"profile build failure: fail_count={fc}, "
+                    f"total_regens={profile.total_regens}"
+                )
 
                 # ★★★ P1: profile 第 2 次失败 → 强制重新生成 + 立刻重试一次
                 # 这是 Z 方案的自我修复：当 LLM 第一版 profile 写错了，
                 # 把错误信息作为 hint 让 LLM 看着 stderr 重新写一版
-                if fc >= 2:
+                #
+                # 跨 regen 持久化的上限保护：如果这个项目已经 regen 过 MAX_PROFILE_REGENS
+                # 次还在失败，说明 LLM 解决不了这个问题，不要再无限烧 token —— 直接
+                # 让外层 auto_fix / _on_step_unrecoverable 接手，走人工 escalation。
+                if fc >= 2 and profile.total_regens < self.MAX_PROFILE_REGENS:
                     logger.warning(
-                        f"profile failed {fc} times, regenerating with error hint..."
+                        f"profile failed {fc} times (total_regens={profile.total_regens}), "
+                        f"regenerating with error hint..."
                     )
                     try:
                         new_profile = await self.profile_manager.ensure(
@@ -1556,7 +1581,8 @@ class AgentLoop:
                         if new_cmd != build_cmd:
                             self.profile_manager.apply_required_env(new_profile)
                             logger.info(
-                                f"Retrying build with regenerated profile: {new_cmd[:120]}"
+                                f"Retrying build with regenerated profile "
+                                f"(total_regens={new_profile.total_regens}): {new_cmd[:120]}"
                             )
                             result = await self.tools.execute(
                                 "shell_execute",
@@ -1569,6 +1595,13 @@ class AgentLoop:
                             logger.info(
                                 "Regenerated profile produced same build command, skip retry"
                             )
+                elif fc >= 2:
+                    logger.error(
+                        f"profile failed {fc} times and total_regens="
+                        f"{profile.total_regens} has reached MAX_PROFILE_REGENS="
+                        f"{self.MAX_PROFILE_REGENS}. Not auto-regenerating; escalating "
+                        f"to human via _on_step_unrecoverable."
+                    )
             elif profile and result.success:
                 self.profile_manager.reset_failures(project_path)
 

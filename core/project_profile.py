@@ -68,6 +68,11 @@ MANIFEST_FILES = [
 MAX_MANIFEST_BYTES = 6000
 MAX_MANIFESTS_TO_INCLUDE = 6
 
+# prior_attempts 列表上限：只保留最近 N 次失败快照给 LLM 作为 negative examples
+MAX_PRIOR_ATTEMPTS = 5
+# 单条 prior_attempt 中 stderr 摘要的字节上限
+PRIOR_ATTEMPT_STDERR_LIMIT = 1500
+
 PROFILE_SYSTEM_PROMPT = """You are a build system expert embedded in an AI development pipeline.
 Given the manifest files of a software project, output a JSON profile describing
 how to build, test, and deploy it.
@@ -165,6 +170,20 @@ class ProjectProfile(dict):
     @property
     def fail_count(self) -> int:
         return int(self.get("fail_count") or 0)
+
+    @property
+    def total_regens(self) -> int:
+        """该项目历史上 profile 被 LLM 重新生成过多少次（跨 regen 累积）。"""
+        return int(self.get("total_regens") or 0)
+
+    @property
+    def prior_attempts(self) -> list[dict]:
+        """
+        历史失败的 profile 尝试快照，格式：
+          [{"version": int, "build_command": str, "stderr_excerpt": str, "failed_at": iso}, ...]
+        跨 regen 持久化，作为 LLM 重生成时的 negative examples，避免在相近错误之间反复跳。
+        """
+        return self.get("prior_attempts") or []
 
     @property
     def human_verified(self) -> bool:
@@ -277,8 +296,10 @@ class ProjectProfileManager:
         - force_regenerate=True → 强制重新生成（可带 previous_error 作为修复 hint）
         - LLM 失败 → 返回 None，调用方应回退到原推断逻辑
         """
+        # 先读一次旧 profile —— 即使要 regen 也需要它的 total_regens / prior_attempts
+        # 作为"跨 regen 持久化"的来源
+        existing = self.load(project_path)
         if not force_regenerate:
-            existing = self.load(project_path)
             if existing and not self.is_stale(existing, project_path):
                 return existing
 
@@ -287,8 +308,20 @@ class ProjectProfileManager:
             logger.info(f"ProjectProfile: no manifests found in {project_path}, skip generation")
             return None
 
+        # 跨 regen 持久化的字段：旧 profile 的失败历史要传给 LLM 作 negative examples
+        carried_prior_attempts: list[dict] = []
+        carried_total_regens = 0
+        if existing is not None:
+            carried_prior_attempts = list(existing.prior_attempts)
+            carried_total_regens = existing.total_regens
+
         try:
-            profile = await self._generate_via_llm(llm_client, manifests, previous_error=previous_error)
+            profile = await self._generate_via_llm(
+                llm_client,
+                manifests,
+                previous_error=previous_error,
+                prior_attempts=carried_prior_attempts,
+            )
         except Exception as e:
             logger.warning(f"ProjectProfile generation failed: {e}")
             return None
@@ -299,7 +332,14 @@ class ProjectProfileManager:
         profile["manifest_fingerprint"] = self._fingerprint(manifests)
         profile["generated_by"] = "llm"
         profile["human_verified"] = False
-        profile["fail_count"] = 0
+        profile["fail_count"] = 0  # 当前版本计数归零
+        # 以下两个字段跨 regen 持久化：fail_count 可以清零，但"这项目改了几版 profile"
+        # 和"历史失败快照"必须保留，用于上限保护 + 下次 regen 的 negative examples
+        if force_regenerate and existing is not None:
+            profile["total_regens"] = carried_total_regens + 1
+        else:
+            profile["total_regens"] = carried_total_regens
+        profile["prior_attempts"] = carried_prior_attempts
         profile.setdefault("version", PROFILE_VERSION)
         profile.setdefault("created_at", datetime.utcnow().isoformat())
         self.save(project_path, profile)
@@ -310,12 +350,31 @@ class ProjectProfileManager:
         llm_client,
         manifests: list[tuple[str, str]],
         previous_error: Optional[str] = None,
+        prior_attempts: Optional[list[dict]] = None,
     ) -> Optional[ProjectProfile]:
         files_block = "\n\n".join(f"=== {name} ===\n{content}" for name, content in manifests)
         user_content = (
             f"Project manifest files:\n\n{files_block}\n\n"
             f"Output the JSON profile."
         )
+        # 跨 regen 的 negative examples：告诉 LLM 历史上试过哪些 build_command 并且都挂了，
+        # 不要在相近变体之间反复跳
+        if prior_attempts:
+            neg_block_lines = []
+            for i, att in enumerate(prior_attempts, 1):
+                neg_block_lines.append(
+                    f"  [attempt {i}, profile v{att.get('version', '?')}]\n"
+                    f"    build_command: {att.get('build_command', '')[:400]}\n"
+                    f"    stderr (tail): {att.get('stderr_excerpt', '')[:800]}"
+                )
+            user_content = (
+                f"IMPORTANT: {len(prior_attempts)} previous profile(s) have already been "
+                f"tried on this project and ALL failed. Here are the failed attempts — "
+                f"DO NOT produce a build_command that is structurally similar to any of "
+                f"them, and explicitly avoid repeating the same mistakes:\n\n"
+                f"{chr(10).join(neg_block_lines)}\n\n"
+                f"{user_content}"
+            )
         if previous_error:
             user_content = (
                 f"A previously generated profile caused a build failure. Use this "
@@ -405,12 +464,36 @@ class ProjectProfileManager:
     # 失败计数 + W 兜底
     # ----------------------------------------------------------
 
-    def mark_failure(self, project_path: str) -> int:
-        """记录一次基于 profile 的 build 失败，返回累计失败次数。"""
+    def mark_failure(
+        self,
+        project_path: str,
+        stderr: Optional[str] = None,
+        build_command: Optional[str] = None,
+    ) -> int:
+        """
+        记录一次基于 profile 的 build 失败，返回当前版本累计失败次数。
+
+        当传入 stderr / build_command 时，同时把本次失败快照追加到 prior_attempts
+        列表里（跨 regen 持久化）。这样下一次 LLM 重生成 profile 时就能看到
+        "之前的 build_command 是 X，挂在 stderr Y" 作为 negative examples，避免
+        在相近错误之间反复跳。
+        """
         profile = self.load(project_path)
         if profile is None:
             return 0
         profile["fail_count"] = profile.fail_count + 1
+
+        if stderr or build_command:
+            attempts = list(profile.prior_attempts)
+            attempts.append({
+                "version": profile.total_regens + 1,  # 第几代 profile
+                "build_command": (build_command or profile.build_command or "")[:500],
+                "stderr_excerpt": (stderr or "")[-PRIOR_ATTEMPT_STDERR_LIMIT:],
+                "failed_at": datetime.utcnow().isoformat(),
+            })
+            # 只保留最近 MAX_PRIOR_ATTEMPTS 条
+            profile["prior_attempts"] = attempts[-MAX_PRIOR_ATTEMPTS:]
+
         self.save(project_path, profile)
         return profile["fail_count"]
 
