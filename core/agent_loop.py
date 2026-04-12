@@ -162,10 +162,12 @@ class AgentLoop:
         if additional_context:
             self.memory.add_message("user", f"[续接补充] {additional_context}")
 
-        # 确保任务有 pause_event
+        # 确保任务有 pause_event 且处于就绪状态。
+        # 之前的 bug：已 paused 的 task 的 event 存在但 cleared，if 跳过 .set()
+        # → _run_smart_continuation 在 wait_if_paused 永久阻塞。
         if task_id not in self.state._pause_events:
             self.state._pause_events[task_id] = asyncio.Event()
-            self.state._pause_events[task_id].set()
+        self.state._pause_events[task_id].set()
 
         # 确保任务状态可恢复
         if task_id in self.state._tasks:
@@ -1257,6 +1259,19 @@ class AgentLoop:
         from pathlib import Path as _P
         rel = patch["file_to_fix"].lstrip("/").replace("\\", "/")
         target = _P(project_path) / rel
+
+        # human_verified 的 profile 不允许 auto_fix 修改：之前 LLM 会"简化"
+        # build.command（删掉 -DCMAKE_TOOLCHAIN_FILE 等关键 flag），导致交叉
+        # 编译退化成宿主机编译。human_verified 就是用户明确说"这个 profile 是对
+        # 的"，auto_fix 无权推翻。
+        if rel == ".kedo/project_profile.json":
+            profile = self.profile_manager.load(project_path)
+            if profile and profile.human_verified:
+                logger.warning(
+                    "_attempt_llm_fix: LLM wants to edit human_verified profile, blocked"
+                )
+                return None
+
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(patch["new_content"], encoding="utf-8")
@@ -1264,8 +1279,7 @@ class AgentLoop:
             logger.error(f"_attempt_llm_fix: failed to write {target}: {e}")
             return None
 
-        # 如果 LLM 改的是 profile.json，必须 invalidate 内存缓存，
-        # 否则下次 ensure() 会返回旧的 profile 内容
+        # 如果 LLM 改的是 profile.json（非 human_verified），invalidate 内存缓存
         if rel == ".kedo/project_profile.json":
             self.profile_manager.invalidate(project_path)
             logger.info("_attempt_llm_fix: invalidated profile cache after LLM edit")
