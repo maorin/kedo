@@ -1041,16 +1041,6 @@
             <!-- ====== Pipeline 视图 ====== -->
             <div class="pipeline-view" id="pipelineView">
                 <div class="sidebar">
-                    <div class="sidebar-section">
-                        <div class="sidebar-title">新建任务</div>
-                        <div class="task-input-group">
-                            <input type="text" class="task-input" id="taskInput" placeholder="输入任务描述...">
-                            <button class="task-button" id="createTaskBtn">创建</button>
-                        </div>
-                        <div style="margin-top: 0.5rem; text-align: right;">
-                            <button class="task-action-btn stop" style="font-size: 0.72rem; padding: 0.25rem 0.6rem;" onclick="clearProject()">清空项目</button>
-                        </div>
-                    </div>
                     <div class="sidebar-section" style="flex: 1; display: flex; flex-direction: column; padding: 0; min-height: 0; overflow: hidden;">
                         <div style="padding: 1rem; border-bottom: 1px solid rgba(100, 200, 255, 0.1);">
                             <div class="sidebar-title">任务列表</div>
@@ -1074,6 +1064,12 @@
                     </div>
                     <div class="panel-content" id="discussion-panel" style="flex:1;overflow-y:auto;">
                         <div id="discussionContent"></div>
+                    </div>
+                    <!-- 底部固定的新建任务栏 -->
+                    <div id="newTaskBar" style="flex-shrink:0;border-top:1px solid rgba(100,200,255,0.15);padding:0.75rem 1rem;background:rgba(10,14,26,0.95);display:flex;gap:0.5rem;align-items:center;">
+                        <input type="text" class="task-input" id="taskInput" placeholder="\u8F93\u5165\u65B0\u4EFB\u52A1\u63CF\u8FF0\uFF0C\u56DE\u8F66\u6216\u70B9 \u521B\u5EFA \u63D0\u4EA4\u2026" style="flex:1;min-width:0;">
+                        <button class="task-button" id="createTaskBtn" style="flex-shrink:0;">\u521B\u5EFA</button>
+                        <button class="task-action-btn stop" style="flex-shrink:0;font-size:0.72rem;padding:0.35rem 0.7rem;" onclick="clearProject()">\u6E05\u7A7A\u9879\u76EE</button>
                     </div>
                 </div>
 
@@ -1595,6 +1591,9 @@
             currentDocPath: null,       // 当前查看的文件路径
             editorDocPath: null,        // 当前编辑器绑定的文件路径
             editorIsEditing: false,     // 是否处于编辑模式
+            // 步骤失败升级到人工介入时的上下文，key=task_id
+            // { step, error, error_type, suggestion, at }
+            escalations: {},
         };
 
         FLOWCHART_NODES.forEach(node => {
@@ -3625,7 +3624,45 @@
                 case 'step_failed':
                     appState.nodeStatus[data.step_id] = NODE_STATUS.FAILED;
                     renderFlowchart();
-                    addLog('步骤失败', `${data.step_name} 执行失败: ${data.error}`, 'error');
+                    addLog('步骤失败', `${data.step_name || data.step || ''} 执行失败: ${data.error || ''}`, 'error');
+                    // 只要事件带 suggestion 或 escalation=paused_for_human，就是 unrecoverable
+                    // 级别的失败 —— 要把完整上下文存到 appState.escalations 给 banner 渲染
+                    if (message.task_id && (data.escalation === 'paused_for_human' || data.suggestion)) {
+                        appState.escalations[message.task_id] = {
+                            step: data.step || data.step_name || '',
+                            error: data.error || '',
+                            error_type: data.error_type || '',
+                            suggestion: data.suggestion || '',
+                            at: Date.now(),
+                        };
+                        if (message.task_id === appState.currentTaskId) {
+                            renderPlanSubtasks(appState.currentTaskId);
+                        }
+                        renderTaskList();
+                    }
+                    break;
+                case 'agent_paused':
+                    addLog('任务暂停', '任务已暂停，等待人工操作', 'warning');
+                    if (message.task_id) {
+                        // 未选中任何任务时自动聚焦到刚暂停的任务，方便用户看到 banner
+                        if (!appState.currentTaskId) {
+                            appState.currentTaskId = message.task_id;
+                        }
+                        if (message.task_id === appState.currentTaskId) {
+                            renderPlanSubtasks(appState.currentTaskId);
+                        }
+                        renderTaskList();
+                    }
+                    break;
+                case 'agent_resumed':
+                    // 恢复后清掉该任务的 escalation banner
+                    if (message.task_id && appState.escalations[message.task_id]) {
+                        delete appState.escalations[message.task_id];
+                        if (message.task_id === appState.currentTaskId) {
+                            renderPlanSubtasks(appState.currentTaskId);
+                        }
+                    }
+                    addLog('任务恢复', '任务已恢复执行', 'success');
                     break;
                 case 'candidate_created':
                     appState.candidates.push(data.candidate);
@@ -4164,14 +4201,14 @@
             var seq = ++_planRenderSeq;
             var listEl = document.getElementById('planSubtaskList');
             var progressEl = document.getElementById('planProgress');
-            listEl.textContent = '';
-            progressEl.textContent = '';
 
             if (!taskId) {
-                var empty = document.createElement('div');
-                empty.style.cssText = 'color:#666;padding:2rem 1rem;text-align:center;font-size:0.82rem;';
-                empty.textContent = '\u9009\u62E9\u4EFB\u52A1\u67E5\u770B\u8BA1\u5212';
-                listEl.appendChild(empty);
+                listEl.textContent = '';
+                progressEl.textContent = '';
+                var emptyNoTask = document.createElement('div');
+                emptyNoTask.style.cssText = 'color:#666;padding:2rem 1rem;text-align:center;font-size:0.82rem;';
+                emptyNoTask.textContent = '\u9009\u62E9\u4EFB\u52A1\u67E5\u770B\u8BA1\u5212';
+                listEl.appendChild(emptyNoTask);
                 return;
             }
 
@@ -4183,18 +4220,160 @@
                 var data = await resp.json();
 
                 var plan = data.plan;
-                if (!plan || !plan.subtasks || plan.subtasks.length === 0) {
-                    var empty = document.createElement('div');
-                    empty.style.cssText = 'color:#666;padding:2rem 1rem;text-align:center;font-size:0.82rem;';
-                    empty.textContent = '\u6682\u65E0\u8BA1\u5212';
-                    listEl.appendChild(empty);
+                // 中间态保护：smart_continuation 重规划时 backend 会把 plan 清空重建，
+                // 此时不要清空已渲染的 DOM —— 否则用户会看到子任务列表瞬间消失。
+                // 只在 progressEl 上打一个"正在重新规划"指示条，等下一次事件触发重渲染。
+                if (data.status === 'planning' && (!plan || !plan.subtasks || plan.subtasks.length === 0)) {
+                    progressEl.textContent = '\u23F3 \u6B63\u5728\u91CD\u65B0\u89C4\u5212\u2026';
+                    progressEl.style.color = '#f59e0b';
                     return;
                 }
+                // 非中间态：恢复 progress 颜色
+                progressEl.style.color = '';
+
+                if (!plan || !plan.subtasks || plan.subtasks.length === 0) {
+                    listEl.textContent = '';
+                    progressEl.textContent = '';
+                    var emptyNoPlan = document.createElement('div');
+                    emptyNoPlan.style.cssText = 'color:#666;padding:2rem 1rem;text-align:center;font-size:0.82rem;';
+                    emptyNoPlan.textContent = '\u6682\u65E0\u8BA1\u5212';
+                    listEl.appendChild(emptyNoPlan);
+                    return;
+                }
+
+                // 有新内容，此时才清空并重建
+                listEl.textContent = '';
+                progressEl.textContent = '';
 
                 var subtasks = plan.subtasks;
                 var currentStep = data.current_step || '';
                 var progressPct = data.progress_percent || 0;
                 progressEl.textContent = Math.round(progressPct) + '%  (' + subtasks.length + ' \u6B65)';
+
+                // 暂停/升级 banner：任务 status=paused 或存在 escalation 时，在计划列表顶部
+                // 显示一条醒目提示，包含失败步骤、完整 stderr、escalation suggestion，以及
+                // "恢复/停止"大按钮。这是 _on_step_unrecoverable 发来的信息的主要出口。
+                var isPaused = data.status === 'paused';
+                var esc = appState.escalations[taskId];
+                if (isPaused || esc) {
+                    var banner = document.createElement('div');
+                    banner.style.cssText = 'margin:0 0 0.6rem 0;padding:0.8rem;border-radius:8px;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.5);';
+
+                    var header = document.createElement('div');
+                    header.style.cssText = 'display:flex;align-items:center;gap:0.5rem;font-size:0.9rem;font-weight:600;color:#f59e0b;margin-bottom:0.5rem;';
+                    header.textContent = '\u26A0\uFE0F \u4EFB\u52A1\u5DF2\u6682\u505C\uFF0C\u7B49\u5F85\u4F60\u63A5\u624B';
+                    banner.appendChild(header);
+
+                    if (esc) {
+                        if (esc.step) {
+                            var stepLine = document.createElement('div');
+                            stepLine.style.cssText = 'font-size:0.75rem;color:#ccc;margin-bottom:0.3rem;';
+                            stepLine.textContent = '\u5931\u8D25\u6B65\u9AA4: ' + esc.step + (esc.error_type ? ' (' + esc.error_type + ')' : '');
+                            banner.appendChild(stepLine);
+                        }
+                        if (esc.error) {
+                            var errLabel = document.createElement('div');
+                            errLabel.style.cssText = 'font-size:0.72rem;color:#888;margin-top:0.4rem;';
+                            errLabel.textContent = '\u9519\u8BEF:';
+                            banner.appendChild(errLabel);
+                            var errBox = document.createElement('pre');
+                            errBox.style.cssText = 'font-size:0.72rem;color:#ef4444;background:rgba(0,0,0,0.3);padding:0.4rem;border-radius:4px;max-height:120px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;margin:0.2rem 0;';
+                            errBox.textContent = esc.error;
+                            banner.appendChild(errBox);
+                        }
+                        if (esc.suggestion) {
+                            var sugLabel = document.createElement('div');
+                            sugLabel.style.cssText = 'font-size:0.72rem;color:#888;margin-top:0.4rem;';
+                            sugLabel.textContent = '\u5EFA\u8BAE:';
+                            banner.appendChild(sugLabel);
+                            var sugBox = document.createElement('pre');
+                            sugBox.style.cssText = 'font-size:0.72rem;color:#e0e0e0;background:rgba(0,0,0,0.2);padding:0.4rem;border-radius:4px;max-height:180px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;margin:0.2rem 0;';
+                            sugBox.textContent = esc.suggestion;
+                            banner.appendChild(sugBox);
+                        }
+                    } else {
+                        // fallback: 页面刷新后没拿到 step_failed 事件，从 plan 里找失败 subtask
+                        // 的 result.error 作为错误内容（suggestion 丢了但 error 还能恢复）
+                        var failedSub = subtasks.find(function(s) { return s.status === 'failed'; });
+                        if (failedSub) {
+                            var stepLine2 = document.createElement('div');
+                            stepLine2.style.cssText = 'font-size:0.75rem;color:#ccc;margin-bottom:0.3rem;';
+                            stepLine2.textContent = '\u5931\u8D25\u6B65\u9AA4: ' + (failedSub.title || '');
+                            banner.appendChild(stepLine2);
+                            var failErr = (failedSub.result && (failedSub.result.error || failedSub.result.output)) || '';
+                            if (failErr) {
+                                var errLabel2 = document.createElement('div');
+                                errLabel2.style.cssText = 'font-size:0.72rem;color:#888;margin-top:0.4rem;';
+                                errLabel2.textContent = '\u9519\u8BEF:';
+                                banner.appendChild(errLabel2);
+                                var errBox2 = document.createElement('pre');
+                                errBox2.style.cssText = 'font-size:0.72rem;color:#ef4444;background:rgba(0,0,0,0.3);padding:0.4rem;border-radius:4px;max-height:160px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;margin:0.2rem 0;';
+                                errBox2.textContent = String(failErr);
+                                banner.appendChild(errBox2);
+                            }
+                            var hint = document.createElement('div');
+                            hint.style.cssText = 'font-size:0.7rem;color:#888;margin-top:0.3rem;font-style:italic;';
+                            hint.textContent = '\uFF08\u9875\u9762\u5237\u65B0\u540E\u7684\u7B80\u6D01\u89C6\u56FE\uFF1A\u5B8C\u6574\u5EFA\u8BAE\u4EC5\u5728\u5931\u8D25\u89E6\u53D1\u5F53\u65F6\u53EF\u89C1\u3002\u4FEE\u590D\u540E\u70B9\u201C\u6062\u590D\u4EFB\u52A1\u201D\u91CD\u8BD5\uFF09';
+                            banner.appendChild(hint);
+                        } else {
+                            var fallback = document.createElement('div');
+                            fallback.style.cssText = 'font-size:0.75rem;color:#ccc;';
+                            fallback.textContent = '\u4EFB\u52A1\u5904\u4E8E\u6682\u505C\u72B6\u6001\u3002\u70B9\u201C\u6062\u590D\u4EFB\u52A1\u201D\u7EE7\u7EED\u6267\u884C\u3002';
+                            banner.appendChild(fallback);
+                        }
+                    }
+
+                    // 建议输入框：用户可以在恢复前给 kedo 留一段指导语，
+                    // 后端通过 /resume-checkpoint 接口带 additional_context 进入智能续接
+                    var sugInputLabel = document.createElement('div');
+                    sugInputLabel.style.cssText = 'font-size:0.72rem;color:#888;margin-top:0.6rem;margin-bottom:0.2rem;';
+                    sugInputLabel.textContent = '\u4F60\u7ED9 kedo \u7684\u5EFA\u8BAE\uFF08\u53EF\u9009\uFF0C\u5199\u5728\u8FD9\u91CC\u4F1A\u88AB\u52A0\u5165\u4E0B\u8F6E\u89C4\u5212\u7684\u4E0A\u4E0B\u6587\uFF09:';
+                    banner.appendChild(sugInputLabel);
+                    var sugInput = document.createElement('textarea');
+                    sugInput.style.cssText = 'width:100%;min-height:60px;padding:0.4rem;background:rgba(0,0,0,0.3);color:#e0e0e0;border:1px solid rgba(100,200,255,0.2);border-radius:4px;font-size:0.75rem;font-family:inherit;resize:vertical;box-sizing:border-box;';
+                    sugInput.placeholder = '\u4F8B\uFF1A\u628A CMakeLists.txt \u91CC\u7684 src/video_decoder.cpp \u5220\u6389\uFF1B\u6216\uFF1A\u4E0D\u8981\u518D\u5C1D\u8BD5 SDL2\uFF0C\u76F4\u63A5\u7528 libnx \u7684 framebuffer API';
+                    banner.appendChild(sugInput);
+
+                    var btnRow = document.createElement('div');
+                    btnRow.style.cssText = 'display:flex;gap:0.5rem;margin-top:0.6rem;';
+                    // 主按钮：有建议 → 走 resume-checkpoint 智能续接；无建议 → 走普通 resume
+                    var resumeBtn = document.createElement('button');
+                    resumeBtn.style.cssText = 'flex:2;padding:0.5rem;background:#22c55e;color:#000;border:none;border-radius:4px;font-size:0.8rem;font-weight:600;cursor:pointer;';
+                    resumeBtn.textContent = '\u25B6 \u6062\u590D\u4EFB\u52A1';
+                    resumeBtn.addEventListener('click', function() {
+                        var ctx = sugInput.value.trim();
+                        // 清掉 escalation banner 状态，然后立刻重渲染一次让 banner 消失。
+                        // 不要等 task_status_changed / getTasks 异步回来，否则在 smart
+                        // continuation 中间态窗口里用户会看到空列表闪烁。
+                        if (appState.escalations[taskId]) {
+                            delete appState.escalations[taskId];
+                        }
+                        resumeBtn.disabled = true;
+                        resumeBtn.textContent = '\u23F3 \u6062\u590D\u4E2D\u2026';
+                        if (ctx) {
+                            resumeFromCheckpoint(taskId, ctx);
+                        } else {
+                            resumeTask(taskId);
+                        }
+                        // 主动触发一次重渲染清掉 banner（fetch 新 plan 也会顺带更新列表）
+                        setTimeout(function() { renderPlanSubtasks(taskId); }, 150);
+                    });
+                    btnRow.appendChild(resumeBtn);
+                    var stopBtn = document.createElement('button');
+                    stopBtn.style.cssText = 'flex:1;padding:0.5rem;background:rgba(239,68,68,0.2);color:#ef4444;border:1px solid #ef4444;border-radius:4px;font-size:0.8rem;font-weight:600;cursor:pointer;';
+                    stopBtn.textContent = '\u25A0 \u505C\u6B62\u4EFB\u52A1';
+                    stopBtn.addEventListener('click', function() { stopTask(taskId); });
+                    btnRow.appendChild(stopBtn);
+                    banner.appendChild(btnRow);
+
+                    // 提示：按钮行为随输入框切换的文字说明
+                    var btnHint = document.createElement('div');
+                    btnHint.style.cssText = 'font-size:0.68rem;color:#666;margin-top:0.35rem;font-style:italic;';
+                    btnHint.textContent = '\u2192 \u6709\u5EFA\u8BAE\u65F6\uFF1A\u6062\u590D\u4F1A\u5E26\u4E0A\u4E0A\u4E0B\u6587\u91CD\u65B0\u89C4\u5212\uFF08smart continuation\uFF09\u3002\u65E0\u5EFA\u8BAE\u65F6\uFF1A\u76F4\u63A5\u4ECE\u6682\u505C\u70B9\u7EE7\u7EED\u3002';
+                    banner.appendChild(btnHint);
+
+                    listEl.appendChild(banner);
+                }
 
                 var stepTypeIcons = {
                     'code_generate': '\u{1F4BB}',
