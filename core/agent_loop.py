@@ -1558,10 +1558,21 @@ class AgentLoop:
             # ★ G1 改进：从 profile 读取 platform_hints，注入到 code_generate 的 system prompt
             platform_constraints = self._build_platform_constraints(project_path)
 
+            # ★ 如果目标文件已存在，传入 existing_content 让 LLM 做增量修改而非重写
+            existing_content = ""
+            target_path = Path(file_path)
+            if target_path.exists() and target_path.is_file():
+                try:
+                    existing_content = target_path.read_text(encoding="utf-8", errors="replace")
+                    logger.info(f"CODE_GENERATE: existing file {file_name} ({len(existing_content)} chars), will modify")
+                except Exception as e:
+                    logger.warning(f"CODE_GENERATE: failed to read {file_path}: {e}")
+
             return await self.tools.execute(
                 "code_generate",
                 instruction=subtask.description,
                 file_path=file_path,
+                existing_content=existing_content,
                 platform_constraints=platform_constraints,
             )
 
