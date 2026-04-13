@@ -73,6 +73,10 @@ MAX_PRIOR_ATTEMPTS = 5
 # 单条 prior_attempt 中 stderr 摘要的字节上限
 PRIOR_ATTEMPT_STDERR_LIMIT = 1500
 
+# platform_hints 扫描配置
+MAX_PLATFORM_HINT_LIBS = 200       # 最多列出多少个库名
+MAX_PLATFORM_HINT_INCLUDES = 100   # 最多列出多少个头文件目录
+
 PROFILE_SYSTEM_PROMPT = """You are a build system expert embedded in an AI development pipeline.
 Given the manifest files of a software project, output a JSON profile describing
 how to build, test, and deploy it.
@@ -118,6 +122,15 @@ CRITICAL RULES:
    the field out for projects that don't have an external deploy target (e.g. host
    libraries, host CLI tools).
 
+7. **Platform hints** (REQUIRED for cross-compiled projects, optional for host):
+   Provide `platform_hints.lib_dirs` and `platform_hints.include_dirs` — absolute
+   paths where the target platform's pre-built libraries and headers live. These
+   will be scanned to give the code generator a real inventory of available
+   libraries, preventing it from guessing non-existent library names.
+   For example, Switch homebrew: lib_dirs=["/opt/devkitpro/portlibs/switch/lib"],
+   include_dirs=["/opt/devkitpro/portlibs/switch/include"].
+   Use $ENV_VAR syntax for toolchain roots (e.g. "$DEVKITPRO/portlibs/switch/lib").
+
 OUTPUT STRICT JSON (no markdown, no commentary), exactly this shape:
 {
   "type": "<concise project type, e.g. switch_homebrew, android_native, cpp_host, rust_embedded>",
@@ -139,6 +152,10 @@ OUTPUT STRICT JSON (no markdown, no commentary), exactly this shape:
   "required_env": [
     {"name": "<ENV_VAR>", "search_paths": ["<abs path 1>", "<abs path 2>"], "verify_file": "<rel path inside the toolchain root>"}
   ],
+  "platform_hints": {
+    "lib_dirs": ["<absolute paths to directories containing .a/.so/.dylib files for the target platform>"],
+    "include_dirs": ["<absolute paths to directories containing header files for the target platform>"]
+  },
   "notes": "<anything else humans should know about building/testing this project>"
 }
 """
@@ -188,6 +205,10 @@ class ProjectProfile(dict):
     @property
     def human_verified(self) -> bool:
         return bool(self.get("human_verified"))
+
+    @property
+    def platform_hints(self) -> dict:
+        return self.get("platform_hints") or {}
 
 
 class ProjectProfileManager:
@@ -342,6 +363,12 @@ class ProjectProfileManager:
         profile["prior_attempts"] = carried_prior_attempts
         profile.setdefault("version", PROFILE_VERSION)
         profile.setdefault("created_at", datetime.utcnow().isoformat())
+
+        # ★ 扫描目标平台的实际可用库和头文件，填入 platform_hints
+        # 扫描前先 apply env（确保 $DEVKITPRO 等变量可用于路径展开）
+        self.apply_required_env(profile)
+        self.scan_platform_hints(profile)
+
         self.save(project_path, profile)
         return profile
 
@@ -541,3 +568,75 @@ class ProjectProfileManager:
                     os.environ["PATH"] = cur_path
                 break
         return applied
+
+    # ----------------------------------------------------------
+    # platform_hints: 扫描目标平台可用库和头文件
+    # ----------------------------------------------------------
+
+    def scan_platform_hints(self, profile: ProjectProfile) -> bool:
+        """
+        根据 profile.platform_hints 里 LLM 填写的 lib_dirs / include_dirs，
+        实际扫描文件系统，填入 available_libs 和 include_tree。
+
+        返回 True 表示有扫描结果并已更新 profile（调用方需 save）。
+        """
+        hints = profile.platform_hints
+        lib_dirs = hints.get("lib_dirs") or []
+        include_dirs = hints.get("include_dirs") or []
+        if not lib_dirs and not include_dirs:
+            return False
+
+        available_libs: list[str] = []
+        include_tree: list[str] = []
+
+        # 扫描库文件
+        for raw_dir in lib_dirs:
+            d = Path(os.path.expandvars(os.path.expanduser(raw_dir)))
+            if not d.is_dir():
+                logger.debug(f"platform_hints: lib_dir not found: {d}")
+                continue
+            for f in sorted(d.iterdir()):
+                if not f.is_file():
+                    continue
+                name = f.name
+                # 提取库名：libSDL2.a → SDL2, libcurl.so.4 → curl
+                if name.startswith("lib"):
+                    name = name[3:]
+                # 去掉后缀
+                for ext in (".a", ".so", ".dylib", ".la"):
+                    if ext in name:
+                        name = name[:name.index(ext)]
+                        break
+                if name and name not in available_libs:
+                    available_libs.append(name)
+                if len(available_libs) >= MAX_PLATFORM_HINT_LIBS:
+                    break
+
+        # 扫描头文件目录（只列一级子目录和顶层 .h）
+        for raw_dir in include_dirs:
+            d = Path(os.path.expandvars(os.path.expanduser(raw_dir)))
+            if not d.is_dir():
+                logger.debug(f"platform_hints: include_dir not found: {d}")
+                continue
+            for f in sorted(d.iterdir()):
+                if f.is_dir():
+                    include_tree.append(f.name + "/")
+                elif f.is_file() and f.suffix in (".h", ".hpp", ".hxx"):
+                    include_tree.append(f.name)
+                if len(include_tree) >= MAX_PLATFORM_HINT_INCLUDES:
+                    break
+
+        if not available_libs and not include_tree:
+            return False
+
+        profile["platform_hints"] = {
+            **hints,
+            "available_libs": available_libs,
+            "include_tree": include_tree,
+            "scanned_at": datetime.utcnow().isoformat(),
+        }
+        logger.info(
+            f"platform_hints scanned: {len(available_libs)} libs, "
+            f"{len(include_tree)} include entries"
+        )
+        return True

@@ -42,6 +42,7 @@ class CodeGeneratorTool(BaseTool):
         file_path: str,
         existing_content: str = "",
         context_files: dict[str, str] = None,
+        platform_constraints: str = "",
     ) -> ToolResult:
         """生成或修改代码。对 .md 文档使用分段生成避免截断。"""
         try:
@@ -55,7 +56,10 @@ class CodeGeneratorTool(BaseTool):
                 )
             else:
                 # 代码文件 / 修改模式：一次性生成
-                messages = self._build_messages(instruction, file_path, existing_content, context_files)
+                messages = self._build_messages(
+                    instruction, file_path, existing_content, context_files,
+                    platform_constraints=platform_constraints,
+                )
                 response = await self._call_llm(messages)
                 generated_code = self._extract_code(response)
 
@@ -88,7 +92,8 @@ class CodeGeneratorTool(BaseTool):
         except Exception as e:
             return ToolResult(success=False, error=f"Code generation failed: {e}")
 
-    def _build_messages(self, instruction, file_path, existing_content, context_files):
+    def _build_messages(self, instruction, file_path, existing_content, context_files,
+                        platform_constraints: str = ""):
         """构建 LLM 消息"""
         doc_lang = self._config.get("doc_language", "en")
         lang_hint = ""
@@ -97,14 +102,19 @@ class CodeGeneratorTool(BaseTool):
         elif doc_lang and doc_lang != "en":
             lang_hint = f" For markdown/documentation files (.md), write ALL content in language '{doc_lang}'. For code files, write comments in that language."
 
+        system_content = (
+            "You are an expert code generator. Generate clean, well-documented code "
+            "following best practices. Output ONLY the code, no explanations."
+            + lang_hint
+        )
+
+        if platform_constraints:
+            system_content += "\n\n" + platform_constraints
+
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "You are an expert code generator. Generate clean, well-documented code "
-                    "following best practices. Output ONLY the code, no explanations."
-                    + lang_hint
-                ),
+                "content": system_content,
             }
         ]
 

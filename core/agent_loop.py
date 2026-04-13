@@ -1406,7 +1406,7 @@ class AgentLoop:
                     abort_msg = (
                         f"环境/工具链故障 ({failure_reason}) — 已中止 auto_fix。"
                         f"LLM 无法通过修改项目代码解决此类故障，请检查工具链安装。\n"
-                        f"原始错误片段: {stderr_text[:300]}"
+                        f"原始错误:\n{stderr_text[:2000]}"
                     )
                     logger.error(f"Step '{subtask.title}' aborted due to toolchain failure: {failure_reason}")
                     subtask.status = TaskStatus.FAILED
@@ -1425,7 +1425,7 @@ class AgentLoop:
                     if stderr_fingerprints and self._stderr_similar(fp, stderr_fingerprints[-1]):
                         abort_msg = (
                             f"连续 2 次 auto_fix 后错误未变化，判定 LLM 无法修复，提前中止。\n"
-                            f"原始错误片段: {stderr_text[:300]}"
+                            f"原始错误:\n{stderr_text[:2000]}"
                         )
                         logger.error(
                             f"Step '{subtask.title}' aborted: stderr unchanged after fix attempt"
@@ -1445,7 +1445,7 @@ class AgentLoop:
                     )
                     await self._emit(task_id, EventType.LLM_RESPONSE,
                                      phase="auto_fix",
-                                     summary=f"失败 (第{attempt+1}次), LLM 诊断中: {(result.error or '')[:100]}")
+                                     summary=f"失败 (第{attempt+1}次), LLM 诊断中: {(result.error or '')[:500]}")
 
                     # ★★★ 调 LLM 真修 ★★★
                     patch = await self._attempt_llm_fix(
@@ -1466,7 +1466,7 @@ class AgentLoop:
                         abort_msg = (
                             f"LLM 判定该失败无法通过单文件修复（结构性问题），需人工或重新规划。\n"
                             f"原因: {reason}\n"
-                            f"原始错误片段: {stderr_text[:300]}"
+                            f"原始错误:\n{stderr_text[:2000]}"
                         )
                         subtask.status = TaskStatus.FAILED
                         subtask.result = {"error": abort_msg, "failure_kind": "needs_human"}
@@ -1554,10 +1554,15 @@ class AgentLoop:
                 async def _on_code_token(token):
                     await self._emit(task_id, EventType.LLM_TOKEN, token=token, phase="code_generate")
                 code_gen_tool._on_token = _on_code_token
+
+            # ★ G1 改进：从 profile 读取 platform_hints，注入到 code_generate 的 system prompt
+            platform_constraints = self._build_platform_constraints(project_path)
+
             return await self.tools.execute(
                 "code_generate",
                 instruction=subtask.description,
                 file_path=file_path,
+                platform_constraints=platform_constraints,
             )
 
         elif step_type == StepType.BUILD:
@@ -1781,6 +1786,49 @@ class AgentLoop:
 
         else:
             return ToolResult(success=False, error=f"Unknown step type: {step_type}")
+
+    def _build_platform_constraints(self, project_path: str) -> str:
+        """
+        从 project_profile 的 platform_hints 构建注入到 code_generate system prompt
+        的平台约束文本。如果没有 profile 或没有扫描结果，返回空字符串。
+        """
+        profile = self.profile_manager.load(project_path)
+        if profile is None:
+            return ""
+        hints = profile.platform_hints
+        libs = hints.get("available_libs") or []
+        includes = hints.get("include_tree") or []
+        if not libs and not includes:
+            return ""
+
+        parts = ["[PLATFORM CONSTRAINTS — target: {type}]".format(
+            type=profile.get("type", "unknown")
+        )]
+
+        if libs:
+            lib_dirs = hints.get("lib_dirs") or []
+            parts.append(
+                f"Available libraries (scanned from {', '.join(lib_dirs)}):\n"
+                f"  {' '.join(libs)}"
+            )
+
+        if includes:
+            inc_dirs = hints.get("include_dirs") or []
+            parts.append(
+                f"Available headers (scanned from {', '.join(inc_dirs)}):\n"
+                f"  {' '.join(includes)}"
+            )
+
+        parts.append(
+            "IMPORTANT: For target_link_libraries and #include directives, "
+            "ONLY use libraries and headers from the lists above. "
+            "NEVER guess or invent library names. If you need functionality "
+            "not covered by the available libraries, write a comment like:\n"
+            "  // TODO: need a library for <functionality>, verify availability\n"
+            "and do NOT add a made-up link target."
+        )
+
+        return "\n\n".join(parts)
 
     def _infer_file_name(self, subtask: SubTask, project_path: str) -> str:
         """从子任务 title + description 中推断有意义的文件名
