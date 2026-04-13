@@ -1129,6 +1129,7 @@ class AgentLoop:
         subtask: SubTask,
         error_text: str,
         context_files: list[tuple[str, str]],
+        structured_errors: list[dict] = None,
     ) -> list[dict]:
         """构造失败诊断 + 修复建议的 LLM 消息。"""
         files_block = "\n\n".join(
@@ -1157,7 +1158,10 @@ class AgentLoop:
             "project file, respond with the unfixable schema instead. Do NOT hallucinate "
             "a fake fix.\n"
             "5. Prefer minimal, targeted edits over rewrites.\n"
-            "6. Use forward slashes in file paths, relative to project root.\n\n"
+            "6. Use forward slashes in file paths, relative to project root.\n"
+            "7. Fix ONLY the first error listed in the structured diagnosis below. "
+            "Do not try to fix multiple errors at once — the build will be re-run "
+            "after your fix, and subsequent errors will be addressed in later rounds.\n\n"
             "Output STRICTLY one of these two JSON shapes (no markdown, no commentary):\n"
             '{\n'
             '  "diagnosis": "<one-sentence root cause>",\n'
@@ -1169,10 +1173,23 @@ class AgentLoop:
             '{"unfixable": true, "reason": "<why a single-file edit cannot fix this>"}\n'
         )
 
+        # G2 方案 B：注入结构化诊断
+        diagnosis_block = ""
+        if structured_errors:
+            lines = ["STRUCTURED DIAGNOSIS (focus on the FIRST error):"]
+            for i, err in enumerate(structured_errors):
+                prefix = ">>>" if i == 0 else "   "
+                lines.append(
+                    f"{prefix} [{err['type']}] {err['match']}\n"
+                    f"    Hint: {err['hint']}"
+                )
+            diagnosis_block = "\n".join(lines) + "\n\n"
+
         user = (
             f"Failed step: {subtask.title}\n"
             f"Step type: {subtask.step_type.value}\n"
             f"Step description: {subtask.description}\n\n"
+            f"{diagnosis_block}"
             f"Error output:\n{error_text[:4000]}\n\n"
             f"Relevant project files:\n{files_block}\n\n"
             f"Diagnose the root cause and respond with the JSON."
@@ -1229,6 +1246,7 @@ class AgentLoop:
         subtask: SubTask,
         error_text: str,
         project_path: str,
+        structured_errors: list[dict] = None,
     ) -> Optional[dict]:
         """
         失败修复入口：调 LLM 分析错误 → 应用文件级修改 → 返回 patch dict 或 None。
@@ -1240,7 +1258,10 @@ class AgentLoop:
         """
         try:
             context_files = self._gather_fix_context(subtask, project_path)
-            messages = self._build_fix_prompt(subtask, error_text, context_files)
+            messages = self._build_fix_prompt(
+                subtask, error_text, context_files,
+                structured_errors=structured_errors,
+            )
             await self._emit(
                 task_id, EventType.LLM_REQUEST,
                 phase="auto_fix",
@@ -1440,19 +1461,33 @@ class AgentLoop:
                         return ToolResult(success=False, error=abort_msg, data={"failure_kind": "stuck"})
                     stderr_fingerprints.append(fp)
 
-                    logger.warning(
-                        f"Step '{subtask.title}' failed (attempt {attempt+1}), invoking LLM auto_fix..."
-                    )
+                    # ★ G2 方案 B：结构化解析 build 错误
+                    structured_errors = self._parse_build_error(stderr_text, project_path)
+                    if structured_errors:
+                        first_err = structured_errors[0]
+                        logger.warning(
+                            f"Step '{subtask.title}' failed (attempt {attempt+1}), "
+                            f"first error: [{first_err['type']}] {first_err['match'][:100]}"
+                        )
+                        # ★ G2 方案 C：只把第一个错误的上下文喂给 LLM，聚焦修复
+                        focused_stderr = first_err.get("context", stderr_text[:2000])
+                    else:
+                        logger.warning(
+                            f"Step '{subtask.title}' failed (attempt {attempt+1}), invoking LLM auto_fix..."
+                        )
+                        focused_stderr = stderr_text
+
                     await self._emit(task_id, EventType.LLM_RESPONSE,
                                      phase="auto_fix",
                                      summary=f"失败 (第{attempt+1}次), LLM 诊断中: {(result.error or '')[:500]}")
 
-                    # ★★★ 调 LLM 真修 ★★★
+                    # ★★★ 调 LLM 真修（G2: 带结构化诊断 + 聚焦第一个错误）★★★
                     patch = await self._attempt_llm_fix(
                         task_id=task_id,
                         subtask=subtask,
-                        error_text=stderr_text,
+                        error_text=focused_stderr,
                         project_path=project_path,
+                        structured_errors=structured_errors,
                     )
 
                     if patch is None:
@@ -1909,6 +1944,114 @@ class AgentLoop:
         # PATH 或 shebang 解析失败
         (r"bad interpreter: No such file", "解释器路径失效"),
     ]
+
+    # ----------------------------------------------------------
+    # G2 方案 B：结构化 build 错误解析
+    # ----------------------------------------------------------
+
+    # (regex, error_type, hint_template)
+    # hint_template 里 {m} 被 re.match 替换
+    _BUILD_ERROR_PATTERNS = [
+        # CMake: 找不到源文件
+        (
+            r"Cannot find source file:\s*(\S+)",
+            "missing_source",
+            "CMake 找不到源文件 '{m[1]}'。检查 CMakeLists.txt 中的 add_executable/target_sources，"
+            "确认文件名拼写和路径是否与实际文件一致。",
+        ),
+        # CMake: find_package 失败
+        (
+            r"Could not find a package configuration file provided by \"(\w+)\"",
+            "missing_package",
+            "CMake find_package({m[1]}) 失败。可能原因：(1) 库未安装 (2) CMAKE_PREFIX_PATH 未设置 "
+            "(3) 交叉编译时需要用 pkg-config 而不是 find_package。",
+        ),
+        # CMake: 未定义变量被引用
+        (
+            r"CMake Error.*?variable \"(\w+)\" (?:is not defined|was not found)",
+            "undefined_cmake_var",
+            "CMakeLists.txt 引用了未定义的变量 '{m[1]}'。检查是否拼写错误或缺少 set() 定义。",
+        ),
+        # linker: undefined reference
+        (
+            r"undefined reference to [`']([^'`]+)'",
+            "undefined_reference",
+            "链接器找不到符号 '{m[1]}'。可能原因：(1) 缺少链接库（target_link_libraries）"
+            "(2) 链接顺序错（静态库必须按依赖顺序排列，被依赖的库放后面）"
+            "(3) 函数签名不匹配（C vs C++ name mangling，需要 extern \"C\"）。",
+        ),
+        # linker: 找不到库文件
+        (
+            r"cannot find -l(\S+)",
+            "missing_lib",
+            "链接器找不到库 '-l{m[1]}'。检查 target_link_libraries 中的库名是否正确，"
+            "以及库文件是否在 CMAKE_PREFIX_PATH / link directories 中。",
+        ),
+        # compiler: 找不到头文件
+        (
+            r"fatal error: (\S+): No such file or directory",
+            "missing_header",
+            "编译器找不到头文件 '{m[1]}'。检查 #include 路径是否正确（如 <SDL2/SDL.h> vs <SDL.h>），"
+            "以及 include_directories / target_include_directories 是否设置。",
+        ),
+        # compiler: 语法/类型错误（取第一行）
+        (
+            r"error: (.+?)(?:\n|$)",
+            "compile_error",
+            "编译错误：{m[1]}",
+        ),
+        # multiple definition
+        (
+            r"multiple definition of [`']([^'`]+)'",
+            "multiple_definition",
+            "符号 '{m[1]}' 重复定义。检查是否在头文件中定义了变量/函数（应该用 extern 声明 + .cpp 中定义），"
+            "或者同一个 .cpp 被编译了两次。",
+        ),
+    ]
+
+    def _parse_build_error(self, stderr: str, project_path: str = "") -> list[dict]:
+        """
+        G2 方案 B：结构化解析 build stderr。
+
+        返回: [{"type": str, "match": str, "hint": str, "line": str}, ...]
+        每个 dict 对应一个独立的错误，按在 stderr 中出现的顺序排列。
+        """
+        import re as _re
+        if not stderr:
+            return []
+
+        errors: list[dict] = []
+        seen_types: set[str] = set()  # 去重同类型错误（只保留第一个）
+
+        for pattern, err_type, hint_template in self._BUILD_ERROR_PATTERNS:
+            for m in _re.finditer(pattern, stderr):
+                if err_type in seen_types and err_type in ("compile_error", "undefined_reference"):
+                    # compile_error 和 undefined_reference 可能有多个不同的，都保留
+                    pass
+                elif err_type in seen_types:
+                    continue
+
+                # 格式化 hint（用 match groups 替换 {m[N]}）
+                try:
+                    hint = hint_template.format(m=m)
+                except (IndexError, KeyError):
+                    hint = hint_template
+
+                # 提取错误所在行的上下文
+                start = max(0, m.start() - 200)
+                end = min(len(stderr), m.end() + 200)
+                context_line = stderr[start:end].strip()
+
+                errors.append({
+                    "type": err_type,
+                    "match": m.group(0)[:200],
+                    "hint": hint,
+                    "context": context_line[:500],
+                })
+                seen_types.add(err_type)
+
+        # 按在 stderr 中出现的位置排序（已经是 finditer 顺序）
+        return errors
 
     def _stderr_fingerprint(self, stderr: str) -> str:
         """
