@@ -532,6 +532,21 @@ class AgentLoop:
 
                 result = await self._execute_subtask(task_id, subtask, project_path, code_changes)
 
+                # ★ 关键步骤失败时停止后续 subtask，不要继续跑 TEST/EVALUATE
+                if not result.success and subtask.step_type in (
+                    StepType.CODE_GENERATE, StepType.BUILD,
+                ):
+                    logger.error(
+                        f"Critical step '{subtask.title}' ({subtask.step_type.value}) failed, "
+                        f"stopping remaining subtasks"
+                    )
+                    await self._on_step_unrecoverable(
+                        task_id=task_id, subtask=subtask,
+                        error_text=result.error or "Step failed",
+                        project_path=project_path,
+                    )
+                    break
+
                 if subtask.step_type == StepType.CODE_GENERATE and result.success:
                     code_changes.append(CodeChange(
                         file_path=result.data.get("file_path", ""),
@@ -1821,11 +1836,12 @@ class AgentLoop:
                     data={"eval_report": report.model_dump()},
                 )
             except Exception as e:
-                logger.warning(f"Evaluation error: {e}, auto-passing")
+                logger.error(f"Evaluation failed: {e}")
                 return ToolResult(
-                    success=True,
-                    output="Evaluation skipped due to error, auto-passed",
-                    data={"eval_report": {"score": 75, "requirements_met": [], "requirements_missed": [], "risks": [str(e)], "suggestions": []}},
+                    success=False,
+                    output=f"Evaluation failed: {e}",
+                    error=f"Evaluation error: {e}",
+                    data={"eval_report": {"score": 0, "requirements_met": [], "requirements_missed": [], "risks": [str(e)], "suggestions": ["Fix evaluation API connectivity"]}},
                 )
 
         elif step_type == StepType.DEPLOY:
