@@ -50,6 +50,7 @@ class CodeGeneratorTool(BaseTool):
         existing_content: str = "",
         context_files: dict[str, str] = None,
         platform_constraints: str = "",
+        cmake_template: str = "",
     ) -> ToolResult:
         """生成或修改代码。对 .md 文档使用分段生成避免截断。"""
         try:
@@ -67,9 +68,21 @@ class CodeGeneratorTool(BaseTool):
                     instruction, file_path, context_files
                 )
             else:
+                # ★ G5: CMakeLists.txt 且有平台模板 → 注入模板作为起点
+                effective_instruction = instruction
+                if cmake_template and target.name == "CMakeLists.txt" and not existing_content:
+                    effective_instruction = (
+                        f"{instruction}\n\n"
+                        f"USE THIS VERIFIED TEMPLATE as your starting point. "
+                        f"Only modify the sections marked with '=== LLM:' comments. "
+                        f"Do NOT change the cmake_minimum_required, project(), "
+                        f"toolchain, or packaging sections — they are pre-verified.\n\n"
+                        f"```cmake\n{cmake_template}\n```"
+                    )
+
                 # 代码文件 / 修改模式：一次性生成
                 messages = self._build_messages(
-                    instruction, file_path, existing_content, context_files,
+                    effective_instruction, file_path, existing_content, context_files,
                     platform_constraints=platform_constraints,
                 )
                 response = await self._call_llm(messages)

@@ -1313,7 +1313,7 @@ class AgentLoop:
             logger.error(f"_attempt_llm_fix: failed to write {target}: {e}")
             return None
 
-        # 如果 LLM 改的是 profile.json（非 human_verified），验证关键字段没被回归
+        # ★ G3: profile.json 变更白名单 — auto_fix 只允许改特定字段，其他被改则 revert
         if rel == ".kedo/project_profile.json":
             import json as _json
             old_profile = self.profile_manager.load(project_path)  # 旧的还在内存缓存
@@ -1321,31 +1321,41 @@ class AgentLoop:
                 new_data = _json.loads(patch["new_content"])
             except Exception:
                 new_data = {}
-            old_cmd = (old_profile.build_command if old_profile else "") or ""
-            new_cmd = ((new_data.get("build") or {}).get("command")) or ""
-            # 验证 1: -DCMAKE_TOOLCHAIN_FILE 不能被删
-            if "CMAKE_TOOLCHAIN_FILE" in old_cmd and "CMAKE_TOOLCHAIN_FILE" not in new_cmd:
+
+            reverted_fields = []
+            if old_profile:
+                # auto_fix 可以修改的字段（白名单）
+                _MUTABLE = {"build", "notes"}
+                # 受保护字段：如果被改了，从旧 profile revert
+                for key in ("test", "deploy", "required_env", "platform_hints",
+                             "type", "human_verified", "version"):
+                    if key not in _MUTABLE:
+                        old_val = old_profile.get(key)
+                        new_val = new_data.get(key)
+                        if old_val is not None and new_val != old_val:
+                            new_data[key] = old_val
+                            reverted_fields.append(key)
+
+                # build.command 内的关键 flag 保护
+                old_cmd = old_profile.build_command or ""
+                new_cmd = ((new_data.get("build") or {}).get("command")) or ""
+                if "CMAKE_TOOLCHAIN_FILE" in old_cmd and "CMAKE_TOOLCHAIN_FILE" not in new_cmd:
+                    reverted_fields.append("build.command(CMAKE_TOOLCHAIN_FILE)")
+                    new_data["build"]["command"] = old_cmd
+                if "-specs=" in old_cmd and "-specs=" not in new_cmd:
+                    reverted_fields.append("build.command(-specs=)")
+                    new_data["build"]["command"] = old_cmd
+
+            if reverted_fields:
                 logger.warning(
-                    "_attempt_llm_fix: LLM removed CMAKE_TOOLCHAIN_FILE from profile "
-                    "build.command, reverting"
+                    f"_attempt_llm_fix: reverted protected profile fields: {reverted_fields}"
                 )
+                # 用 revert 后的数据重写文件
                 target.write_text(
-                    _json.dumps(old_profile, indent=2, ensure_ascii=False),
+                    _json.dumps(new_data, indent=2, ensure_ascii=False),
                     encoding="utf-8",
                 )
-                return None
-            # 验证 2: test.strategy=skip 不能被改
-            old_strat = (old_profile.test_strategy if old_profile else "")
-            new_strat = ((new_data.get("test") or {}).get("strategy")) or ""
-            if old_strat == "skip" and new_strat != "skip":
-                logger.warning(
-                    "_attempt_llm_fix: LLM changed test.strategy from skip, reverting"
-                )
-                target.write_text(
-                    _json.dumps(old_profile, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-                return None
+
             self.profile_manager.invalidate(project_path)
             logger.info("_attempt_llm_fix: invalidated profile cache after LLM edit")
 
@@ -1603,12 +1613,21 @@ class AgentLoop:
                 except Exception as e:
                     logger.warning(f"CODE_GENERATE: failed to read {file_path}: {e}")
 
+            # ★ G5: CMakeLists.txt 生成时注入平台模板
+            cmake_template = ""
+            if Path(file_path).name == "CMakeLists.txt" and not existing_content:
+                project_name = Path(project_path).name
+                cmake_template = self._get_cmake_template(project_path, project_name)
+                if cmake_template:
+                    logger.info(f"CODE_GENERATE: injecting CMakeLists template for {project_name}")
+
             return await self.tools.execute(
                 "code_generate",
                 instruction=subtask.description,
                 file_path=file_path,
                 existing_content=existing_content,
                 platform_constraints=platform_constraints,
+                cmake_template=cmake_template,
             )
 
         elif step_type == StepType.BUILD:
@@ -1838,18 +1857,18 @@ class AgentLoop:
         从 project_profile 的 platform_hints 构建注入到 code_generate system prompt
         的平台约束文本。如果没有 profile 或没有扫描结果，返回空字符串。
         """
+        from core.platform_knowledge import get_platform_knowledge
+
         profile = self.profile_manager.load(project_path)
         if profile is None:
             return ""
+
+        profile_type = profile.get("type", "unknown")
         hints = profile.platform_hints
         libs = hints.get("available_libs") or []
         includes = hints.get("include_tree") or []
-        if not libs and not includes:
-            return ""
 
-        parts = ["[PLATFORM CONSTRAINTS — target: {type}]".format(
-            type=profile.get("type", "unknown")
-        )]
+        parts = [f"[PLATFORM CONSTRAINTS — target: {profile_type}]"]
 
         if libs:
             lib_dirs = hints.get("lib_dirs") or []
@@ -1865,6 +1884,11 @@ class AgentLoop:
                 f"  {' '.join(includes)}"
             )
 
+        # ★ G4: 注入平台特定的开发规范和陷阱
+        knowledge = get_platform_knowledge(profile_type)
+        if knowledge and knowledge.get("pitfalls"):
+            parts.append(knowledge["pitfalls"])
+
         parts.append(
             "IMPORTANT: For target_link_libraries and #include directives, "
             "ONLY use libraries and headers from the lists above. "
@@ -1875,6 +1899,21 @@ class AgentLoop:
         )
 
         return "\n\n".join(parts)
+
+    def _get_cmake_template(self, project_path: str, project_name: str) -> str:
+        """
+        G5: 根据 profile.type 获取 CMakeLists.txt 模板，替换 {{PROJECT_NAME}}。
+        找不到返回空字符串。
+        """
+        from core.platform_knowledge import get_platform_knowledge
+
+        profile = self.profile_manager.load(project_path)
+        if profile is None:
+            return ""
+        knowledge = get_platform_knowledge(profile.get("type", ""))
+        if not knowledge or not knowledge.get("cmake_template"):
+            return ""
+        return knowledge["cmake_template"].replace("{{PROJECT_NAME}}", project_name)
 
     def _infer_file_name(self, subtask: SubTask, project_path: str) -> str:
         """从子任务 title + description 中推断有意义的文件名
