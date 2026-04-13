@@ -1618,6 +1618,9 @@ class AgentLoop:
             # ★ G1 改进：从 profile 读取 platform_hints，注入到 code_generate 的 system prompt
             platform_constraints = self._build_platform_constraints(project_path)
 
+            # ★ 收集项目其他源文件作为上下文，让 LLM 了解项目架构
+            context_files = self._gather_code_context(project_path, file_name)
+
             # ★ 如果目标文件已存在，传入 existing_content 让 LLM 做增量修改而非重写
             existing_content = ""
             target_path = Path(file_path)
@@ -1641,6 +1644,7 @@ class AgentLoop:
                 instruction=subtask.description,
                 file_path=file_path,
                 existing_content=existing_content,
+                context_files=context_files or None,
                 platform_constraints=platform_constraints,
                 cmake_template=cmake_template,
             )
@@ -1915,6 +1919,53 @@ class AgentLoop:
         )
 
         return "\n\n".join(parts)
+
+    def _gather_code_context(self, project_path: str, target_file: str) -> dict:
+        """
+        收集项目源文件作为 code_generate 的上下文。
+        排除目标文件本身（那个走 existing_content），返回 {rel_path: content} dict。
+        """
+        proj = Path(project_path)
+        src_exts = {".cpp", ".c", ".h", ".hpp", ".py", ".js", ".ts", ".java", ".go", ".rs"}
+        skip_dirs = {".kedo", ".git", ".venv", "node_modules", "__pycache__", "build", "dist"}
+        MAX_CONTEXT_FILES = 5
+        MAX_PER_FILE = 12000  # 每个文件最多读 12KB
+        MAX_TOTAL = 30000     # 总预算 30KB
+
+        # 收集所有源文件，按大小排序（大文件=主逻辑优先）
+        candidates = []
+        for f in proj.rglob("*"):
+            if not f.is_file() or f.suffix.lower() not in src_exts:
+                continue
+            rel = str(f.relative_to(proj))
+            if any(p in f.relative_to(proj).parts for p in skip_dirs):
+                continue
+            if rel == target_file:
+                continue  # 排除目标文件
+            try:
+                candidates.append((f.stat().st_size, rel, f))
+            except OSError:
+                pass
+
+        candidates.sort(reverse=True)
+
+        result = {}
+        total = 0
+        for _, rel, fp in candidates[:MAX_CONTEXT_FILES]:
+            if total >= MAX_TOTAL:
+                break
+            try:
+                content = fp.read_text(encoding="utf-8", errors="replace")
+                if len(content) > MAX_PER_FILE:
+                    content = content[:MAX_PER_FILE] + f"\n... (truncated, {len(content)} chars total)"
+                result[rel] = content
+                total += len(content)
+            except Exception:
+                pass
+
+        if result:
+            logger.info(f"CODE_GENERATE context: {len(result)} files, {total} chars total")
+        return result
 
     def _get_cmake_template(self, project_path: str, project_name: str) -> str:
         """
@@ -2925,10 +2976,42 @@ class AgentLoop:
                     "suggestions": cp.eval_report.suggestions[:3],
                 }
 
+        # ★ 读取源文件摘要（前 40 行），让 planner 了解代码结构
+        # 只摘要最重要的文件（按大小排序取 top N），控制 token 预算
+        source_summaries = {}
+        MAX_SUMMARY_FILES = 8
+        MAX_SUMMARY_LINES = 40
+        MAX_SUMMARY_BYTES = 8000  # 总预算
+
+        # 按文件大小降序，大文件通常是主要逻辑
+        sized_files = []
+        for sf in src_files[:30]:
+            fp = project / sf
+            try:
+                sized_files.append((fp.stat().st_size, sf, fp))
+            except OSError:
+                pass
+        sized_files.sort(reverse=True)
+
+        total_bytes = 0
+        for _, rel_path, fp in sized_files[:MAX_SUMMARY_FILES]:
+            if total_bytes >= MAX_SUMMARY_BYTES:
+                break
+            try:
+                lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
+                summary = "\n".join(lines[:MAX_SUMMARY_LINES])
+                if len(lines) > MAX_SUMMARY_LINES:
+                    summary += f"\n... ({len(lines)} lines total)"
+                source_summaries[rel_path] = summary
+                total_bytes += len(summary)
+            except Exception:
+                pass
+
         return {
             "has_source_code": len(src_files) > 0,
             "source_files": src_files[:20],
             "source_count": len(src_files),
+            "source_summaries": source_summaries,
             "has_build_artifacts": len(artifacts) > 0,
             "artifacts": artifacts,
             "has_makefile": has_makefile,

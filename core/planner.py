@@ -192,10 +192,20 @@ class Planner:
 
         state_text = "\n".join(f"- {s}" for s in state_lines)
 
+        # ★ 源文件内容摘要（让 planner 了解代码结构，避免幻觉不存在的文件）
+        summaries = project_state.get("source_summaries") or {}
+        summary_block = ""
+        if summaries:
+            parts = []
+            for path, content in summaries.items():
+                parts.append(f"=== {path} ===\n{content}")
+            summary_block = "\n\n## 源文件摘要（前 40 行）\n\n" + "\n\n".join(parts)
+
         return f"""你是 kedo 的增量规划器。这是一个**已有内容的项目**，不是从零开始。
 
 ## 项目现状
 {state_text}
+{summary_block}
 
 ## 核心规则（必须严格遵守）
 
