@@ -1,14 +1,15 @@
 # kedo — AI 全流程自动化开发工具
 
-从需求到部署的全流程自动化开发工具。输入自然语言需求，kedo 自动完成需求分析、架构设计、代码生成、构建、测试、评估，直到部署上线。支持智能续接、增量开发、自动闭环修复。
+从需求到部署的全流程自动化开发工具。输入自然语言需求，kedo 自动完成需求分析、架构设计、代码生成、构建、测试、评估，直到部署上线。支持智能续接、增量开发、自动闭环修复、平台感知代码生成。
 
 ## 核心特性
 
 - **全流程自动化**：需求 → 设计 → 代码生成 → 构建 → 测试 → 评估 → 部署
 - **智能续接**：输入"继续"自动识别上次进度，扫描项目现状，只补缺失功能
 - **闭环修复**：评估不通过时自动分析原因 → 生成修复方案 → 重新规划执行（最多 5 轮）
-- **LLM 驱动自动修复**：编译/测试失败时 AI 分析 stderr 并修复代码，支持重复错误早停
-- **项目 Profile 系统**：LLM 自动生成项目构建档案（build/test/deploy 命令），支持跨 session 缓存、失败历史跟踪、自动重生成
+- **LLM 驱动自动修复**：编译/测试失败时 AI 分析 stderr 并修复代码，支持结构化错误解析、增量修复、历次失败回溯、重复错误早停
+- **平台感知代码生成**：自动扫描目标平台库/头文件，注入平台知识和 CMakeLists 模板，消除 LLM 库名幻觉
+- **项目 Profile 系统**：LLM 自动生成项目构建档案（build/test/deploy 命令），支持跨 session 缓存、失败历史跟踪、自动重生成、变更白名单保护
 - **多维度评估**：需求匹配 / 代码质量 / 测试覆盖 / 安全性四维度加权评分，交叉编译项目自动跳过测试维度
 - **产品需求智能总结**：从所有任务对话用 LLM 提炼当前产品需求，生成可复用的提示词
 - **Web Dashboard**：工作台 + 文件浏览 + 代码预览 + 部署引导 + 讨论面板
@@ -24,7 +25,7 @@ kedo 已在真实项目 **switchvideo**（Nintendo Switch NFS 视频播放器）
 | HTTP 连通 | Switch libcurl → 局域网 HTTP 服务器 → 读取文件 | kedo + 人工调试 |
 | 视频播放 | SDL2 渲染 + 服务端 ffmpeg 实时转码 + 音视频同步 | 人工完成 |
 
-> **当前能力边界**：kedo 在熟悉平台上能独立完成全流程（Python/Node.js 项目）。对不熟悉的交叉编译平台（如 Switch devkitPro），LLM 会幻觉不存在的库名，需要人工辅助调试。改进计划见 [能力差距分析](#已知局限)。
+> **当前能力边界**：kedo 在熟悉平台上能独立完成全流程（Python/Node.js 项目）。对交叉编译平台（如 Switch devkitPro），经过三轮改进（G1-G6 全部修复）后已能独立完成增量开发（如新增页面），但复杂的从零构建仍可能需要人工辅助。
 
 ## 安装
 
@@ -158,11 +159,12 @@ kedo 为每个项目自动生成 `.kedo/project_profile.json`：
 | 变更验证 | 写入后检查关键字段（TOOLCHAIN_FILE / test.strategy） | 回归时自动 revert |
 
 auto_fix 流程：
-1. 收集失败 stderr + 相关项目文件（profile、CMakeLists、源码）
-2. LLM 诊断根因 + 输出修复 patch（完整文件内容）
-3. 验证 patch 不会回归关键配置
-4. 应用 patch → 重试构建
-5. 重复错误早停：连续两次 stderr 指纹相似 → 判定 LLM 无法修复 → 升级到人工
+1. 结构化解析 stderr（cmake/gcc/ld 错误分类），聚焦第一个错误
+2. 收集失败上下文：相关项目文件 + 历次失败记录（prior_attempts）
+3. LLM 诊断根因 + 输出修复 patch（完整文件内容），历次失败作为 negative examples 避免重复犯错
+4. Profile 变更白名单验证：auto_fix 只能修改 build/notes 字段，其他字段自动 revert
+5. 应用 patch → 重试构建（增量修复：每次只修一个错误）
+6. 重复错误早停：连续两次 stderr 指纹相似 → 判定 LLM 无法修复 → 升级到人工
 
 ## REPL 命令
 
@@ -237,30 +239,69 @@ port: 8000
 | `KEDO_HOST` | 绑定地址 |
 | `KEDO_PROVIDER` | LLM 提供商 |
 
-## 支持的 LLM
+## LLM 适配
 
-| 提供商 | 配置值 | 说明 |
-|--------|--------|------|
-| Kimi Code | `kimi-code` | Kimi K2.5 编程专用（推荐） |
-| Kimi | `kimi` | Kimi K2.5 通用 |
-| Anthropic | `anthropic` | Claude 系列 |
-| OpenAI | `openai` | GPT 系列 |
-| Ollama | `ollama` | 本地模型 |
-| Mock | `mock` | 模拟模式，用于测试 |
+### 支持的提供商
+
+| 提供商 | 配置值 | 默认模型 | API Key 环境变量 | 说明 |
+|--------|--------|----------|------------------|------|
+| Kimi Code | `kimi-code` | `kimi-k2.5` | `KIMI_API_KEY` | 编程专用端点（推荐） |
+| Kimi | `kimi` | `kimi-k2.5` | `KIMI_API_KEY` | 通用 Moonshot 端点 |
+| Anthropic | `anthropic` | `claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY` | Claude 系列 |
+| OpenAI | `openai` | `gpt-4` | `OPENAI_API_KEY` | GPT 系列 |
+| Ollama | `ollama` | `codellama` | 无需 | 本地模型 |
+| Mock | `mock` | — | 无需 | 模拟模式，用于测试/演示 |
+
+### 适配架构
+
+所有提供商实现统一的 `BaseLLMClient` 接口：
+
+```python
+class BaseLLMClient:
+    async def chat(messages: list[dict]) -> str          # 非流式
+    async def stream_chat(messages: list[dict]) -> str   # 流式（逐 token yield）
+```
+
+消息格式统一为 `[{"role": "system/user/assistant", "content": "..."}]`。各提供商差异在客户端内部处理（如 Anthropic 需要分离 system 消息）。
+
+### 对接新 LLM 的步骤
+
+1. 在 `api/server.py` 中新建 `XxxClient(BaseLLMClient)` 类，实现 `chat()` 和可选的 `stream_chat()`
+2. 在 `create_llm_client()` 工厂函数中添加 `elif provider == "xxx":` 分支
+3. 在 `kedo.yaml` 中配置 `llm_provider: "xxx"` 和对应的 `model`
+
+### Prompt 模板与 LLM 适配要点
+
+kedo 有 4 个核心 prompt 模板，对接新 LLM 时需确保其能正确遵循这些结构化输出要求：
+
+| 模块 | Prompt 位置 | 输出格式 | 适配注意 |
+|------|-------------|----------|----------|
+| Planner | `core/planner.py` L34 | JSON（subtask 列表） | ~600 行 system prompt，含五步流程定义 + 文档模板，需要 LLM 有强指令遵循能力 |
+| Evaluator | `core/evaluator.py` L33 | JSON（四维度评分） | 需要 LLM 严格按 schema 输出，弱模型易漏字段或分数格式错 |
+| Code Generator | `tools/code_generator.py` L120 | 纯代码（无 markdown 包裹） | 动态注入平台知识 + CMakeLists 模板，prompt 较长（~2K token） |
+| Auto Fix | `core/agent_loop.py` L1154 | JSON（diagnosis + patch） | 需要 LLM 输出完整文件内容而非 diff，弱模型可能输出截断或混入注释 |
+
+**已知的 LLM 兼容性差异**：
+- **Kimi K2.5**（当前主力）：指令遵循强，JSON 输出稳定，但偶尔幻觉不存在的库名（已通过 G1 平台扫描缓解）
+- **Anthropic Claude**：system prompt 需从 messages 分离单独传入（客户端已处理），JSON 遵循能力强
+- **OpenAI GPT-4**：兼容但未深度测试，code_generator 的 "纯代码无 markdown" 要求可能需要额外 prompt 强调
+- **Ollama 本地模型**：受模型能力限制，复杂的 planner prompt 可能无法正确遵循，建议仅用于简单项目
+- **对接其他 LLM 时**：重点验证 (1) JSON 结构化输出是否稳定 (2) 长 system prompt 是否被截断 (3) "输出纯代码" 指令是否被遵循
 
 ## 项目结构
 
 ```
-kedo/                          17,289 行
+kedo/                          18,750 行
 ├── kedo.py                    CLI 入口
 ├── cli/
 │   ├── repl.py                交互式 REPL（1,146 行）
 │   └── theme.py               终端主题
 ├── core/
-│   ├── agent_loop.py          Agent 主循环 + 自动修复 + 智能续接（2,697 行）
-│   ├── planner.py             任务规划器（838 行）
+│   ├── agent_loop.py          Agent 主循环 + 自动修复 + 智能续接（3,054 行）
+│   ├── planner.py             任务规划器（848 行）
 │   ├── evaluator.py           多维度质量评估（508 行）
-│   ├── project_profile.py     项目 Profile 管理（543 行）
+│   ├── project_profile.py     项目 Profile 管理（642 行）
+│   ├── platform_knowledge.py  平台知识 + CMakeLists 模板（Switch 等）
 │   ├── state_manager.py       状态持久化（378 行）
 │   ├── version_manager.py     候选版本管理（344 行）
 │   └── memory.py              上下文记忆（321 行）
@@ -270,7 +311,7 @@ kedo/                          17,289 行
 │   ├── schemas.py             数据模型（364 行）
 │   └── websocket.py           WebSocket 推送
 ├── tools/
-│   ├── code_generator.py      代码生成 + 校验（388 行）
+│   ├── code_generator.py      代码生成 + 校验（486 行）
 │   ├── file_tool.py           文件操作
 │   ├── shell_executor.py      Shell 执行（沙箱模式）
 │   └── test_runner.py         测试运行
@@ -278,18 +319,23 @@ kedo/                          17,289 行
     └── index.html             Web Dashboard（4,776 行）
 ```
 
-## 已知局限
+## 已知局限与改进历程
 
-kedo 在交叉编译等不熟悉的平台上存在以下能力差距（[详细分析](docs/kedo-gaps.md)）：
+kedo 在交叉编译平台上曾暴露 6 个核心能力差距，经三轮改进已全部修复：
 
-| 编号 | 问题 | 改进方向 |
-|------|------|----------|
-| G1 | LLM 幻觉不存在的库名 | 自动扫描目标平台 portlibs 注入 prompt |
-| G2 | 不会迭代调试 build 错误 | code_generate 后 dry-run cmake 预检 |
-| G3 | auto_fix 可能越修越坏 | 三层防御（已实现） |
-| G4 | 不了解目标平台构建规范 | 平台知识文件系统 |
-| G5 | CMakeLists 生成质量差 | 平台级 CMakeLists 模板 |
-| G6 | 生成非代码文件 | 二进制文件走系统工具 |
+| 编号 | 问题 | 修复方案 | 状态 |
+|------|------|----------|------|
+| G1 | LLM 幻觉不存在的库名 | `scan_platform_hints()` 扫描真实文件系统注入 prompt | 已修复 |
+| G2 | 不会迭代调试 build 错误 | 结构化 build error 解析 + 增量修复循环 | 已修复 |
+| G3 | auto_fix 可能越修越坏 | Profile 变更白名单（只允许改 build/notes） | 已修复 |
+| G4 | 不了解目标平台构建规范 | `platform_knowledge.py` 平台开发规范注入 | 已修复 |
+| G5 | CMakeLists 生成质量差 | 按项目类型提供已验证的 CMakeLists 模板 | 已修复 |
+| G6 | 生成非代码文件 | 二进制文件走 ImageMagick/ffmpeg 生成 | 已修复 |
+
+### 待办
+
+- **auto_fix 历次失败回溯**：auto_fix prompt 注入 prior_attempts，让 LLM 看到历次修改避免重复犯错（已实现，待实战验证）
+- **escalation 信息密度**：Dashboard 暂停 banner 中展示更完整的上下文（auto_fix 历次 diff + stderr 全文）
 
 ## 许可证
 

@@ -1145,6 +1145,7 @@ class AgentLoop:
         error_text: str,
         context_files: list[tuple[str, str]],
         structured_errors: list[dict] = None,
+        project_path: str = "",
     ) -> list[dict]:
         """构造失败诊断 + 修复建议的 LLM 消息。"""
         files_block = "\n\n".join(
@@ -1200,11 +1201,26 @@ class AgentLoop:
                 )
             diagnosis_block = "\n".join(lines) + "\n\n"
 
+        # 注入 prior_attempts：让 LLM 看到历次失败，避免重复同样的错误修复
+        prior_block = ""
+        if project_path:
+            profile = self.profile_manager.load(project_path)
+            if profile and profile.prior_attempts:
+                recent = profile.prior_attempts[-3:]
+                lines = ["PREVIOUS FAILED ATTEMPTS (DO NOT repeat the same fix):"]
+                for a in recent:
+                    lines.append(
+                        f"  - build_command: {a.get('build_command', '')[:200]}\n"
+                        f"    stderr: {a.get('stderr_excerpt', '')[:300]}"
+                    )
+                prior_block = "\n".join(lines) + "\n\n"
+
         user = (
             f"Failed step: {subtask.title}\n"
             f"Step type: {subtask.step_type.value}\n"
             f"Step description: {subtask.description}\n\n"
             f"{diagnosis_block}"
+            f"{prior_block}"
             f"Error output:\n{error_text[:4000]}\n\n"
             f"Relevant project files:\n{files_block}\n\n"
             f"Diagnose the root cause and respond with the JSON."
@@ -1276,6 +1292,7 @@ class AgentLoop:
             messages = self._build_fix_prompt(
                 subtask, error_text, context_files,
                 structured_errors=structured_errors,
+                project_path=project_path,
             )
             await self._emit(
                 task_id, EventType.LLM_REQUEST,
