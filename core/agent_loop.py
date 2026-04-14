@@ -220,6 +220,12 @@ class AgentLoop:
     async def _run_loop(self, task_id: str, description: str, project_path: str):
         """Agent Loop 主循环"""
         try:
+            # ---- Phase 0: Bug Fix 快速通道 ----
+            if self._is_bug_report(description):
+                handled = await self._handle_bug_fix(task_id, description, project_path)
+                if handled:
+                    return  # bug fix 通道已处理完毕（成功或失败）
+
             # ---- Phase 1: 计划 ----
             await self.state.update_status(task_id, TaskStatus.PLANNING, current_step="Planning")
             await self._emit(task_id, EventType.STEP_STARTED, step="planning")
@@ -2937,6 +2943,265 @@ class AgentLoop:
             result = await llm.chat(messages)
             return result
         return "".join(chunks)
+
+    # ==========================================================
+    # Bug Fix 快速通道
+    # ==========================================================
+
+    _BUG_KEYWORDS = [
+        "应该是", "不应该", "会退出", "有问题", "有bug", "bug", "fix",
+        "修复", "修一下", "修改", "不对", "不正确", "出错", "报错",
+        "崩溃", "crash", "闪退", "卡死", "卡住", "黑屏", "白屏",
+        "没反应", "不工作", "不生效", "失效", "异常", "错误",
+        "instead of", "should be", "doesn't work", "not working",
+        "broken", "wrong", "unexpected",
+    ]
+
+    def _is_bug_report(self, description: str) -> bool:
+        """
+        判断用户输入是否为 bug 报告（而非功能需求）。
+
+        使用关键词匹配：如果描述中包含 bug 相关的关键词，认为是 bug 修复任务。
+        误判代价低（最坏走了 bug fix 通道但失败了，回退到正常流程即可）。
+        """
+        desc_lower = description.lower()
+        return any(kw in desc_lower for kw in self._BUG_KEYWORDS)
+
+    def _find_bug_related_files(
+        self, bug_report: str, project_path: str
+    ) -> list[tuple[str, str]]:
+        """
+        定位与 bug 相关的源文件，返回 [(relative_path, full_content)]。
+
+        策略：
+        1. 项目源文件少于 5 个 → 全读（小项目如 switchvideo）
+        2. 否则尝试从 bug 描述中提取文件名关键词，grep 匹配
+        3. 兜底：按文件大小排序取 top 3（主要逻辑通常在最大的文件里）
+        """
+        import re as _re
+        proj = Path(project_path)
+        src_exts = {".cpp", ".c", ".h", ".hpp", ".py", ".js", ".ts", ".java", ".go", ".rs"}
+        skip_dirs = {".kedo", ".git", ".venv", "node_modules", "__pycache__", "build", "dist"}
+
+        # 收集所有源文件
+        all_src: list[tuple[int, str, Path]] = []
+        for f in proj.rglob("*"):
+            if (f.is_file() and f.suffix.lower() in src_exts
+                    and not any(p in f.relative_to(proj).parts for p in skip_dirs)):
+                try:
+                    all_src.append((f.stat().st_size, str(f.relative_to(proj)), f))
+                except OSError:
+                    pass
+
+        if not all_src:
+            return []
+
+        # 小项目：全读
+        if len(all_src) <= 5:
+            results = []
+            for _, rel, fp in all_src:
+                try:
+                    content = fp.read_text(encoding="utf-8", errors="replace")
+                    results.append((rel, content))
+                except Exception:
+                    pass
+            return results
+
+        # 大项目：按大小排序取 top 3
+        all_src.sort(reverse=True)
+        results = []
+        MAX_TOTAL = 50000  # 50KB 总预算
+        total = 0
+        for _, rel, fp in all_src[:3]:
+            if total >= MAX_TOTAL:
+                break
+            try:
+                content = fp.read_text(encoding="utf-8", errors="replace")
+                results.append((rel, content))
+                total += len(content)
+            except Exception:
+                pass
+        return results
+
+    async def _handle_bug_fix(
+        self, task_id: str, bug_report: str, project_path: str
+    ) -> bool:
+        """
+        Bug Fix 快速通道：跳过 planner，直接 LLM 诊断+修复。
+
+        流程：
+        1. 读取相关源文件完整内容
+        2. 注入平台知识
+        3. LLM 诊断 bug + 输出修复 patch
+        4. 应用 patch（复用 auto_fix 的写入+白名单验证）
+        5. BUILD 验证
+
+        返回 True 表示已处理（成功或失败），False 表示应回退到正常流程。
+        """
+        await self.state.update_status(
+            task_id, TaskStatus.IN_PROGRESS, current_step="Bug Fix: 分析中"
+        )
+        await self._emit(task_id, EventType.STEP_STARTED, step="bug_fix")
+
+        # 1. 定位相关源文件
+        source_files = self._find_bug_related_files(bug_report, project_path)
+        if not source_files:
+            logger.warning("Bug fix: no source files found, falling back to normal flow")
+            await self._emit(task_id, EventType.LLM_RESPONSE,
+                             phase="bug_fix", summary="未找到源文件，回退到正常流程")
+            return False
+
+        file_list = ", ".join(rel for rel, _ in source_files)
+        logger.info(f"Bug fix: analyzing {len(source_files)} files: {file_list}")
+
+        # 2. 构建 bug fix prompt
+        platform_constraints = self._build_platform_constraints(project_path)
+
+        files_block = "\n\n".join(
+            f"=== {rel} ({len(content)} chars, {len(content.splitlines())} lines) ===\n{content}"
+            for rel, content in source_files
+        )
+
+        system = (
+            "You are an expert debugger specializing in runtime bug diagnosis. "
+            "A user has reported a runtime behavior bug. Your job is to:\n"
+            "1. Read the source code carefully and understand the existing logic\n"
+            "2. Identify the root cause of the reported bug\n"
+            "3. Propose a minimal, targeted fix\n\n"
+            "CRITICAL RULES:\n"
+            "- Fix the ROOT CAUSE, not the symptom\n"
+            "- Make the MINIMAL change needed — do not refactor or rewrite unrelated code\n"
+            "- Preserve all existing functionality that is not part of the bug\n"
+            "- Add a brief comment at the fix location explaining what was wrong\n"
+            "- Output the COMPLETE modified file content (not a diff or snippet)\n\n"
+            "Output STRICTLY one of these JSON shapes (no markdown, no commentary):\n"
+            '{\n'
+            '  "diagnosis": "<root cause analysis in 1-3 sentences>",\n'
+            '  "file_to_fix": "<relative/path>",\n'
+            '  "action": "modify",\n'
+            '  "new_content": "<complete new file content>"\n'
+            '}\n'
+            "OR, if the bug cannot be fixed by editing a single file:\n"
+            '{"unfixable": true, "reason": "<why>", "suggestion": "<what to do instead>"}\n'
+        )
+
+        if platform_constraints:
+            system += "\n" + platform_constraints
+
+        user = (
+            f"Bug report: {bug_report}\n\n"
+            f"Source files:\n{files_block}\n\n"
+            f"Analyze the code, find the bug, and output the fix as JSON."
+        )
+
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+
+        # 3. 调 LLM 诊断
+        await self._emit(task_id, EventType.LLM_REQUEST,
+                         phase="bug_fix",
+                         prompt_summary=f"诊断 bug: {bug_report[:100]}",
+                         model=self._get_model_name())
+        try:
+            response = await self.planner._llm.chat(messages)
+        except Exception as e:
+            logger.error(f"Bug fix LLM call failed: {e}")
+            await self._emit(task_id, EventType.STEP_FAILED,
+                             step="bug_fix", error=str(e), error_type="llm_error")
+            return False
+
+        # 4. 解析响应（复用 auto_fix 的 parser）
+        patch = self._parse_fix_response(response)
+        if patch is None:
+            logger.warning("Bug fix: LLM response not parseable, falling back")
+            await self._emit(task_id, EventType.LLM_RESPONSE,
+                             phase="bug_fix", summary="LLM 响应无法解析，回退到正常流程")
+            return False
+
+        if patch.get("unfixable"):
+            reason = patch.get("reason", "")
+            suggestion = patch.get("suggestion", "")
+            await self._emit(task_id, EventType.LLM_RESPONSE,
+                             phase="bug_fix",
+                             summary=f"LLM 判定无法单文件修复: {reason}. 建议: {suggestion}")
+            await self.state.update_status(
+                task_id, TaskStatus.FAILED,
+                current_step=f"Bug Fix: 无法修复 — {reason[:100]}",
+            )
+            return True
+
+        diagnosis = patch.get("diagnosis", "")
+        rel = patch["file_to_fix"].lstrip("/").replace("\\", "/")
+        target = Path(project_path) / rel
+
+        await self._emit(task_id, EventType.LLM_RESPONSE,
+                         phase="bug_fix",
+                         summary=f"诊断: {diagnosis[:200]}. 修改: {rel}")
+
+        # 5. 应用 patch
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(patch["new_content"], encoding="utf-8")
+        except Exception as e:
+            logger.error(f"Bug fix: failed to write {target}: {e}")
+            await self.state.update_status(task_id, TaskStatus.FAILED,
+                                           current_step=f"Bug Fix: 写入失败 — {e}")
+            return True
+
+        logger.info(f"Bug fix: applied patch to {rel} — {diagnosis[:100]}")
+        await self.state.update_status(
+            task_id, TaskStatus.IN_PROGRESS, current_step="Bug Fix: BUILD 验证中"
+        )
+
+        # 6. BUILD 验证
+        try:
+            profile = await self.profile_manager.ensure(project_path, self.planner._llm)
+        except Exception:
+            profile = None
+
+        if profile and profile.build_command:
+            applied_env = self.profile_manager.apply_required_env(profile)
+            if applied_env:
+                logger.info(f"Bug fix build: applied env: {applied_env}")
+            build_cmd = os.path.expandvars(profile.build_command)
+        else:
+            build_cmd = self._infer_build_command(project_path, "build")
+
+        await self._emit(task_id, EventType.STEP_STARTED, step="bug_fix_build")
+        build_result = await self.tools.execute(
+            "shell_execute", command=build_cmd, working_dir=project_path,
+        )
+
+        if build_result.success:
+            await self._emit(task_id, EventType.STEP_COMPLETED, step="bug_fix_build")
+            await self.state.update_status(
+                task_id, TaskStatus.COMPLETED,
+                progress_percent=100,
+                current_step="Bug Fix: 完成",
+            )
+
+            # 记录到 memory
+            self.memory.add_message(
+                "system",
+                f"[bug_fix] {bug_report[:100]} → 诊断: {diagnosis[:200]}. "
+                f"修改 {rel}, BUILD 通过。",
+            )
+            logger.info(f"Bug fix completed: {rel} — {diagnosis[:100]}")
+            return True
+        else:
+            # BUILD 失败：报告诊断结果和构建错误，让用户决定下一步
+            stderr = build_result.error or ""
+            await self._emit(task_id, EventType.STEP_FAILED,
+                             step="bug_fix_build", error=stderr[:500],
+                             error_type="build_failed")
+            await self.state.update_status(
+                task_id, TaskStatus.FAILED,
+                current_step=f"Bug Fix: 代码已修改但 BUILD 失败",
+            )
+            logger.warning(f"Bug fix: patch applied but build failed: {stderr[:200]}")
+            return True
 
     async def _gather_project_context(self, project_path: str) -> dict:
         """收集项目上下文信息"""
