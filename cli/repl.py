@@ -760,7 +760,7 @@ class KedoREPL:
             print()
 
         providers = [
-            ("1", "claude", "Claude (Anthropic)", "claude-sonnet-4-20250514", "ANTHROPIC_API_KEY"),
+            ("1", "claude", "Claude (Anthropic)", "claude-sonnet-4-6", "ANTHROPIC_API_KEY"),
             ("2", "kimi-code", "Kimi Code 2.5 (编程专用)", "kimi-k2.5", "KIMI_API_KEY"),
             ("3", "kimi", "Kimi K2.5 (通用)", "kimi-k2.5", "MOONSHOT_API_KEY"),
             ("4", "mock", "Mock 模式 (无需 Key)", "mock", None),
@@ -853,6 +853,13 @@ class KedoREPL:
 
         if result and result.get("success"):
             print(f"  {SUCCESS}✓ {result.get('message', '切换成功')}{C.RESET}")
+            # 同步状态栏（_sb）和 config：让下一次 draw 立即反映新的 provider/model
+            new_provider = result.get("provider", provider_id)
+            new_model = result.get("model", model)
+            self._sb["provider"] = new_provider
+            self._sb["model"] = new_model
+            self.config["llm_provider"] = new_provider
+            self.config["model"] = new_model
             # ★ 清除 mock 回退标记
             self.config["_mock_fallback"] = False
             self.config.pop("_mock_fallback_reason", None)
@@ -881,7 +888,7 @@ class KedoREPL:
             print(table_row("模型", llm_status.get("model", "unknown")))
         else:
             print(table_row("LLM 提供商", self.config.get("llm_provider", "anthropic")))
-            print(table_row("模型", self.config.get("model", "claude-sonnet-4-20250514")))
+            print(table_row("模型", self.config.get("model", "claude-sonnet-4-6")))
 
         print(table_row("最大迭代", str(self.config.get("max_iterations", 5))))
         print(table_row("评估阈值", str(self.config.get("min_eval_score", 70))))

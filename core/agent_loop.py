@@ -220,7 +220,12 @@ class AgentLoop:
     async def _run_loop(self, task_id: str, description: str, project_path: str):
         """Agent Loop 主循环"""
         try:
-            # ---- Phase 0: Bug Fix 快速通道 ----
+            # ---- Phase 0a: 闲聊/问答 快速通道 ----
+            if self._is_chat_query(description):
+                await self._handle_chat(task_id, description)
+                return
+
+            # ---- Phase 0b: Bug Fix 快速通道 ----
             if self._is_bug_report(description):
                 handled = await self._handle_bug_fix(task_id, description, project_path)
                 if handled:
@@ -2947,6 +2952,83 @@ class AgentLoop:
     # ==========================================================
     # Bug Fix 快速通道
     # ==========================================================
+
+    # 闲聊/问答关键词 —— 命中即走 Q&A 快速通道，不进规划流水线
+    _CHAT_KEYWORDS = [
+        "你是谁", "你是什么", "你叫", "你用", "你现在", "你能",
+        "什么模型", "哪个模型", "模型版本", "model version",
+        "who are you", "what model", "which model",
+    ]
+    # 问答通道的 "开发动词" 黑名单：命中任何一个就不能走 Q&A
+    _CODE_VERBS = [
+        "实现", "添加", "增加", "改造", "重构", "优化代码", "接入", "生成",
+        "写一个", "写个", "写段", "封装", "开发", "构建", "编译", "部署",
+        "implement", "add ", "refactor", "build ", "compile", "deploy",
+        "integrate", "create a", "write a", "write the",
+    ]
+
+    def _is_chat_query(self, description: str) -> bool:
+        """
+        判断是否是纯闲聊/问答（不需要走规划→执行→评估流水线）。
+
+        策略（任一为真即命中，但 _CODE_VERBS 命中直接否决）：
+        1. 显式身份/模型询问关键词
+        2. 短输入 (<30 字) + 以问号结尾 + 不含开发动词
+        """
+        desc = description.strip()
+        low = desc.lower()
+        if any(v in low for v in self._CODE_VERBS):
+            return False
+        # 也要排除 bug 关键词（bug 通道优先处理）
+        if any(kw in low for kw in self._BUG_KEYWORDS):
+            return False
+        if any(kw in low for kw in self._CHAT_KEYWORDS):
+            return True
+        if len(desc) <= 30 and (desc.endswith("?") or desc.endswith("？")):
+            return True
+        return False
+
+    async def _handle_chat(self, task_id: str, description: str) -> None:
+        """
+        问答快速通道：直接调底层 LLM chat，不规划、不评估、不循环。
+        """
+        await self.state.update_status(task_id, TaskStatus.PLANNING, current_step="Chat")
+        await self._emit(task_id, EventType.STEP_STARTED, step="chat")
+        await self._emit(
+            task_id, EventType.LLM_REQUEST,
+            phase="chat",
+            prompt_summary=f"问答: {description[:100]}",
+            model=self._get_model_name(),
+        )
+
+        system_prompt = (
+            "你是 kedo —— 一个由大语言模型驱动的自动化开发助手。"
+            "用户此刻是在与你闲聊或询问元信息（身份、能力、模型等），不是在提开发需求。"
+            "请直接、简洁地中文回答，不要生成计划或代码。"
+            f"当前底层模型: {self._get_model_name()}。"
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": description},
+        ]
+
+        answer_parts: list[str] = []
+        try:
+            if hasattr(self.planner._llm, "stream_chat"):
+                async for tok in self.planner._llm.stream_chat(messages):
+                    answer_parts.append(tok)
+                    await self._emit(task_id, EventType.LLM_TOKEN, token=tok, phase="chat")
+                answer = "".join(answer_parts)
+            else:
+                answer = await self.planner._llm.chat(messages)
+        except Exception as e:
+            answer = f"（LLM 调用失败: {e}）"
+
+        await self._emit(task_id, EventType.LLM_RESPONSE, phase="chat", summary=answer[:200])
+        await self._emit(task_id, EventType.STEP_COMPLETED, step="chat")
+        await self.state.update_status(
+            task_id, TaskStatus.COMPLETED, progress_percent=100, current_step="Completed"
+        )
 
     _BUG_KEYWORDS = [
         "应该是", "不应该", "会退出", "有问题", "有bug", "bug", "fix",

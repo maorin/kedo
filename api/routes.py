@@ -380,6 +380,76 @@ async def get_llm_status():
     return {"provider": provider, "model": model}
 
 
+def _persist_llm_config(switch_config: dict) -> tuple[bool, str]:
+    """
+    把 LLM 配置合并写入 ~/.config/kedo/config.yaml，下次启动自动恢复。
+    只持久化 LLM 相关字段，其他字段保留不动。文件权限 0600（含 api key）。
+    """
+    try:
+        import yaml  # type: ignore
+    except ImportError:
+        return False, "PyYAML 未安装"
+    cfg_path = Path.home() / ".config" / "kedo" / "config.yaml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing: dict = {}
+    if cfg_path.exists():
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                existing = yaml.safe_load(f) or {}
+        except Exception as e:
+            return False, f"读取已有配置失败: {e}"
+
+    # 只合并 LLM 相关字段
+    keys = (
+        "llm_provider", "model",
+        "anthropic_api_key", "kimi_api_key", "kimi_base_url", "openai_api_key",
+    )
+    changed = False
+    for k in keys:
+        if k in switch_config and switch_config[k]:
+            existing[k] = switch_config[k]
+            changed = True
+    if not changed:
+        return True, "无需持久化"
+
+    try:
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(existing, f, allow_unicode=True, sort_keys=False)
+        os.chmod(cfg_path, 0o600)
+        return True, str(cfg_path)
+    except Exception as e:
+        return False, f"写入失败: {e}"
+
+
+@router.post("/llm/validate")
+async def validate_llm_key(req: dict = Body(...)):
+    """
+    校验 API Key 有效性 (不切换，仅探测)
+
+    Body: {"provider": "claude", "api_key": "sk-ant-...", "model": "claude-sonnet-4-5"}
+    """
+    provider = req.get("provider", "")
+    api_key = req.get("api_key", "")
+    model = req.get("model", "")
+
+    if provider == "claude":
+        from api.server import AnthropicClient, DEFAULT_ANTHROPIC_MODEL
+        fmt_ok, fmt_msg = AnthropicClient.validate_key_format(api_key)
+        if not fmt_ok:
+            return {"success": False, "stage": "format", "error": fmt_msg}
+        client = AnthropicClient(api_key=api_key, model=model or DEFAULT_ANTHROPIC_MODEL)
+        ok, msg = await client.validate()
+        return {
+            "success": ok,
+            "stage": "network",
+            "provider": "claude",
+            "model": client.model,
+            "error": None if ok else msg,
+        }
+    return {"success": False, "error": f"暂不支持校验 provider={provider}"}
+
+
 @router.post("/llm/switch")
 async def switch_llm(req: dict = Body(...)):
     """
@@ -398,12 +468,25 @@ async def switch_llm(req: dict = Body(...)):
 
     if provider == "claude":
         switch_config["llm_provider"] = "anthropic"
+        # 本地格式校验
         if api_key:
+            from api.server import AnthropicClient
+            ok, msg = AnthropicClient.validate_key_format(api_key)
+            if not ok:
+                return {"success": False, "error": f"API Key 校验失败: {msg}"}
             switch_config["anthropic_api_key"] = api_key
         if model:
             switch_config["model"] = model
         else:
-            switch_config["model"] = "claude-sonnet-4-20250514"
+            from api.server import DEFAULT_ANTHROPIC_MODEL
+            switch_config["model"] = DEFAULT_ANTHROPIC_MODEL
+        # 实网连通性校验（使用待切换的 key + model）
+        if api_key:
+            from api.server import AnthropicClient
+            probe = AnthropicClient(api_key=api_key, model=switch_config["model"])
+            ok, msg = await probe.validate()
+            if not ok:
+                return {"success": False, "error": f"Claude 连通性校验失败: {msg}"}
     elif provider == "kimi-code":
         # Kimi Code 2.5 — 编程专用端点
         switch_config["llm_provider"] = "kimi"
@@ -451,11 +534,16 @@ async def switch_llm(req: dict = Body(...)):
 
         actual_provider = provider
         actual_model = getattr(new_client, "model", "mock")
+        # 持久化（除 mock 外）：下次启动自动恢复此 provider + key + model
+        persist_msg = ""
+        if req.get("persist", True) and provider != "mock":
+            ok, msg = _persist_llm_config(switch_config)
+            persist_msg = f"，配置已保存到 {msg}" if ok else f"，但持久化失败: {msg}"
         return {
             "success": True,
             "provider": actual_provider,
             "model": actual_model,
-            "message": f"已切换到 {actual_provider} ({actual_model})",
+            "message": f"已切换到 {actual_provider} ({actual_model}){persist_msg}",
         }
     except Exception as e:
         return {"success": False, "error": str(e)}

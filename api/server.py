@@ -197,7 +197,7 @@ def create_llm_client(config: dict):
         config["_mock_fallback"] = False
         return AnthropicClient(
             api_key=api_key,
-            model=config.get("model", "claude-sonnet-4-20250514"),
+            model=config.get("model", DEFAULT_ANTHROPIC_MODEL),
         )
 
     elif provider == "openai":
@@ -413,27 +413,84 @@ class OpenAIClient(BaseLLMClient):
             raise RuntimeError(f"OpenAI API stream error: {e}")
 
 
+DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
+
+
+def _format_anthropic_error(e: Exception, stage: str = "API") -> RuntimeError:
+    """将 anthropic SDK 异常归类为易读的 RuntimeError"""
+    try:
+        import anthropic
+    except ImportError:
+        return RuntimeError(f"Anthropic {stage} error: {e}")
+
+    if isinstance(e, anthropic.AuthenticationError):
+        return RuntimeError("Anthropic 鉴权失败 (401): API Key 无效或已过期，请在 /login 重新录入")
+    if isinstance(e, anthropic.PermissionDeniedError):
+        return RuntimeError("Anthropic 权限不足 (403): 该 Key 无权访问指定模型或资源")
+    if isinstance(e, anthropic.NotFoundError):
+        return RuntimeError(f"Anthropic 模型不存在 (404): {e}")
+    if isinstance(e, anthropic.RateLimitError):
+        return RuntimeError("Anthropic 限流 (429): 请求过于频繁或已达配额上限，稍后重试")
+    if isinstance(e, anthropic.BadRequestError):
+        return RuntimeError(f"Anthropic 请求错误 (400): {e}")
+    # overloaded / 5xx
+    if isinstance(e, anthropic.APIStatusError):
+        return RuntimeError(f"Anthropic 服务异常 ({getattr(e, 'status_code', '5xx')}): {e}")
+    if isinstance(e, anthropic.APIConnectionError):
+        return RuntimeError(f"Anthropic 网络错误: {e}")
+    return RuntimeError(f"Anthropic {stage} error: {e}")
+
+
 class AnthropicClient(BaseLLMClient):
-    def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514"):
+    def __init__(self, api_key: str, model: str = DEFAULT_ANTHROPIC_MODEL, max_tokens: int = 4096):
         self.api_key = api_key
         self.model = model
+        self.max_tokens = max_tokens
+
+    @staticmethod
+    def validate_key_format(api_key: str) -> tuple[bool, str]:
+        """本地格式校验 (不发网络请求)"""
+        if not api_key:
+            return False, "API Key 为空"
+        key = api_key.strip()
+        if not key.startswith("sk-ant-"):
+            return False, "格式错误: Claude API Key 必须以 'sk-ant-' 开头"
+        if len(key) < 40:
+            return False, "长度异常: Claude API Key 过短"
+        return True, ""
+
+    async def validate(self) -> tuple[bool, str]:
+        """实网校验: 发送一次最小请求确认 Key / 模型可用"""
+        ok, msg = self.validate_key_format(self.api_key)
+        if not ok:
+            return False, msg
+        try:
+            import anthropic
+            client = anthropic.AsyncAnthropic(api_key=self.api_key)
+            await client.messages.create(
+                model=self.model,
+                max_tokens=1,
+                messages=[{"role": "user", "content": "ping"}],
+            )
+            return True, "ok"
+        except Exception as e:
+            return False, str(_format_anthropic_error(e, "validate"))
 
     async def chat(self, messages: list[dict]) -> str:
         try:
             import anthropic
             client = anthropic.AsyncAnthropic(api_key=self.api_key)
-            # 分离 system 消息
             system = "\n".join(m["content"] for m in messages if m["role"] == "system")
             user_messages = [m for m in messages if m["role"] != "system"]
             response = await client.messages.create(
                 model=self.model,
-                max_tokens=4096,
+                max_tokens=self.max_tokens,
                 system=system,
                 messages=user_messages,
             )
             return response.content[0].text
         except Exception as e:
-            raise RuntimeError(f"Anthropic API error: {e}")
+            raise _format_anthropic_error(e, "chat")
 
     async def stream_chat(self, messages: list[dict]):
         try:
@@ -443,14 +500,14 @@ class AnthropicClient(BaseLLMClient):
             user_messages = [m for m in messages if m["role"] != "system"]
             async with client.messages.stream(
                 model=self.model,
-                max_tokens=4096,
+                max_tokens=self.max_tokens,
                 system=system,
                 messages=user_messages,
             ) as stream:
                 async for text in stream.text_stream:
                     yield text
         except Exception as e:
-            raise RuntimeError(f"Anthropic API stream error: {e}")
+            raise _format_anthropic_error(e, "stream")
 
 
 class KimiClient(BaseLLMClient):
