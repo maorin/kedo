@@ -159,8 +159,8 @@ def main():
     project_path = os.path.abspath(args.project_path)
     config["project_path"] = project_path
 
-    # 确保 storage 目录
-    storage_dir = config.get("storage_dir", os.path.join(project_path, ".kedo"))
+    # 确保 storage 目录（StateManager 期望 .kedo/state 子目录，与 default 对齐）
+    storage_dir = config.get("storage_dir", os.path.join(project_path, ".kedo", "state"))
     config["storage_dir"] = storage_dir
     Path(storage_dir).mkdir(parents=True, exist_ok=True)
 

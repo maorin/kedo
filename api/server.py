@@ -442,7 +442,7 @@ def _format_anthropic_error(e: Exception, stage: str = "API") -> RuntimeError:
 
 
 class AnthropicClient(BaseLLMClient):
-    def __init__(self, api_key: str, model: str = DEFAULT_ANTHROPIC_MODEL, max_tokens: int = 4096):
+    def __init__(self, api_key: str, model: str = DEFAULT_ANTHROPIC_MODEL, max_tokens: int = 8192):
         self.api_key = api_key
         self.model = model
         self.max_tokens = max_tokens

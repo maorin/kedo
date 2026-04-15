@@ -117,6 +117,9 @@ step_type guidelines:
 7. **文件路径明确**：每个 code_generate subtask 的 description 中必须指定完整文件路径
 8. **目录规范**：源代码路径必须用 `src/`，构建产物必须输出到 `build/`
 9. **末尾必有**：无论什么情况，计划末尾必须包含 build + test + evaluate 三个步骤
+10. **必须有真代码产出**：计划中**至少**包含 1 个产出可构建源码（如 .cpp/.c/.py/.js/.go/.rs/.java + CMakeLists.txt/Makefile）的 `code_generate` subtask；只产出 .md 文档的计划是**无效的**，会被 build 阶段直接失败
+11. **文档子任务上限**：所有产出 .md 的 `code_generate` subtask **加起来 ≤ 4 个**。建议合并：requirement.md + user-stories.md 合 1 个，整个 SDD (architecture+api+database+module) 合 1 个，deploy 1 个，test 1 个。**不要为每份 .md 单独开一个 subtask**——这会把 token 烧光、把 evaluator 的 code review 维度打成 0 分
+12. **总步骤上限**：无论项目大小，总 subtask 数 **≤ 12**（含 build/test/evaluate）。超过就合并
 
 Output a JSON array of subtasks.
 

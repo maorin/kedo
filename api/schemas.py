@@ -8,7 +8,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ============================================================
@@ -217,6 +217,16 @@ class Proposal(BaseModel):
     pros: list[str] = Field(default_factory=list)
     cons: list[str] = Field(default_factory=list)
     ai_recommended: bool = False             # AI 是否推荐这个方案
+
+    @field_validator("approach", "description", "title", mode="before")
+    @classmethod
+    def _coerce_str(cls, v):
+        """兼容 LLM (尤其 Claude) 把这些字段输出为数组的情况：用换行拼接回字符串。"""
+        if isinstance(v, list):
+            return "\n".join(str(x) for x in v)
+        if v is None:
+            return ""
+        return v
 
 
 class DiscussionRecord(BaseModel):
