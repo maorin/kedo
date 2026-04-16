@@ -15,7 +15,7 @@ llm_provider: "kimi-code"
 # 环境变量: ANTHROPIC_API_KEY, OPENAI_API_KEY, KIMI_API_KEY
 anthropic_api_key: ""           # 从 https://console.anthropic.com 获取
 openai_api_key: ""
-kimi_api_key: "sk-kimi-mX9jJ0uNc5kNQs89c6j6uog5IxDs5t3OaX0QenTzWwMbFZu00lvGOT6pHkGhKJpG"
+kimi_api_key: ""                # 通过 /login 设置，存储在 ~/.config/kedo/config.yaml
 ollama_url: "http://localhost:11434"
 
 

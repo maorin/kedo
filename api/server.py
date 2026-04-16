@@ -17,11 +17,14 @@ from core.agent_loop import AgentLoop
 from core.evaluator import Evaluator
 from core.memory import AgentMemory
 from core.planner import Planner
+from core.react_agent import ReactAgent
 from core.state_manager import StateManager
 from tools.base import ToolRegistry
+from tools.build_tool import BuildTool
 from tools.code_generator import CodeGeneratorTool
 from tools.file_tool import FileReadTool, FileSearchTool, FileWriteTool
 from tools.git_tool import GitTool
+from tools.respond_tool import RespondTool
 from tools.shell_executor import ShellExecutorTool
 from tools.test_runner import TestRunnerTool
 
@@ -82,6 +85,8 @@ def create_app(config: dict = None) -> FastAPI:
     tool_registry.register(FileReadTool())
     tool_registry.register(FileWriteTool())
     tool_registry.register(FileSearchTool())
+    tool_registry.register(RespondTool())
+    tool_registry.register(BuildTool())
 
     # Planner & Evaluator
     planner = Planner(llm_client, memory, config=config)
@@ -94,7 +99,16 @@ def create_app(config: dict = None) -> FastAPI:
         git_tool=GitTool(shell) if config.get("git_enabled", True) else None,
     )
 
-    # Agent Loop
+    # ReactAgent (新: LLM 驱动的 ReAct Agent)
+    react_agent = ReactAgent(
+        llm_client=llm_client,
+        tool_registry=tool_registry,
+        state=state_manager,
+        memory=memory,
+        config=config,
+    )
+
+    # 旧 Agent Loop (保留向后兼容，逐步迁移)
     agent_loop = AgentLoop(
         state_manager=state_manager,
         planner=planner,
@@ -113,6 +127,7 @@ def create_app(config: dict = None) -> FastAPI:
         agent_loop, state_manager,
         create_llm_client_fn=create_llm_client,
         project_path=config.get("project_path", "."),
+        react_agent=react_agent,
     )
 
     # 注册路由 — 必须在 StaticFiles 之前
@@ -268,6 +283,13 @@ class BaseLLMClient:
         result = await self.chat(messages)
         yield result
 
+    async def chat_with_tools(self, messages: list[dict], tools: list[dict]):
+        """带 function calling 的聊天，返回 LLMResponse"""
+        from api.schemas import LLMResponse
+        # 默认回退：不支持工具调用时，走普通 chat
+        result = await self.chat(messages)
+        return LLMResponse(content=result, tool_calls=[])
+
 
 class MockLLMClient(BaseLLMClient):
     """
@@ -412,6 +434,30 @@ class OpenAIClient(BaseLLMClient):
         except Exception as e:
             raise RuntimeError(f"OpenAI API stream error: {e}")
 
+    async def chat_with_tools(self, messages: list[dict], tools: list[dict]):
+        from api.schemas import LLMResponse, ToolCallData
+        try:
+            import openai
+            client = openai.AsyncOpenAI(api_key=self.api_key)
+            kwargs = {"model": self.model, "messages": messages, "temperature": 0.1}
+            if tools:
+                kwargs["tools"] = tools
+            response = await client.chat.completions.create(**kwargs)
+            msg = response.choices[0].message
+            tool_calls = []
+            if msg.tool_calls:
+                import json as _json
+                for tc in msg.tool_calls:
+                    args = tc.function.arguments
+                    if isinstance(args, str):
+                        args = _json.loads(args)
+                    tool_calls.append(ToolCallData(
+                        id=tc.id, name=tc.function.name, arguments=args
+                    ))
+            return LLMResponse(content=msg.content, tool_calls=tool_calls)
+        except Exception as e:
+            raise RuntimeError(f"OpenAI API error: {e}")
+
 
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
@@ -508,6 +554,82 @@ class AnthropicClient(BaseLLMClient):
                     yield text
         except Exception as e:
             raise _format_anthropic_error(e, "stream")
+
+    async def chat_with_tools(self, messages: list[dict], tools: list[dict]):
+        from api.schemas import LLMResponse, ToolCallData
+        try:
+            import anthropic
+            client = anthropic.AsyncAnthropic(api_key=self.api_key)
+            system = "\n".join(m["content"] for m in messages if m["role"] == "system")
+            user_messages = self._convert_messages_for_anthropic(
+                [m for m in messages if m["role"] != "system"]
+            )
+            # 转换 OpenAI tool schema → Anthropic tool schema
+            anthropic_tools = []
+            for t in (tools or []):
+                func = t.get("function", {})
+                anthropic_tools.append({
+                    "name": func["name"],
+                    "description": func.get("description", ""),
+                    "input_schema": func.get("parameters", {"type": "object", "properties": {}}),
+                })
+            kwargs = {
+                "model": self.model,
+                "max_tokens": self.max_tokens,
+                "system": system,
+                "messages": user_messages,
+            }
+            if anthropic_tools:
+                kwargs["tools"] = anthropic_tools
+            response = await client.messages.create(**kwargs)
+            content_text = ""
+            tool_calls = []
+            for block in response.content:
+                if block.type == "text":
+                    content_text += block.text
+                elif block.type == "tool_use":
+                    tool_calls.append(ToolCallData(
+                        id=block.id, name=block.name, arguments=block.input
+                    ))
+            return LLMResponse(
+                content=content_text or None,
+                tool_calls=tool_calls,
+            )
+        except Exception as e:
+            raise _format_anthropic_error(e, "chat_with_tools")
+
+    @staticmethod
+    def _convert_messages_for_anthropic(messages: list[dict]) -> list[dict]:
+        """将含有 tool 角色的消息转为 Anthropic 格式"""
+        result = []
+        for m in messages:
+            role = m.get("role")
+            if role == "tool":
+                # Anthropic 用 tool_result 块
+                result.append({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": m.get("tool_call_id", ""),
+                        "content": m.get("content", ""),
+                    }],
+                })
+            elif role == "assistant" and m.get("tool_calls"):
+                # 转换 assistant 的 tool_calls 为 Anthropic 格式
+                content_blocks = []
+                if m.get("content"):
+                    content_blocks.append({"type": "text", "text": m["content"]})
+                for tc in m["tool_calls"]:
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": tc["id"] if isinstance(tc, dict) else tc.id,
+                        "name": tc["name"] if isinstance(tc, dict) else tc.name,
+                        "input": tc["arguments"] if isinstance(tc, dict) else tc.arguments,
+                    })
+                result.append({"role": "assistant", "content": content_blocks})
+            else:
+                result.append(m)
+        return result
 
 
 class KimiClient(BaseLLMClient):
@@ -795,6 +917,57 @@ class KimiClient(BaseLLMClient):
                     "建议：检查 API Key 是否有效，或稍后重试"
                 )
             return content
+
+    async def chat_with_tools(self, messages: list[dict], tools: list[dict]):
+        """Kimi OpenAI 兼容 function calling"""
+        from api.schemas import LLMResponse, ToolCallData
+        import httpx
+        import json as _json
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        timeout = httpx.Timeout(
+            connect=self.CONNECT_TIMEOUT,
+            read=self.READ_TIMEOUT * 2,  # 非流式需要更长超时
+            write=self.WRITE_TIMEOUT,
+            pool=self.CONNECT_TIMEOUT,
+        )
+        body = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.1,
+        }
+        if tools:
+            body["tools"] = tools
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json=body,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        msg = data.get("choices", [{}])[0].get("message", {})
+        content = msg.get("content")
+        tool_calls = []
+        for tc in (msg.get("tool_calls") or []):
+            func = tc.get("function", {})
+            args = func.get("arguments", "{}")
+            if isinstance(args, str):
+                try:
+                    args = _json.loads(args)
+                except (ValueError, TypeError):
+                    args = {}
+            tool_calls.append(ToolCallData(
+                id=tc.get("id", ""),
+                name=func.get("name", ""),
+                arguments=args,
+            ))
+        return LLMResponse(content=content, tool_calls=tool_calls)
 
 
 class OllamaClient(BaseLLMClient):

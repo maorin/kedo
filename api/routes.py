@@ -36,14 +36,16 @@ router = APIRouter()
 
 # 这些在 server.py 中注入
 _agent_loop = None
+_react_agent = None
 _state_manager = None
 _create_llm_client = None  # create_llm_client 函数引用，避免循环导入
 _project_path: str = "."   # 项目根目录，用于文档浏览
 
 
-def set_dependencies(agent_loop, state_manager, create_llm_client_fn=None, project_path: str = "."):
-    global _agent_loop, _state_manager, _create_llm_client, _project_path
+def set_dependencies(agent_loop, state_manager, create_llm_client_fn=None, project_path: str = ".", react_agent=None):
+    global _agent_loop, _react_agent, _state_manager, _create_llm_client, _project_path
     _agent_loop = agent_loop
+    _react_agent = react_agent
     _state_manager = state_manager
     _create_llm_client = create_llm_client_fn
     _project_path = project_path
@@ -56,12 +58,15 @@ def set_dependencies(agent_loop, state_manager, create_llm_client_fn=None, proje
 
 @router.post("/tasks", response_model=CreateTaskResponse)
 async def create_task(req: CreateTaskRequest):
-    """创建新的开发任务"""
+    """创建新的开发任务（使用 ReactAgent）"""
     task_id = str(uuid.uuid4())[:8]
     project_path = req.project_path
     if project_path == ".":
         project_path = _project_path
-    await _agent_loop.start_task(
+
+    # 优先使用 ReactAgent，回退到旧 AgentLoop
+    agent = _react_agent or _agent_loop
+    await agent.start_task(
         task_id=task_id,
         description=req.description,
         project_path=project_path,
@@ -69,7 +74,7 @@ async def create_task(req: CreateTaskRequest):
     return CreateTaskResponse(
         task_id=task_id,
         status=TaskStatus.PENDING,
-        message=f"Task created, Agent Loop started",
+        message=f"Task created, ReactAgent started",
     )
 
 
@@ -128,7 +133,7 @@ async def product_summary():
     tasks_context = "\n".join(task_lines)
 
     # 调用 LLM 生成需求总结
-    llm = _agent_loop.planner._llm
+    llm = (_react_agent.llm if _react_agent else None) or _agent_loop.planner._llm
     messages = [
         {
             "role": "system",
@@ -353,13 +358,53 @@ async def submit_discussion_input(task_id: str, req: DiscussionInputRequest):
 
 
 # ============================================================
+# 轻量闲聊 API（不创建 task）
+# ============================================================
+
+
+@router.post("/chat")
+async def quick_chat(req: dict = Body(...)):
+    """
+    轻量问答：直接调 LLM 返回回答，不创建 task、不走规划流水线。
+    Body: {"message": "你好"}
+    """
+    message = req.get("message", "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message 不能为空")
+
+    llm = (_react_agent.llm if _react_agent else None) or (_agent_loop.planner._llm if _agent_loop else None)
+    if not llm:
+        raise HTTPException(status_code=503, detail="LLM 未初始化")
+
+    model_name = getattr(llm, "model", "unknown")
+    system_prompt = (
+        "你是 kedo —— 一个由大语言模型驱动的自动化开发助手。"
+        "你不是 Qwen、ChatGPT 或其他模型的人格，你就是 kedo。"
+        "用户此刻是在与你闲聊或询问元信息（身份、能力、模型等），不是在提开发需求。"
+        "请直接、简洁地中文回答，不要生成计划或代码。"
+        f"当前底层模型: {model_name}。"
+    )
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": message},
+    ]
+
+    try:
+        answer = await llm.chat(messages)
+    except Exception as e:
+        answer = f"（LLM 调用失败: {e}）"
+
+    return {"answer": answer, "model": model_name}
+
+
+# ============================================================
 # LLM 提供商切换 API
 # ============================================================
 
 @router.get("/llm/status")
 async def get_llm_status():
     """获取当前 LLM 提供商信息"""
-    llm = _agent_loop.planner._llm if _agent_loop else None
+    llm = (_react_agent.llm if _react_agent else None) or (_agent_loop.planner._llm if _agent_loop else None)
     provider = "unknown"
     model = "unknown"
     if llm:
@@ -521,6 +566,9 @@ async def switch_llm(req: dict = Body(...)):
 
     try:
         new_client = _create_llm_client(switch_config)
+        # 热替换 ReactAgent
+        if _react_agent:
+            _react_agent.llm = new_client
         # 热替换: planner 和 evaluator 内部的 _llm
         _agent_loop.planner._llm = new_client
         _agent_loop.evaluator._llm = new_client

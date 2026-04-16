@@ -71,13 +71,12 @@ def load_config(config_path: str = None) -> dict:
 
     config = {}
 
-    # 尝试多个位置
+    # 1) 加载项目配置（第一个找到的）
     paths_to_try = [
         config_path,
         "kedo.yaml",
         "kedo.yml",
         ".kedo.yaml",
-        os.path.expanduser("~/.config/kedo/config.yaml"),
         os.path.join(project_root, "config.yaml"),
     ]
 
@@ -86,6 +85,16 @@ def load_config(config_path: str = None) -> dict:
             with open(p, encoding="utf-8") as f:
                 config = yaml.safe_load(f) or {}
             break
+
+    # 2) 合并用户配置（~/.config/kedo/config.yaml），API key 等敏感字段优先从这里读取
+    user_cfg_path = os.path.expanduser("~/.config/kedo/config.yaml")
+    if Path(user_cfg_path).exists():
+        with open(user_cfg_path, encoding="utf-8") as f:
+            user_cfg = yaml.safe_load(f) or {}
+        # 用户配置中有值的字段覆盖项目配置中的空值
+        for k, v in user_cfg.items():
+            if v and (not config.get(k)):
+                config[k] = v
 
     # 环境变量覆盖
     env_map = {

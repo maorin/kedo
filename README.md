@@ -1,19 +1,19 @@
 # kedo — AI 全流程自动化开发工具
 
-从需求到部署的全流程自动化开发工具。输入自然语言需求，kedo 自动完成需求分析、架构设计、代码生成、构建、测试、评估，直到部署上线。支持智能续接、增量开发、自动闭环修复、平台感知代码生成。
+从需求到部署的全流程自动化开发工具。输入自然语言需求，kedo 自动完成需求分析、架构设计、代码生成、构建、测试、评估，直到部署上线。
 
 ## 核心特性
 
-- **全流程自动化**：需求 → 设计 → 代码生成 → 构建 → 测试 → 评估 → 部署
+- **ReAct Agent 架构**：LLM 驱动的 Think→Act→Observe 循环，自主决策每一步做什么。简单问题直接回答，复杂任务自动规划→编码→编译→测试
+- **Function Calling + 文本 ReAct 双模式**：原生支持 OpenAI/Anthropic function calling；对不支持 function calling 的端点（如 Kimi Code）自动切换到文本 ReAct 模式
+- **工具驱动**：Agent 通过工具操作项目——读写文件、执行 Shell、编译构建、搜索代码、Git 操作，所有动作可追踪
 - **智能续接**：输入"继续"自动识别上次进度，扫描项目现状，只补缺失功能
-- **闭环修复**：评估不通过时自动分析原因 → 生成修复方案 → 重新规划执行（最多 5 轮）
-- **LLM 驱动自动修复**：编译/测试失败时 AI 分析 stderr 并修复代码，支持结构化错误解析、增量修复、历次失败回溯、重复错误早停
-- **Bug Fix 快速通道**：用户报告运行时 bug（"会退出"、"应该是"等）自动跳过 planner 五步流程，直接读源码 → LLM 诊断 → 应用 patch → BUILD 验证
-- **平台感知代码生成**：自动扫描目标平台库/头文件，注入平台知识和 CMakeLists 模板，消除 LLM 库名幻觉
-- **项目 Profile 系统**：LLM 自动生成项目构建档案（build/test/deploy 命令），支持跨 session 缓存、失败历史跟踪、自动重生成、变更白名单保护
-- **多维度评估**：需求匹配 / 代码质量 / 测试覆盖 / 安全性四维度加权评分，交叉编译项目自动跳过测试维度
-- **产品需求智能总结**：从所有任务对话用 LLM 提炼当前产品需求，生成可复用的提示词
-- **Web Dashboard**：工作台 + 文件浏览 + 代码预览 + 部署引导 + 讨论面板
+- **LLM 驱动自动修复**：编译/测试失败时 AI 分析 stderr 并修复代码，支持多轮重试和错误恢复
+- **平台感知代码生成**：自动扫描目标平台库/头文件，注入平台知识和 CMakeLists 模板
+- **项目 Profile 系统**：LLM 自动生成项目构建档案（build/test/deploy 命令），支持跨 session 缓存、失败历史跟踪
+- **多 LLM 支持**：Kimi K2.5（推荐）、Claude、OpenAI、Ollama，运行时 `/login` 热切换
+- **API Key 安全**：密钥存储在 `~/.config/kedo/config.yaml`（权限 0600），不进入项目代码
+- **Web Dashboard**：工作台 + 文件浏览 + 代码预览 + 部署引导 + 实时事件流
 
 ## 实战验证
 
@@ -116,6 +116,39 @@ kedo 扫描项目现状 → 加载历史评估 → 生成增量计划 → 只做
 - **打包**：构建产物 + 候选版本
 - **部署**：部署环境检测 + 分步准备指南
 - **测试**：测试结果 + 覆盖率
+
+## 架构：ReactAgent
+
+kedo 的核心是 **ReactAgent** — 一个 LLM 驱动的 ReAct（Reasoning + Acting）循环：
+
+```
+用户输入 → Agent 思考(LLM) → 选择工具 → 执行 → 观察结果 → 再思考 → ... → 回复用户
+```
+
+### Agent 可用工具
+
+| 工具 | 说明 |
+|------|------|
+| `file_read` | 读取项目文件 |
+| `file_write` | 创建/修改文件 |
+| `file_search` | 搜索文件 |
+| `shell_execute` | 执行 Shell 命令 |
+| `build` | 编译项目（自动探测构建系统） |
+| `code_generate` | LLM 驱动的代码生成 |
+| `test_run` | 运行测试 |
+| `git` | Git 操作 |
+| `respond` | 向用户发送最终回复 |
+
+### 双模式 LLM 调用
+
+- **Native Function Calling**：OpenAI / Claude 等支持 `tools` 参数的 API
+- **文本 ReAct Fallback**：不支持 function calling 的端点（如 Kimi Code 403），自动在 prompt 中注入工具描述，LLM 用 ` ```tool_call` ` 块输出调用，Agent 解析执行
+
+### 配置分层
+
+优先级：环境变量 > 用户配置 (`~/.config/kedo/config.yaml`) > 项目配置 (`config.yaml`)
+
+API Key 通过 `/login` 命令设置，存储在用户目录（权限 0600），不进入项目代码。
 
 ## 项目 Profile 系统
 

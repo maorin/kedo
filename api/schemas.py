@@ -91,6 +91,24 @@ class EventType(str, Enum):
 
 
 # ============================================================
+# LLM Function Calling 数据类
+# ============================================================
+
+
+class ToolCallData(BaseModel):
+    """LLM 返回的工具调用"""
+    id: str
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class LLMResponse(BaseModel):
+    """LLM 带工具调用的响应"""
+    content: Optional[str] = None
+    tool_calls: list[ToolCallData] = Field(default_factory=list)
+
+
+# ============================================================
 # 核心模型
 # ============================================================
 
@@ -278,7 +296,7 @@ class AgentCheckpoint(BaseModel):
     """Agent 状态检查点 — 用于暂停/恢复"""
     task_id: str
     current_step_index: int
-    plan: TaskPlan
+    plan: Optional[TaskPlan] = None
     memory_snapshot: dict[str, Any] = Field(default_factory=dict)
     code_changes: list[CodeChange] = Field(default_factory=list)
     test_results: Optional[TestResult] = None

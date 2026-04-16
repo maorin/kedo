@@ -2958,6 +2958,8 @@ class AgentLoop:
         "你是谁", "你是什么", "你叫", "你用", "你现在", "你能",
         "什么模型", "哪个模型", "模型版本", "model version",
         "who are you", "what model", "which model",
+        "你好", "hello", "hi ", "hey ", "嗨", "哈喽",
+        "谢谢", "thanks", "thank you",
     ]
     # 问答通道的 "开发动词" 黑名单：命中任何一个就不能走 Q&A
     _CODE_VERBS = [
@@ -3003,6 +3005,7 @@ class AgentLoop:
 
         system_prompt = (
             "你是 kedo —— 一个由大语言模型驱动的自动化开发助手。"
+            "你不是 Qwen、ChatGPT 或其他模型的人格，你就是 kedo。"
             "用户此刻是在与你闲聊或询问元信息（身份、能力、模型等），不是在提开发需求。"
             "请直接、简洁地中文回答，不要生成计划或代码。"
             f"当前底层模型: {self._get_model_name()}。"

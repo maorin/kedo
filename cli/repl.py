@@ -251,27 +251,35 @@ class KedoREPL:
             phase = data.get("phase", "")
             prompt = data.get("prompt_summary", "")
             model = data.get("model", "")
+            turn = data.get("turn", "")
             phase_label = {
                 "planning": "📋 规划",
                 "code_generate": "💻 代码生成",
                 "evaluate": "📊 质量评估",
+                "agent": "🤖 Agent",
             }.get(phase, phase)
-            self._print_event(f"{BRAND}⬆ LLM 请求{C.RESET} [{phase_label}]  {MUTED}model={model}{C.RESET}")
+            turn_hint = f" Turn {turn}" if turn else ""
+            self._print_event(f"{BRAND}⬆ LLM 请求{C.RESET} [{phase_label}{turn_hint}]  {MUTED}model={model}{C.RESET}")
             if prompt:
                 self._print_event(f"  {MUTED}prompt: {prompt}{C.RESET}")
 
         elif etype == "llm_response":
             phase = data.get("phase", "")
             summary = data.get("summary", "")
+            turn = data.get("turn", "")
+            tool_count = data.get("tool_count", 0)
             phase_label = {
                 "planning": "📋 规划",
                 "code_generate": "💻 代码生成",
                 "evaluate": "📊 质量评估",
                 "auto_fix": "🔧 自动修复",
+                "agent": "🤖 Agent",
+                "respond": "💬 回复",
             }.get(phase, phase)
-            self._print_event(f"{ACCENT}⬇ LLM 响应{C.RESET} [{phase_label}]")
+            turn_hint = f" Turn {turn}" if turn else ""
+            tools_hint = f" ({tool_count} tools)" if tool_count else ""
+            self._print_event(f"{ACCENT}⬇ LLM 响应{C.RESET} [{phase_label}{turn_hint}{tools_hint}]")
             if summary:
-                # 多行响应缩进展示
                 for line in summary.split("\n")[:5]:
                     self._print_event(f"  {MUTED}{line}{C.RESET}")
 
@@ -287,25 +295,32 @@ class KedoREPL:
                     self._streaming_newline = True
 
         elif etype == "tool_execute":
-            step = data.get("step", "")
-            tool_type = data.get("tool_type", "")
-            desc = data.get("description", "")
+            # 兼容旧格式(step, tool_type, description) 和新格式(tool, args_summary)
+            tool_name = data.get("tool") or data.get("step", "")
+            tool_type = data.get("tool_type", tool_name)
+            desc = data.get("args_summary") or data.get("description", "")
             attempt = data.get("attempt", 1)
             mx = data.get("max_retries", 1)
             retry_hint = f" (尝试 {attempt}/{mx})" if mx > 1 and attempt > 1 else ""
             # ★ 更新状态栏 step
-            if step:
-                self._sb["step"] = step
+            if tool_name:
+                self._sb["step"] = tool_name
             tool_icon = {
                 "code_generate": "💻",
                 "build": "🔨",
                 "test": "🧪",
                 "evaluate": "📊",
                 "deploy": "🚀",
+                "file_read": "📖",
+                "file_write": "✏️",
+                "file_search": "🔍",
+                "shell_execute": "🖥️",
+                "respond": "💬",
+                "git": "📦",
             }.get(tool_type, "⚙")
-            self._print_event(f"{INFO}{tool_icon} 执行: {step}{retry_hint}{C.RESET}")
+            self._print_event(f"{INFO}{tool_icon} 执行: {tool_name}{retry_hint}{C.RESET}")
             if desc:
-                self._print_event(f"  {MUTED}{desc[:100]}{C.RESET}")
+                self._print_event(f"  {MUTED}{desc[:120]}{C.RESET}")
 
         elif etype == "step_started":
             step = data.get("step", "")
@@ -319,8 +334,10 @@ class KedoREPL:
 
         elif etype == "step_completed":
             step = data.get("step", "")
-            output = data.get("output", "")
-            self._print_event(f"{SUCCESS}✓ {step} 完成{C.RESET}")
+            output = data.get("output", "") or data.get("output_preview", "")
+            # 美化 "tool:file_read" → "file_read"
+            display_step = step.replace("tool:", "") if step.startswith("tool:") else step
+            self._print_event(f"{SUCCESS}✓ {display_step} 完成{C.RESET}")
             if output:
                 for line in output.split("\n")[:3]:
                     self._print_event(f"  {MUTED}{line}{C.RESET}")
@@ -328,7 +345,8 @@ class KedoREPL:
         elif etype == "step_failed":
             step = data.get("step", "")
             error = data.get("error", "")
-            self._print_event(f"{ERROR}✗ {step} 失败{C.RESET}")
+            display_step = step.replace("tool:", "") if step.startswith("tool:") else step
+            self._print_event(f"{ERROR}✗ {display_step} 失败{C.RESET}")
             if error:
                 self._print_event(f"  {ERROR}{error[:150]}{C.RESET}")
 
@@ -383,7 +401,6 @@ class KedoREPL:
                 self._sb["progress"] = 100
                 self._sb["step"] = ""
                 self._print_event(f"{SUCCESS}{C.BOLD}✓ 任务完成！{C.RESET}")
-                self._print_flow()
             elif new_status == "failed":
                 self._print_event(f"{ERROR}✗ 任务失败{C.RESET}")
             elif old_status and new_status:
@@ -480,6 +497,10 @@ class KedoREPL:
                     if matched_task:
                         self._prompt_and_resume(matched_task, user_input)
                         continue
+                # 闲聊检测 → 轻量问答（不创建 task、不显示流程图）
+                if self._is_chat_query(user_input):
+                    self._quick_chat(user_input)
+                    continue
                 # 自然语言输入 → 创建开发任务
                 self._create_task(user_input)
 
@@ -1060,6 +1081,53 @@ class KedoREPL:
             ctx = ""
 
         self._resume_from_checkpoint(selected["task_id"], ctx)
+
+    # ─── 闲聊快速通道（不创建 task）─────────────────────────
+
+    # 复用 agent_loop 的闲聊检测关键词
+    _CHAT_KEYWORDS = [
+        "你是谁", "你是什么", "你叫", "你用", "你现在", "你能",
+        "什么模型", "哪个模型", "模型版本", "model version",
+        "who are you", "what model", "which model",
+        "你好", "hello", "hi ", "hey ", "嗨", "哈喽",
+        "谢谢", "thanks", "thank you",
+    ]
+    _CODE_VERBS = [
+        "实现", "添加", "增加", "改造", "重构", "优化代码", "接入", "生成",
+        "写一个", "写个", "写段", "封装", "开发", "构建", "编译", "部署",
+        "implement", "add ", "refactor", "build ", "compile", "deploy",
+        "integrate", "create a", "write a", "write the",
+    ]
+    _BUG_KEYWORDS = [
+        "应该是", "不应该", "会退出", "有问题", "有bug", "bug", "fix",
+        "修复", "修一下", "修改", "不对", "不正确", "出错", "报错",
+    ]
+
+    def _is_chat_query(self, description: str) -> bool:
+        """判断是否是纯闲聊/问答（不需要走规划→执行→评估流水线）"""
+        desc = description.strip()
+        low = desc.lower()
+        if any(v in low for v in self._CODE_VERBS):
+            return False
+        if any(kw in low for kw in self._BUG_KEYWORDS):
+            return False
+        if any(kw in low for kw in self._CHAT_KEYWORDS):
+            return True
+        if len(desc) <= 30 and (desc.endswith("?") or desc.endswith("？")):
+            return True
+        return False
+
+    def _quick_chat(self, message: str):
+        """轻量闲聊：调 /api/chat，直接打印回复，不创建 task"""
+        self._safe_print(f"  {MUTED}思考中...{C.RESET}")
+        data = self._api_post("/chat", {"message": message})
+        if data and "answer" in data:
+            # 清除"思考中..."那一行，打印回复
+            answer = data["answer"]
+            self._safe_print(f"  {ACCENT}{answer}{C.RESET}")
+        else:
+            error = (data or {}).get("detail", "调用失败")
+            self._safe_print(f"  {ERROR}✗ {error}{C.RESET}")
 
     # ─── 任务创建 ────────────────────────────────────────────
 
