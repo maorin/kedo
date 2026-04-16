@@ -52,16 +52,16 @@ for file operations or planning.
 **For small code changes** (bug fixes, minor edits): read the relevant files, make \
 the change, build to verify, then respond with what you did.
 
-**For larger development tasks**, follow this recommended workflow:
-  1. **Understand** — Read existing code and project structure
-  2. **Design** — Think about the approach (for complex tasks, outline a plan)
-  3. **Implement** — Write/modify code files
-  4. **Build** — Compile and check for errors
-  5. **Test** — Run tests if applicable
-  6. **Verify** — Review the result quality
+**For larger development tasks** (new features, multi-file changes, full projects):
+  1. Call `plan_development` to break the requirement into subtasks
+  2. For each subtask, use `code_generate` to write code, or `file_write` for config files
+  3. Call `build` to compile and check for errors
+  4. If build fails, read the error, fix the code, build again
+  5. Use `respond` to report what was done
 
-You decide which steps to follow based on the task complexity. Skip steps that \
-aren't needed.
+**For "compile" / "build" / "打包" requests**: just call the `build` tool directly.
+
+You decide which approach based on complexity. Simple → direct tools. Complex → plan first.
 
 ## Important Rules
 
@@ -106,6 +106,8 @@ class ReactAgent:
 
         # function calling 是否可用（首次调用时探测）
         self._function_calling_available: Optional[bool] = None
+        # 当前任务 ID（供 _text_react_call 内推送事件用）
+        self._current_task_id: Optional[str] = None
 
         # 兼容旧接口: agent_loop 暴露了 planner._llm 供路由层使用
         # 这里提供一个简单的兼容属性
@@ -149,6 +151,7 @@ class ReactAgent:
         project_path: str,
     ) -> str:
         """主入口: 构建上下文 → 启动 ReAct 循环"""
+        self._current_task_id = task_id
         await self.state.update_status(
             task_id, TaskStatus.IN_PROGRESS, current_step="Thinking"
         )
@@ -216,13 +219,6 @@ class ReactAgent:
             # 调用 LLM
             response = await self._call_llm(task_id, messages, tool_schemas, turn)
 
-            # 推送 LLM 思考内容（让 REPL/Dashboard 显示）
-            if response.content:
-                # 逐行推送，模拟流式效果
-                for line in response.content.split("\n"):
-                    if line.strip():
-                        await self._emit(task_id, EventType.LLM_TOKEN, token=line + "\n", phase="agent")
-
             # Case 1: 无工具调用 → LLM 直接回复 → 完成
             if not response.tool_calls:
                 return response.content or "(empty response)"
@@ -255,14 +251,6 @@ class ReactAgent:
                     "tool_call_id": tc.id,
                     "content": truncated_output,
                 })
-
-                # 推送工具结果摘要到前端
-                output_preview = tool_output[:300]
-                await self._emit(
-                    task_id, EventType.LLM_TOKEN,
-                    token=f"[{tc.name} → {'OK' if result.success else 'FAIL'}] {output_preview}\n",
-                    phase="tool_result",
-                )
 
                 # 错误计数
                 if result.success:
@@ -429,11 +417,20 @@ IMPORTANT: You MUST output ```tool_call``` blocks to act. Do NOT just describe w
             else:
                 converted.append(m)
 
-        # 带重试的 LLM 调用（网络偶发错误）
+        # 带重试的 LLM 调用 — 优先流式（可以逐 token 推送事件）
         last_error = None
         for attempt in range(3):
             try:
-                text = await self.llm.chat(converted)
+                if hasattr(self.llm, 'stream_chat'):
+                    chunks = []
+                    async for token in self.llm.stream_chat(converted):
+                        chunks.append(token)
+                        # 逐 token 推送到前端（需要 task_id，从闭包外传入）
+                        if self._current_task_id:
+                            await self._emit(self._current_task_id, EventType.LLM_TOKEN, token=token, phase="agent")
+                    text = "".join(chunks)
+                else:
+                    text = await self.llm.chat(converted)
                 break
             except Exception as e:
                 last_error = e
@@ -470,6 +467,9 @@ IMPORTANT: You MUST output ```tool_call``` blocks to act. Do NOT just describe w
                 data = json.loads(match.strip())
                 name = data.get("name", "")
                 arguments = data.get("arguments", {})
+                if not arguments:
+                    # LLM 有时不嵌套 arguments，直接把参数放顶层
+                    arguments = {k: v for k, v in data.items() if k != "name"}
                 if isinstance(arguments, str):
                     arguments = json.loads(arguments)
                 tool_calls.append(ToolCallData(
@@ -556,6 +556,9 @@ IMPORTANT: You MUST output ```tool_call``` blocks to act. Do NOT just describe w
 
         # 格式化项目上下文
         ctx_parts = []
+        if project_context.get("project_path"):
+            ctx_parts.append(f"**Project root path: `{project_context['project_path']}`**")
+            ctx_parts.append(f"All file operations MUST use this path as the base directory.")
         if project_context.get("file_count"):
             ctx_parts.append(f"Project has {project_context['file_count']} files.")
         if project_context.get("file_tree"):
@@ -574,7 +577,7 @@ IMPORTANT: You MUST output ```tool_call``` blocks to act. Do NOT just describe w
 
     async def _gather_project_context(self, project_path: str) -> dict:
         """收集项目基本信息"""
-        ctx: dict[str, Any] = {}
+        ctx: dict[str, Any] = {"project_path": os.path.abspath(project_path)}
         p = Path(project_path)
 
         if not p.exists():

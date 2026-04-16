@@ -1030,6 +1030,14 @@
                         <div class="status-indicator" id="connectionStatus"></div>
                         <span id="connectionText">Connecting...</span>
                     </div>
+                    <div class="status-item" title="当前 LLM 提供商">
+                        <span style="color:#888;">LLM:</span>
+                        <strong id="llmProviderText" style="color:#00d9ff;">-</strong>
+                    </div>
+                    <div class="status-item" title="项目路径">
+                        <span style="color:#888;">Project:</span>
+                        <strong id="projectPathText" style="color:#c9d1d9;font-family:monospace;font-size:0.8rem;">-</strong>
+                    </div>
                     <div class="status-item">
                         <span>Tasks: <strong id="taskCount">0</strong></span>
                     </div>
@@ -4697,8 +4705,27 @@
             renderDiscussion();
             connectWebSocket();
             getTasks();
+            fetchLLMStatus();
             dom.footerStatus.textContent = '待机';
             addLog('系统启动', 'Kedo 仪表板已启动', 'success');
+        }
+
+        async function fetchLLMStatus() {
+            try {
+                const resp = await fetch('/api/llm/status');
+                const data = await resp.json();
+                const el = document.getElementById('llmProviderText');
+                const pathEl = document.getElementById('projectPathText');
+                if (el && data.provider) {
+                    el.textContent = data.provider + '/' + (data.model || '');
+                }
+                if (pathEl && data.project_path) {
+                    // 只显示最后两级目录
+                    const parts = data.project_path.replace(/\/+$/, '').split('/');
+                    pathEl.textContent = parts.slice(-2).join('/');
+                    pathEl.title = data.project_path;
+                }
+            } catch(e) { /* ignore */ }
         }
 
         init();

@@ -22,6 +22,7 @@ from core.state_manager import StateManager
 from tools.base import ToolRegistry
 from tools.build_tool import BuildTool
 from tools.code_generator import CodeGeneratorTool
+from tools.plan_tool import PlanTool
 from tools.file_tool import FileReadTool, FileSearchTool, FileWriteTool
 from tools.git_tool import GitTool
 from tools.respond_tool import RespondTool
@@ -91,6 +92,9 @@ def create_app(config: dict = None) -> FastAPI:
     # Planner & Evaluator
     planner = Planner(llm_client, memory, config=config)
     evaluator = Evaluator(llm_client, memory, config=config)
+
+    # PlanTool 依赖 planner，必须在 planner 创建后注册
+    tool_registry.register(PlanTool(planner=planner, memory=memory))
 
     # Version Manager (候选版本管理)
     from core.version_manager import VersionManager

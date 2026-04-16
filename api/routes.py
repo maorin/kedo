@@ -422,7 +422,7 @@ async def get_llm_status():
             if "api.kimi.com" in llm.base_url:
                 provider = "kimi-code"
         model = getattr(llm, "model", "unknown")
-    return {"provider": provider, "model": model}
+    return {"provider": provider, "model": model, "project_path": _project_path}
 
 
 def _persist_llm_config(switch_config: dict) -> tuple[bool, str]:
