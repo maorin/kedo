@@ -9,5 +9,6 @@
 | 问题 | 文档 |
 |---|---|
 | kedo 如何解决"上下文焦虑"？长会话/大项目里怎么不撑爆 context window？ | [context-management.md](context-management.md) |
+| kedo 如何解决"自评失真"？LLM 既当 executor 又当 judge，怎么防 confirmation bias？ | [self-evaluation.md](self-evaluation.md) |
 
 > 欢迎增补。新问题模板：**问题本身 → 实际做了什么（对着代码引用）→ 诚实的 gap → 为何现状还 work → 下一步候选**。
