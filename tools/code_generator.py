@@ -14,10 +14,11 @@ logger = logging.getLogger(__name__)
 class CodeGeneratorTool(BaseTool):
     """LLM 驱动的代码生成和修改工具"""
 
-    def __init__(self, llm_client, config: dict = None, on_token=None):
+    def __init__(self, llm_client, config: dict = None, on_token=None, profile_guard=None):
         self._llm = llm_client
         self._config = config or {}
         self._on_token = on_token  # async callback(token: str) for streaming progress
+        self._guard = profile_guard
 
     @property
     def name(self) -> str:
@@ -98,6 +99,12 @@ class CodeGeneratorTool(BaseTool):
                 target = (Path.cwd() / target).resolve()
             else:
                 target = target.resolve()
+            # ProfileGuard：拦 human_verified profile 覆盖 + 拦 Makefile/CMake 关键 target 丢失
+            if self._guard:
+                violation = self._guard.check(str(target), generated_code)
+                if violation:
+                    logger.warning(f"CodeGeneratorTool blocked: {violation[:120]}")
+                    return ToolResult(success=False, error=violation)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(generated_code, encoding="utf-8")
 

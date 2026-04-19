@@ -103,11 +103,16 @@ class ReactAgent:
         self.max_turns: int = self.config.get("max_agent_turns", 50)
         self.max_consecutive_errors: int = 3
         self.max_tool_output_chars: int = 4000
+        # 收敛检测：同 (tool_name, error_fingerprint) 在最近 K 次失败中重复 N 次 → escalate
+        self.convergence_window: int = self.config.get("convergence_window", 4)
+        self.convergence_threshold: int = self.config.get("convergence_threshold", 3)
 
         # function calling 是否可用（首次调用时探测）
         self._function_calling_available: Optional[bool] = None
         # 当前任务 ID（供 _text_react_call 内推送事件用）
         self._current_task_id: Optional[str] = None
+        # 收敛检测历史：每条工具失败追加 (tool_name, error_fingerprint)
+        self._failure_fingerprints: list[tuple[str, str]] = []
 
         # 兼容旧接口: agent_loop 暴露了 planner._llm 供路由层使用
         # 这里提供一个简单的兼容属性
@@ -152,6 +157,8 @@ class ReactAgent:
     ) -> str:
         """主入口: 构建上下文 → 启动 ReAct 循环"""
         self._current_task_id = task_id
+        # 重置收敛检测历史（每个新 task 都从空开始）
+        self._failure_fingerprints = []
         await self.state.update_status(
             task_id, TaskStatus.IN_PROGRESS, current_step="Thinking"
         )
@@ -160,6 +167,11 @@ class ReactAgent:
         # 构建 system prompt
         project_context = await self._gather_project_context(project_path)
         system_prompt = self._build_system_prompt(project_context)
+
+        # 任务链上下文继承：检测同项目最近 failed/paused 的 task，注入摘要
+        prior_context = await self._gather_prior_task_context(task_id, project_path)
+        if prior_context:
+            system_prompt = system_prompt + "\n\n" + prior_context
 
         # 初始消息
         messages = [
@@ -300,17 +312,44 @@ class ReactAgent:
                     "content": truncated_output,
                 })
 
-                # 错误计数
+                # 错误计数 + 收敛检测指纹
                 if result.success:
                     consecutive_errors = 0
                 else:
                     consecutive_errors += 1
+                    fp = self._error_fingerprint(result.error or "")
+                    self._failure_fingerprints.append((tc.name, fp))
+                    # 只保留最近 N 条避免无限增长
+                    if len(self._failure_fingerprints) > self.convergence_window * 2:
+                        self._failure_fingerprints = self._failure_fingerprints[-self.convergence_window * 2:]
 
             # 连续错误上限
             if consecutive_errors >= self.max_consecutive_errors:
                 error_msg = f"Stopping: {consecutive_errors} consecutive tool failures."
                 await self._emit(task_id, EventType.STEP_FAILED, error=error_msg)
                 return error_msg
+
+            # 收敛检测：同 (tool, similar_fp) 在最近窗口里重复 N 次 → 自动 escalate 给人工
+            if self._convergence_detected():
+                stuck_tool, stuck_fp = self._failure_fingerprints[-1]
+                msg = (
+                    f"Convergence detected: {stuck_tool} 连续失败且错误指纹相似 "
+                    f"({self.convergence_threshold} 次以上)，疑似进入死循环。"
+                )
+                logger.warning(msg)
+                await self._emit(
+                    task_id, EventType.STEP_FAILED,
+                    step="agent_loop",
+                    error=msg,
+                    escalation="paused_for_human",
+                    suggestion=(
+                        f"Agent 反复尝试 {stuck_tool} 没解决同一个错误。建议：检查最后一次错误信息，"
+                        f"提供新的修复方向（换库 / 改架构 / 简化需求），然后 resume 任务。"
+                    ),
+                )
+                await self.state.pause_task(task_id)
+                # 用 "Stopping:" 前缀让 run() 标 failed
+                return f"Stopping: convergence detected on {stuck_tool} ({self.convergence_threshold}+ similar failures)"
 
             # 定期 checkpoint
             if turn > 0 and turn % 5 == 0:
@@ -706,6 +745,58 @@ IMPORTANT: You MUST output properly closed ```tool_call``` blocks to act. Do NOT
             project_context=context_str,
         )
 
+    async def _gather_prior_task_context(self, current_task_id: str, project_path: str) -> str:
+        """
+        看同项目最近的 failed/paused task，把它的 plan 摘要 + 最后 error fingerprint
+        + 已尝试修法注入新 task system prompt，避免 LLM 从零探索同一片雷区。
+
+        返回空串表示没相关历史可继承。
+        """
+        try:
+            tasks = self.state.list_tasks() or []
+        except Exception:
+            return ""
+
+        # 同项目过滤：暂时按 description 同根目录或 status 不为 completed 都纳入候选
+        # 实际项目隔离需要 state 层支持 project_path 字段（M2 阶段加），现在按时间倒序拿最近 3 个
+        prior_failed = []
+        for t in tasks:
+            tid = t.get("task_id")
+            if not tid or tid == current_task_id:
+                continue
+            status = t.get("status", "")
+            if status in ("failed", "paused"):
+                prior_failed.append(t)
+
+        if not prior_failed:
+            return ""
+
+        # 取时间最近的一条（list_tasks 顺序未保证，按 created_at 排）
+        prior_failed.sort(key=lambda t: t.get("created_at", ""), reverse=True)
+        recent = prior_failed[0]
+        recent_id = recent.get("task_id", "")
+        recent_step = recent.get("current_step", "")
+        recent_desc = (recent.get("description", "") or "")[:300]
+
+        # 尝试拉它的 checkpoint 看 plan + 失败信息
+        plan_summary = ""
+        try:
+            cp = await self.state.load_checkpoint(recent_id)
+            if cp and cp.plan and cp.plan.subtasks:
+                titles = [s.title for s in cp.plan.subtasks[:8]]
+                plan_summary = "尝试过的步骤: " + " → ".join(titles)
+        except Exception as e:
+            logger.debug(f"prior task checkpoint load failed: {e}")
+
+        return (
+            f"## 任务链上下文（同项目最近的失败任务）\n\n"
+            f"上一个 task `{recent_id}` ({recent.get('status')}): {recent_desc}\n"
+            f"- 卡在: {recent_step[:120]}\n"
+            f"- {plan_summary}\n\n"
+            f"**注意**：避免重复上次已经证伪的修法。若错误信息一致，先用 `pause_for_human` "
+            f"询问用户思路，而不是反复尝试同一类修复。"
+        )
+
     async def _gather_project_context(self, project_path: str) -> dict:
         """收集项目基本信息"""
         ctx: dict[str, Any] = {"project_path": os.path.abspath(project_path)}
@@ -820,6 +911,41 @@ IMPORTANT: You MUST output properly closed ```tool_call``` blocks to act. Do NOT
                 for tc in response.tool_calls
             ]
         return msg
+
+    @staticmethod
+    def _error_fingerprint(error: str) -> str:
+        """归一化 error 文本成指纹，用于收敛检测（去行号/绝对路径/地址/空白）。"""
+        if not error:
+            return ""
+        import re as _re
+        s = error
+        s = _re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", s)        # ANSI
+        s = _re.sub(r":\d+:\d+", ":N:N", s)                  # file:line:col
+        s = _re.sub(r":\d+:", ":N:", s)
+        s = _re.sub(r"line \d+", "line N", s)
+        s = _re.sub(r"0x[0-9a-fA-F]+", "0xADDR", s)
+        s = _re.sub(r"/tmp/[A-Za-z0-9_./-]+", "/tmp/X", s)
+        s = _re.sub(r"\s+", " ", s).strip()
+        if len(s) > 1500:
+            s = s[:750] + " ... " + s[-750:]
+        return s
+
+    def _convergence_detected(self) -> bool:
+        """最近 convergence_window 条失败里，convergence_threshold 条以上是同 tool + 相似指纹"""
+        window = self._failure_fingerprints[-self.convergence_window:]
+        if len(window) < self.convergence_threshold:
+            return False
+        last_tool, last_fp = window[-1]
+        if not last_fp:
+            return False
+        from difflib import SequenceMatcher
+        similar = 0
+        for tool, fp in window:
+            if tool != last_tool or not fp:
+                continue
+            if fp == last_fp or SequenceMatcher(None, fp, last_fp).ratio() >= 0.85:
+                similar += 1
+        return similar >= self.convergence_threshold
 
     @staticmethod
     def _truncate(text: str, max_chars: int) -> str:

@@ -49,6 +49,9 @@ class FileReadTool(BaseTool):
 
 
 class FileWriteTool(BaseTool):
+    def __init__(self, profile_guard=None):
+        self._guard = profile_guard
+
     @property
     def name(self) -> str:
         return "file_write"
@@ -75,6 +78,13 @@ class FileWriteTool(BaseTool):
                 # 相对路径：确保在 cwd 下
                 resolved = (cwd / p).resolve()
             p = resolved
+
+            # ProfileGuard：拦 human_verified profile 覆盖 + 拦 Makefile/CMake 关键 target 丢失
+            if self._guard:
+                violation = self._guard.check(str(p), content)
+                if violation:
+                    logger.warning(f"FileWriteTool blocked: {violation[:120]}")
+                    return ToolResult(success=False, error=violation)
 
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")

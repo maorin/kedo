@@ -66,6 +66,7 @@ class AgentLoop:
         memory: AgentMemory,
         version_manager: VersionManager = None,
         config: dict[str, Any] = None,
+        profile_manager: ProjectProfileManager = None,
     ):
         self.state = state_manager
         self.planner = planner
@@ -74,7 +75,8 @@ class AgentLoop:
         self.memory = memory
         self.versions = version_manager or VersionManager()
         self.config = config or {}
-        self.profile_manager = ProjectProfileManager()
+        # 共享 profile_manager（server.py 注入），避免 ReactAgent 工具和 AgentLoop 两套内存缓存
+        self.profile_manager = profile_manager or ProjectProfileManager()
 
         # 运行时状态
         self._running_tasks: dict[str, asyncio.Task] = {}

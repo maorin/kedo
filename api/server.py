@@ -23,6 +23,8 @@ from tools.base import ToolRegistry
 from tools.build_tool import BuildTool
 from tools.code_generator import CodeGeneratorTool
 from tools.plan_tool import PlanTool
+from tools.pause_tool import PauseForHumanTool
+from tools.auto_fix_tool import AutoFixTool
 from tools.file_tool import FileReadTool, FileSearchTool, FileWriteTool
 from tools.git_tool import GitTool
 from tools.respond_tool import RespondTool
@@ -73,21 +75,30 @@ def create_app(config: dict = None) -> FastAPI:
         max_context_chars=config.get("max_context_chars", 120_000)
     )
 
+    # ProjectProfile manager + 写拦截 guard（共享给 BuildTool / FileWriteTool / CodeGeneratorTool / AgentLoop）
+    from core.project_profile import ProjectProfileManager
+    from tools.profile_guard import ProfileGuard
+    profile_manager = ProjectProfileManager()
+    profile_guard = ProfileGuard(
+        profile_manager=profile_manager,
+        project_path=config.get("project_path", "."),
+    )
+
     # 工具注册
     shell = ShellExecutorTool(
         working_dir=config.get("project_path", "."),
         sandbox_mode=config.get("sandbox_mode", True),
     )
     tool_registry = ToolRegistry()
-    tool_registry.register(CodeGeneratorTool(llm_client, config=config))
+    tool_registry.register(CodeGeneratorTool(llm_client, config=config, profile_guard=profile_guard))
     tool_registry.register(shell)
     tool_registry.register(TestRunnerTool(shell))
     tool_registry.register(GitTool(shell))
     tool_registry.register(FileReadTool())
-    tool_registry.register(FileWriteTool())
+    tool_registry.register(FileWriteTool(profile_guard=profile_guard))
     tool_registry.register(FileSearchTool())
     tool_registry.register(RespondTool())
-    tool_registry.register(BuildTool())
+    tool_registry.register(BuildTool(profile_manager=profile_manager, llm_client=llm_client))
 
     # Planner & Evaluator
     planner = Planner(llm_client, memory, config=config)
@@ -95,6 +106,8 @@ def create_app(config: dict = None) -> FastAPI:
 
     # PlanTool 依赖 planner，必须在 planner 创建后注册
     tool_registry.register(PlanTool(planner=planner, memory=memory, state_manager=state_manager))
+    tool_registry.register(PauseForHumanTool(state_manager=state_manager, event_bus=state_manager.event_bus))
+    tool_registry.register(AutoFixTool(llm_client=llm_client, profile_manager=profile_manager, profile_guard=profile_guard))
 
     # Version Manager (候选版本管理)
     from core.version_manager import VersionManager
@@ -121,6 +134,7 @@ def create_app(config: dict = None) -> FastAPI:
         memory=memory,
         version_manager=version_manager,
         config=config,
+        profile_manager=profile_manager,
     )
 
     # 注册 WebSocket 事件处理
