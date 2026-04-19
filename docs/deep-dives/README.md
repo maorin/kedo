@@ -15,4 +15,10 @@
 | 5️⃣ Long-horizon Memory Loss（长任务遗忘）— 30+ turn 后早期约束/决策被稀释 | [long-horizon-memory.md](long-horizon-memory.md) |
 | 6️⃣ Hallucinated Execution（幻觉执行）— LLM 声称做了实际没发生 | [hallucinated-execution.md](hallucinated-execution.md) |
 
+## 架构演进设计
+
+| 主题 | 文档 |
+|---|---|
+| 🛠 从单 Agent 到多 Agent — kedo 架构演进设计 + 4 Phase 迁移路径 | [multi-agent-architecture.md](multi-agent-architecture.md) |
+
 > 欢迎增补。新问题模板：**问题本身 → 实际做了什么（对着代码引用）→ 诚实的 gap → 为何现状还 work → 下一步候选**。
