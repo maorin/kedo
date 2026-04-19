@@ -239,10 +239,19 @@ async def resume_from_checkpoint(task_id: str, req: ResumeCheckpointRequest = Re
         raise HTTPException(404, f"No checkpoint found for task {task_id}")
 
     try:
-        await _agent_loop.resume_from_checkpoint(
-            task_id=task_id,
-            additional_context=req.additional_context,
-        )
+        # M2: 优先走 ReactAgent.resume_from_checkpoint（基于 messages 历史还原）
+        # 旧 AgentLoop 的 smart_continuation 路径作为兼容保留：仅当 checkpoint 没有
+        # messages（pre-M2 版本写入的）才回退
+        if _react_agent and checkpoint.messages:
+            await _react_agent.resume_from_checkpoint(
+                task_id=task_id,
+                additional_context=req.additional_context,
+            )
+        else:
+            await _agent_loop.resume_from_checkpoint(
+                task_id=task_id,
+                additional_context=req.additional_context,
+            )
     except Exception as e:
         raise HTTPException(500, f"Failed to resume: {e}")
 
@@ -342,14 +351,34 @@ async def get_iterations(task_id: str):
 
 @router.post("/tasks/{task_id}/discussion/input")
 async def submit_discussion_input(task_id: str, req: DiscussionInputRequest):
-    """人工参与讨论：选择方案或追加意见"""
-    await _agent_loop.submit_discussion_input(
-        task_id=task_id,
-        action=req.action,
-        proposal_id=req.proposal_id,
-        human_input=req.human_input,
-        additional_constraints=req.additional_constraints,
-    )
+    """人工参与讨论：选择方案或追加意见。同时投递到 ReactAgent propose_alternatives queue
+    和旧 AgentLoop 的 discussion queue（M3 退役 AgentLoop 后只走前者）。"""
+    payload = {
+        "action": req.action,
+        "proposal_id": req.proposal_id,
+        "human_input": req.human_input,
+        "additional_constraints": req.additional_constraints or [],
+    }
+    # 新路径：ReactAgent propose_alternatives 工具
+    try:
+        from tools.propose_alternatives_tool import get_discussion_queue
+        await get_discussion_queue(task_id).put(payload)
+    except Exception as e:
+        # 不阻塞旧路径
+        import logging as _l
+        _l.getLogger(__name__).debug(f"propose_alternatives queue put failed: {e}")
+    # 兼容路径：旧 AgentLoop（M3 后可删）
+    if _agent_loop:
+        try:
+            await _agent_loop.submit_discussion_input(
+                task_id=task_id,
+                action=req.action,
+                proposal_id=req.proposal_id,
+                human_input=req.human_input,
+                additional_constraints=req.additional_constraints,
+            )
+        except Exception:
+            pass
     return {
         "task_id": task_id,
         "proposal_id": req.proposal_id,
@@ -566,19 +595,28 @@ async def switch_llm(req: dict = Body(...)):
 
     try:
         new_client = _create_llm_client(switch_config)
-        # 热替换 ReactAgent
+        # 热替换 ReactAgent（主路径）
         if _react_agent:
             _react_agent.llm = new_client
-        # 热替换: planner 和 evaluator 内部的 _llm
-        _agent_loop.planner._llm = new_client
-        _agent_loop.evaluator._llm = new_client
-        # 更新工具中的 code_generator 的 _llm / llm_client
-        if hasattr(_agent_loop, 'tool_registry'):
-            for tool in _agent_loop.tool_registry._tools.values():
+            # ReactAgent 兼容属性 .planner._llm
+            if hasattr(_react_agent, "_planner_compat"):
+                _react_agent._planner_compat._llm = new_client
+            # 同步替换 ReactAgent 工具注册表里所有依赖 LLM 的工具
+            for tool in _react_agent.tools._tools.values():
                 if hasattr(tool, '_llm'):
                     tool._llm = new_client
                 elif hasattr(tool, 'llm_client'):
                     tool.llm_client = new_client
+        # 兼容：AgentLoop 路径（M3 退役后整段可删）
+        if _agent_loop:
+            _agent_loop.planner._llm = new_client
+            _agent_loop.evaluator._llm = new_client
+            if hasattr(_agent_loop, 'tool_registry'):
+                for tool in _agent_loop.tool_registry._tools.values():
+                    if hasattr(tool, '_llm'):
+                        tool._llm = new_client
+                    elif hasattr(tool, 'llm_client'):
+                        tool.llm_client = new_client
 
         actual_provider = provider
         actual_model = getattr(new_client, "model", "mock")

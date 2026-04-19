@@ -137,6 +137,70 @@ class ReactAgent:
         await self.state.create_task(task_id, description, self.config)
         asyncio.create_task(self._run_safe(task_id, description, project_path))
 
+    async def resume_from_checkpoint(self, task_id: str, additional_context: str = ""):
+        """
+        从 checkpoint 恢复 ReAct 循环。
+        - 加载 checkpoint.messages 还原对话历史
+        - additional_context 作为新 user 消息追加（用户给出的指导）
+        - 异步起新 _loop 继续推进
+
+        前置：checkpoint 必须包含 messages（M2 起 _save_checkpoint 已保存）。
+        """
+        checkpoint = await self.state.load_checkpoint(task_id)
+        if not checkpoint:
+            raise ValueError(f"No checkpoint found for task {task_id}")
+        if not checkpoint.messages:
+            raise ValueError(
+                f"Checkpoint for task {task_id} has no messages history "
+                f"(was saved by old AgentLoop or pre-M2 ReactAgent). Cannot resume."
+            )
+
+        messages = list(checkpoint.messages)
+        if additional_context:
+            messages.append({
+                "role": "user",
+                "content": f"[续接补充] {additional_context}",
+            })
+
+        project_path = checkpoint.project_path or "."
+        description = checkpoint.description or ""
+
+        # 状态：unpause + 标 in_progress（防止 wait_if_paused 卡住）
+        if task_id not in self.state._pause_events:
+            self.state._pause_events[task_id] = asyncio.Event()
+        self.state._pause_events[task_id].set()
+        await self.state.update_status(
+            task_id, TaskStatus.IN_PROGRESS, current_step="Resuming"
+        )
+        await self._emit(task_id, EventType.STEP_STARTED, step="agent_loop_resume")
+
+        # 重置 ReactAgent per-task 状态
+        self._current_task_id = task_id
+        self._failure_fingerprints = []
+        self._prose_retry_done = False
+
+        # 异步起 loop
+        asyncio.create_task(self._resume_run_safe(task_id, messages, project_path, description))
+        logger.info(
+            f"ReactAgent resumed task {task_id}: {len(messages)} messages restored"
+            + (f", additional_context={additional_context[:80]}" if additional_context else "")
+        )
+
+    async def _resume_run_safe(self, task_id: str, messages: list[dict], project_path: str, description: str):
+        """resume 路径的安全包装，与 _run_safe 对称"""
+        try:
+            result = await self._loop(task_id, messages, project_path)
+            if result.startswith(("(LLM error", "Stopping:", "Reached maximum")):
+                await self.state.update_status(task_id, TaskStatus.FAILED, current_step=result[:100])
+                await self._emit(task_id, EventType.STEP_FAILED, step="agent_loop_resume", error=result[:200])
+            else:
+                await self.state.update_status(task_id, TaskStatus.COMPLETED, progress_percent=100, current_step="Completed")
+                await self._emit(task_id, EventType.STEP_COMPLETED, step="agent_loop_resume", output=result[:200] if result else "")
+        except Exception as e:
+            logger.error(f"Resume task {task_id} failed: {e}", exc_info=True)
+            await self.state.update_status(task_id, TaskStatus.FAILED, current_step=f"Resume error: {str(e)[:100]}")
+            await self._emit(task_id, EventType.STEP_FAILED, error=str(e))
+
     async def _run_safe(self, task_id: str, description: str, project_path: str):
         """安全包装：捕获所有异常，确保任务状态更新"""
         try:
@@ -159,6 +223,8 @@ class ReactAgent:
         self._current_task_id = task_id
         # 重置收敛检测历史（每个新 task 都从空开始）
         self._failure_fingerprints = []
+        # 重置 prose 收尾重试标志
+        self._prose_retry_done = False
         await self.state.update_status(
             task_id, TaskStatus.IN_PROGRESS, current_step="Thinking"
         )
@@ -280,7 +346,29 @@ class ReactAgent:
                         await self._emit(task_id, EventType.STEP_FAILED, error=error_msg)
                         return error_msg
                     continue
-                # 子情况 1c: 真的有内容、无工具调用 → LLM 主动结束
+                # 子情况 1c: 有内容、无 tool_call
+                # 这是 Kimi prose 结尾 quirk 的高发区——LLM 用"编译成功 🎉 做了 5 件事"
+                # 替代正经调 respond 工具，加上 reasoning_content 截断，常常断在句中。
+                # 第一次出现回灌 prompt 强制走 respond；再次出现才接受为真的 final answer。
+                if not getattr(self, "_prose_retry_done", False):
+                    self._prose_retry_done = True
+                    logger.warning("Non-empty content without tool_call; instructing LLM to use respond tool to confirm finality.")
+                    messages.append({"role": "assistant", "content": text})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "[System] 你刚才输出了文本但没用任何工具。这种 prose 结尾在系统里"
+                            "无法区分「你真的完成了」还是「你被截断了」。\n\n"
+                            "请二选一：\n"
+                            "1) 任务真的完成了 → 调用 respond 工具，message 字段写最终汇报；\n"
+                            "2) 还有事要做 → 继续调相应工具（build / file_read / auto_fix / ...）。\n\n"
+                            "下一条回复必须包含一个 tool_call 块。"
+                        ),
+                    })
+                    continue
+                # 已经回灌过一次还是 prose 结尾 → 接受为最终答案（避免无限循环）
+                logger.info("Accepting prose ending after one retry.")
+                self._prose_retry_done = False  # 为下个 task 重置
                 return text
 
             # Case 2: 有工具调用 → 执行
@@ -353,7 +441,13 @@ class ReactAgent:
 
             # 定期 checkpoint
             if turn > 0 and turn % 5 == 0:
-                await self._save_checkpoint(task_id, messages)
+                # 从 messages 提取原始 user 描述（messages[1] 通常是首条 user）
+                desc = ""
+                for m in messages[:3]:
+                    if m.get("role") == "user":
+                        desc = (m.get("content") or "")[:1000]
+                        break
+                await self._save_checkpoint(task_id, messages, project_path=project_path, description=desc)
 
         return "Reached maximum turns limit."
 
@@ -870,8 +964,8 @@ IMPORTANT: You MUST output properly closed ```tool_call``` blocks to act. Do NOT
     # Checkpoint
     # ==========================================================
 
-    async def _save_checkpoint(self, task_id: str, messages: list[dict]):
-        """保存 checkpoint（消息历史）。保留已有 plan/code_changes/test_results 等字段。"""
+    async def _save_checkpoint(self, task_id: str, messages: list[dict], project_path: str = "", description: str = ""):
+        """保存 checkpoint（含完整 messages 历史，供 resume_from_checkpoint 直接还原）"""
         try:
             from api.schemas import AgentCheckpoint
             existing = await self.state.load_checkpoint(task_id)
@@ -883,6 +977,9 @@ IMPORTANT: You MUST output properly closed ```tool_call``` blocks to act. Do NOT
                 code_changes=existing.code_changes if existing else [],
                 test_results=existing.test_results if existing else None,
                 eval_report=existing.eval_report if existing else None,
+                messages=messages,
+                project_path=project_path or (existing.project_path if existing else ""),
+                description=description or (existing.description if existing else ""),
             )
             await self.state.save_checkpoint(checkpoint)
         except Exception as e:

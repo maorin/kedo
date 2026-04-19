@@ -301,6 +301,11 @@ class AgentCheckpoint(BaseModel):
     code_changes: list[CodeChange] = Field(default_factory=list)
     test_results: Optional[TestResult] = None
     eval_report: Optional[EvalReport] = None
+    # ReactAgent 专用：完整 messages 历史（含 system / user / assistant / tool 消息），
+    # resume 时直接恢复继续 ReAct 循环。旧 AgentLoop 不用这个字段。
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    project_path: str = ""  # resume 时不再依赖 task config 推断
+    description: str = ""    # 原始任务描述
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

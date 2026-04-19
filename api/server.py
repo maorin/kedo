@@ -25,6 +25,9 @@ from tools.code_generator import CodeGeneratorTool
 from tools.plan_tool import PlanTool
 from tools.pause_tool import PauseForHumanTool
 from tools.auto_fix_tool import AutoFixTool
+from tools.evaluate_tool import EvaluateTool
+from tools.commit_candidate_tool import CommitCandidateTool
+from tools.propose_alternatives_tool import ProposeAlternativesTool
 from tools.file_tool import FileReadTool, FileSearchTool, FileWriteTool
 from tools.git_tool import GitTool
 from tools.respond_tool import RespondTool
@@ -108,6 +111,13 @@ def create_app(config: dict = None) -> FastAPI:
     tool_registry.register(PlanTool(planner=planner, memory=memory, state_manager=state_manager))
     tool_registry.register(PauseForHumanTool(state_manager=state_manager, event_bus=state_manager.event_bus))
     tool_registry.register(AutoFixTool(llm_client=llm_client, profile_manager=profile_manager, profile_guard=profile_guard))
+    tool_registry.register(EvaluateTool(evaluator=evaluator, min_score=config.get("min_eval_score", 70)))
+    tool_registry.register(ProposeAlternativesTool(
+        state_manager=state_manager,
+        event_bus=state_manager.event_bus,
+        timeout_s=config.get("discussion_timeout_s", 1800),
+    ))
+    # commit_candidate 需要 version_manager — 必须在 version_manager 创建后再注册（下面）
 
     # Version Manager (候选版本管理)
     from core.version_manager import VersionManager
@@ -115,6 +125,8 @@ def create_app(config: dict = None) -> FastAPI:
         event_bus=state_manager.event_bus,
         git_tool=GitTool(shell) if config.get("git_enabled", True) else None,
     )
+    # commit_candidate 工具（依赖 version_manager）
+    tool_registry.register(CommitCandidateTool(version_manager=version_manager))
 
     # ReactAgent (新: LLM 驱动的 ReAct Agent)
     react_agent = ReactAgent(
