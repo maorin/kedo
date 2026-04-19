@@ -242,7 +242,17 @@ auto_fix 流程：
 | `/login` | 切换 LLM 提供商 |
 | `/web` | 打开 Dashboard |
 | `/config` | 查看配置 |
+| `/verbose [on\|off\|toggle]` | 控制台详细模式开关（默认 on，显示完整 args/output/summary 不截断） |
 | `/quit` | 退出 |
+
+### 控制台底栏（固定状态栏）
+
+REPL 启动时用 ANSI DECSTBM 把终端切成两个区域：
+
+- **滚动区**（第 1 行 ~ H-1 行）：事件流持续滚动（LLM 请求/响应、工具执行、step 完成/失败）
+- **固定底栏**（第 H 行）：永远钉在屏幕最底部，显示 `provider/model │ Task:xxx │ 状态 │ 当前 step │ 进度条`
+
+事件流不会再穿插状态栏，按 `Ctrl+L` 或事件刷屏都不会冲掉底栏。窗口 resize（SIGWINCH）会自动重设滚动区域。退出时 `\033[r` 恢复整屏滚动，shell prompt 不会被污染。
 
 ## API 接口
 
@@ -389,13 +399,14 @@ kedo 有 4 个核心 prompt 模板，对接新 LLM 时需确保其能正确遵�
 ## 项目结构
 
 ```
-kedo/                          18,750 行
+kedo/
 ├── kedo.py                    CLI 入口
 ├── cli/
-│   ├── repl.py                交互式 REPL（1,146 行）
+│   ├── repl.py                交互式 REPL + DECSTBM 底栏 + /verbose 切换（1,308 行）
 │   └── theme.py               终端主题
 ├── core/
-│   ├── agent_loop.py          Agent 主循环 + 自动修复 + 智能续接（3,054 行）
+│   ├── react_agent.py         LLM 驱动的 ReAct 主循环 + 文本模式解析器（832 行）
+│   ├── agent_loop.py          旧 Agent 流水线（保留向后兼容，3,054 行）
 │   ├── planner.py             任务规划器（848 行）
 │   ├── evaluator.py           多维度质量评估（508 行）
 │   ├── project_profile.py     项目 Profile 管理（642 行）
@@ -404,18 +415,47 @@ kedo/                          18,750 行
 │   ├── version_manager.py     候选版本管理（344 行）
 │   └── memory.py              上下文记忆（321 行）
 ├── api/
-│   ├── server.py              FastAPI 应用
+│   ├── server.py              FastAPI 应用 + LLM 客户端 + dashboard 缓存中间件（1,090 行）
 │   ├── routes.py              REST API + 产品需求总结（2,072 行）
 │   ├── schemas.py             数据模型（364 行）
 │   └── websocket.py           WebSocket 推送
 ├── tools/
 │   ├── code_generator.py      代码生成 + 校验（486 行）
+│   ├── plan_tool.py           PlanTool — 调 planner 拆解需求 + 写 checkpoint
+│   ├── build_tool.py          BuildTool — 封装 ProjectProfileManager
+│   ├── respond_tool.py        RespondTool — Agent 最终回复
 │   ├── file_tool.py           文件操作
-│   ├── shell_executor.py      Shell 执行（沙箱模式）
+│   ├── shell_executor.py      Shell 执行（沙箱：DEVNULL stdin + 拦提权 + 屏蔽 askpass，159 行）
 │   └── test_runner.py         测试运行
 └── dashboard/
-    └── index.html             Web Dashboard（4,776 行）
+    └── index.html             Web Dashboard（4,809 行）
 ```
+
+## 安全护栏（Hardening）
+
+### Shell 工具沙箱
+`shell_execute` 工具默认三层隔离，防止 LLM 命令劫持开发者的终端：
+
+- **`stdin=DEVNULL`**：subprocess 不继承 kedo 的 tty，任何 `read 0` 操作（sudo/passwd/ssh 密码提示、git 凭证提示）立即 EOF 失败
+- **提权命令拦截**：黑名单 `sudo / su / pkexec / doas`，按 token 切分，命令任意位置（行首、`&&` 后、`;` 后、管道后）都拦
+- **askpass 通道屏蔽**：注入 `SUDO_ASKPASS=/bin/false`、`SSH_ASKPASS=/bin/false`、`DISPLAY=""`、`GIT_TERMINAL_PROMPT=0`、`DEBIAN_FRONTEND=noninteractive`，断绝 sudo/ssh/apt 通过外部程序绕过 tty 弹窗
+
+LLM 想跑提权命令时直接拿到 `Command requires privilege escalation (sudo); refused...` 错误，可换思路继续推进；不会再发生 kedo 控制台弹"[sudo] password:"的情况。
+
+### Dashboard 缓存控制
+FastAPI 中间件给 `/` 和 `/dashboard/*` 所有响应注入 `Cache-Control: no-store, no-cache, must-revalidate, max-age=0`。改了 HTML/JS 后**普通刷新（F5 / Cmd+R）**就拿最新版，不再需要强制刷新（Cmd+Shift+R）。
+
+### ReAct 文本模式解析器健壮性
+对接 Kimi Code（不支持 function calling）等端点时走文本 ReAct 模式，解析器兼容三类常见异常：
+
+| 异常 | 兼容方式 |
+|---|---|
+| LLM 漏写闭合 ` ``` `（输出被截断或模型遗漏） | 正则 `(?:\n```\|\Z)` 兜底到文末 |
+| 同一 ` ```tool_call ` 块塞多个 JSON 对象（违反 one-tool-per-block 约定） | 按花括号平衡扫描 block 内所有顶层 `{...}` |
+| 模型返回纯 reasoning_content 没 content（Kimi reasoning-only quirk） | KimiClient stream/non-stream 都 fallback 到 reasoning_content；空响应触发重试，连续 3 次空才标 failed |
+
+### 工具参数注入
+ReactAgent 自动注入的运行时参数（`task_id`、`project_path`）**强制覆盖** LLM 自己传的值。原因：LLM 看到 schema 里有这些参数会自己编一个看似合理的值（如 `task_id="switch-nfs-player"`），导致 PlanTool 把 plan 写到错误的 checkpoint，dashboard 永远看不到子任务列表。
 
 ## 已知局限与改进历程
 

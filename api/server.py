@@ -94,7 +94,7 @@ def create_app(config: dict = None) -> FastAPI:
     evaluator = Evaluator(llm_client, memory, config=config)
 
     # PlanTool 依赖 planner，必须在 planner 创建后注册
-    tool_registry.register(PlanTool(planner=planner, memory=memory))
+    tool_registry.register(PlanTool(planner=planner, memory=memory, state_manager=state_manager))
 
     # Version Manager (候选版本管理)
     from core.version_manager import VersionManager
@@ -148,6 +148,17 @@ def create_app(config: dict = None) -> FastAPI:
             logger.warning(f"Dashboard directory not found at {_dashboard_dir}, skipping")
     except Exception:
         logger.warning("Dashboard static files mount failed, skipping")
+
+    # 禁用 dashboard 静态资源的浏览器缓存：开发期改了 HTML/JS 后无需手动 Cmd+Shift+R
+    @app.middleware("http")
+    async def _no_cache_dashboard(request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path == "/" or path.startswith("/dashboard"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
 
     # 根路由重定向到 Dashboard
     from fastapi.responses import RedirectResponse
@@ -653,10 +664,12 @@ class KimiClient(BaseLLMClient):
     MAX_RETRIES = 2            # 最大重试次数
 
     def __init__(self, api_key: str, model: str = "kimi-k2.5",
-                 base_url: str = "https://api.moonshot.ai/v1"):
+                 base_url: str = "https://api.moonshot.ai/v1",
+                 max_tokens: int = 8192):
         self.api_key = api_key
         self.model = model
         self.base_url = base_url
+        self.max_tokens = max_tokens
 
     async def chat(self, messages: list[dict]) -> str:
         import httpx
@@ -720,7 +733,11 @@ class KimiClient(BaseLLMClient):
         raise RuntimeError(f"Kimi API 未知错误: {last_error}")
 
     async def stream_chat(self, messages: list[dict]):
-        """流式输出 — 逐 token yield，复用 SSE 解析逻辑"""
+        """流式输出 — 逐 token yield，复用 SSE 解析逻辑。
+
+        Kimi reasoning-only 兜底: 若整个流没出过 content 但有 reasoning_content，
+        在流结束时一次性 yield 拼接后的 reasoning（里面通常含 ```tool_call``` 块）。
+        """
         import httpx
         import json as _json
 
@@ -736,6 +753,9 @@ class KimiClient(BaseLLMClient):
             pool=self.CONNECT_TIMEOUT,
         )
 
+        emitted_any = False
+        reasoning_buf: list[str] = []
+
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream(
                 "POST",
@@ -745,6 +765,7 @@ class KimiClient(BaseLLMClient):
                     "model": self.model,
                     "messages": messages,
                     "temperature": 0.1,
+                    "max_tokens": self.max_tokens,
                     "stream": True,
                 },
             ) as response:
@@ -753,25 +774,38 @@ class KimiClient(BaseLLMClient):
                     line = line.strip()
                     if not line:
                         continue
+                    chunk = None
                     if line.startswith("data:"):
                         data_str = line[5:].strip()
                         if data_str == "[DONE]":
                             break
                         try:
                             chunk = _json.loads(data_str)
-                            text = self._extract_chunk_content(chunk)
-                            if text:
-                                yield text
                         except (ValueError, IndexError, KeyError):
                             continue
                     elif line.startswith("{"):
                         try:
                             chunk = _json.loads(line)
-                            text = self._extract_chunk_content(chunk)
-                            if text:
-                                yield text
                         except (ValueError, IndexError, KeyError):
                             continue
+                    if chunk is None:
+                        continue
+                    text = self._extract_chunk_content(chunk)
+                    if text:
+                        emitted_any = True
+                        yield text
+                        continue
+                    r = self._extract_chunk_reasoning(chunk)
+                    if r:
+                        reasoning_buf.append(r)
+
+        if not emitted_any and reasoning_buf:
+            full_reasoning = "".join(reasoning_buf)
+            logger.warning(
+                f"Stream emitted no content but {len(full_reasoning)} chars of reasoning_content; "
+                f"yielding reasoning as fallback (Kimi reasoning-only quirk)."
+            )
+            yield full_reasoning
 
     async def _stream_chat(
         self, headers: dict, messages: list[dict], timeout
@@ -789,7 +823,8 @@ class KimiClient(BaseLLMClient):
         import httpx
         import json as _json
 
-        content_parts = []
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         raw_lines_sample = []  # 保留前几行用于调试
 
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -801,6 +836,7 @@ class KimiClient(BaseLLMClient):
                     "model": self.model,
                     "messages": messages,
                     "temperature": 0.1,
+                    "max_tokens": self.max_tokens,
                     "stream": True,
                 },
             ) as response:
@@ -814,40 +850,64 @@ class KimiClient(BaseLLMClient):
                     if len(raw_lines_sample) < 5:
                         raw_lines_sample.append(line[:200])
 
-                    # 标准 SSE: "data: {...}" 或 "data:{...}"（Kimi 无空格）
+                    chunk = None
                     if line.startswith("data:"):
                         data_str = line[5:].strip()
                         if data_str == "[DONE]":
                             break
                         try:
                             chunk = _json.loads(data_str)
-                            text = self._extract_chunk_content(chunk)
-                            if text:
-                                content_parts.append(text)
                         except (ValueError, IndexError, KeyError) as e:
                             logger.debug(f"Skip unparsable SSE chunk: {data_str[:100]}... ({e})")
                             continue
-                    # 有些 API 直接返回 JSON（不带 "data: " 前缀）
                     elif line.startswith("{"):
                         try:
                             chunk = _json.loads(line)
-                            text = self._extract_chunk_content(chunk)
-                            if text:
-                                content_parts.append(text)
                         except (ValueError, IndexError, KeyError):
                             continue
+                    if chunk is None:
+                        continue
+                    text = self._extract_chunk_content(chunk)
+                    if text:
+                        content_parts.append(text)
+                        continue
+                    r = self._extract_chunk_reasoning(chunk)
+                    if r:
+                        reasoning_parts.append(r)
 
         full_content = "".join(content_parts)
+        if full_content:
+            return full_content
 
-        if not full_content:
-            # 尝试非流式回退
+        # content 全空 → 先看 reasoning_content 兜底（Kimi reasoning-only 输出）
+        if reasoning_parts:
+            full_reasoning = "".join(reasoning_parts)
             logger.warning(
-                f"Stream returned empty content. Raw lines sample: {raw_lines_sample}. "
-                f"Falling back to non-stream request."
+                f"Stream content empty but got {len(full_reasoning)} chars of reasoning_content. "
+                f"Using reasoning as fallback (Kimi reasoning-only quirk)."
             )
-            return await self._non_stream_chat(headers, messages, timeout)
+            return full_reasoning
 
-        return full_content
+        # 流真的什么都没出 → 非流式回退
+        logger.warning(
+            f"Stream returned empty content (no reasoning either). Raw lines sample: {raw_lines_sample}. "
+            f"Falling back to non-stream request."
+        )
+        return await self._non_stream_chat(headers, messages, timeout)
+
+    @staticmethod
+    def _extract_chunk_reasoning(chunk: dict) -> str:
+        """提取 reasoning_content（思考链）。仅在 content 全空时作为兜底使用。"""
+        choices = chunk.get("choices", [])
+        if not choices:
+            return ""
+        delta = choices[0].get("delta", {})
+        if delta and delta.get("reasoning_content"):
+            return delta["reasoning_content"]
+        message = choices[0].get("message", {})
+        if message and message.get("reasoning_content"):
+            return message["reasoning_content"]
+        return ""
 
     @staticmethod
     def _extract_chunk_content(chunk: dict) -> str:
@@ -889,13 +949,14 @@ class KimiClient(BaseLLMClient):
         """
         非流式回退：当流式响应解析为空时使用。
 
-        使用更长的超时（读超时翻倍），因为要等完整响应。
+        采用 120s 读超时（不再 *2 = 600s 死等），避免 Kimi reasoning-only quirk
+        把整个 ReAct loop 卡死。content 空时回落到 reasoning_content。
         """
         import httpx
 
         fallback_timeout = httpx.Timeout(
             connect=self.CONNECT_TIMEOUT,
-            read=self.READ_TIMEOUT * 2,  # 非流式需要更长的读超时
+            read=120,
             write=self.WRITE_TIMEOUT,
             pool=self.CONNECT_TIMEOUT,
         )
@@ -908,19 +969,29 @@ class KimiClient(BaseLLMClient):
                     "model": self.model,
                     "messages": messages,
                     "temperature": 0.1,
+                    "max_tokens": self.max_tokens,
                 },
             )
             response.raise_for_status()
             data = response.json()
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            if not content:
-                logger.error(f"Non-stream also returned empty. Response: {str(data)[:500]}")
-                raise RuntimeError(
-                    "Kimi API 返回空响应（流式和非流式均为空）。\n"
-                    "可能原因：1) API Key 权限不足 2) 模型暂时不可用 3) 请求被服务端过滤\n"
-                    "建议：检查 API Key 是否有效，或稍后重试"
+            message = data.get("choices", [{}])[0].get("message", {}) or {}
+            content = message.get("content") or ""
+            if content:
+                return content
+            # content 空 → 回落到 reasoning_content（同样可能含 ```tool_call``` 块）
+            reasoning = message.get("reasoning_content") or ""
+            if reasoning:
+                logger.warning(
+                    f"Non-stream content empty but got {len(reasoning)} chars of reasoning_content; "
+                    f"using as fallback."
                 )
-            return content
+                return reasoning
+            logger.error(f"Non-stream returned empty (no content / no reasoning). Response: {str(data)[:500]}")
+            raise RuntimeError(
+                "Kimi API 返回空响应（流式和非流式均为空）。\n"
+                "可能原因：1) API Key 权限不足 2) 模型暂时不可用 3) 请求被服务端过滤\n"
+                "建议：检查 API Key 是否有效，或稍后重试"
+            )
 
     async def chat_with_tools(self, messages: list[dict], tools: list[dict]):
         """Kimi OpenAI 兼容 function calling"""
@@ -942,6 +1013,7 @@ class KimiClient(BaseLLMClient):
             "model": self.model,
             "messages": messages,
             "temperature": 0.1,
+            "max_tokens": self.max_tokens,
         }
         if tools:
             body["tools"] = tools

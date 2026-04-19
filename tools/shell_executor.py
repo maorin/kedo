@@ -12,11 +12,15 @@ from tools.base import BaseTool, ToolParameter, ToolResult
 
 logger = logging.getLogger(__name__)
 
-# 危险命令黑名单
+# 危险命令黑名单（子串匹配，命令小写后比对）
 BLOCKED_COMMANDS = {
     "rm -rf /", "rm -rf /*", "mkfs", "dd if=", ":(){:|:&};:",
     "chmod -R 777 /", "wget", "curl -o",
 }
+
+# 提权命令前缀 — 任何在命令开头或 shell 链路中的提权调用都拦截
+# 用 token 匹配（前面是行首/空格/分号/管道/&&/||），避免误伤含 "sudo" 字串的合法路径
+PRIVILEGE_TOKENS = ("sudo", "su", "pkexec", "doas")
 
 # 允许的命令白名单前缀
 ALLOWED_PREFIXES = {
@@ -75,12 +79,28 @@ class ShellExecutorTool(BaseTool):
         logger.info(f"Executing: {command} (cwd={cwd}, timeout={timeout}s)")
 
         try:
+            # 屏蔽任何交互式密码 / 确认提示：
+            # - stdin=DEVNULL：sudo/ssh/passwd 等读 tty 时直接 EOF 失败
+            # - SUDO_ASKPASS=/bin/false + DISPLAY="" + SSH_ASKPASS=/bin/false：
+            #   截断 sudo / ssh 通过 askpass 程序绕过 tty 弹窗
+            # - GIT_TERMINAL_PROMPT=0 / GIT_ASKPASS=/bin/echo：阻止 git http 凭证弹窗
+            child_env = {
+                **os.environ,
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "SUDO_ASKPASS": "/bin/false",
+                "SSH_ASKPASS": "/bin/false",
+                "DISPLAY": "",
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_ASKPASS": "/bin/echo",
+                "DEBIAN_FRONTEND": "noninteractive",
+            }
             proc = await asyncio.create_subprocess_shell(
                 command,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
-                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                env=child_env,
             )
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout
@@ -116,7 +136,7 @@ class ShellExecutorTool(BaseTool):
             return ToolResult(success=False, error=f"Execution error: {e}")
 
     def _check_safety(self, command: str) -> Optional[str]:
-        """安全检查 — 阻止危险命令"""
+        """安全检查 — 阻止危险命令 + 任何提权调用"""
         cmd_lower = command.lower().strip()
 
         # 检查黑名单
@@ -124,9 +144,16 @@ class ShellExecutorTool(BaseTool):
             if blocked in cmd_lower:
                 return f"Command contains blocked pattern: {blocked}"
 
-        # 检查白名单 (可选的严格模式)
-        # first_word = cmd_lower.split()[0] if cmd_lower else ""
-        # if first_word not in ALLOWED_PREFIXES:
-        #     return f"Command '{first_word}' not in allowed list"
+        # 提权检查：sudo/su/pkexec/doas 出现在命令开头或 shell 链分隔符之后
+        # 拆词时把分隔符 ; & | 都视为分界
+        import re
+        tokens = re.split(r"[\s;&|()`]+", cmd_lower)
+        for tok in tokens:
+            if tok in PRIVILEGE_TOKENS:
+                return (
+                    f"Command requires privilege escalation ({tok}); "
+                    f"refused to avoid prompting for password. "
+                    f"Install/configure tooling out-of-band, then retry without {tok}."
+                )
 
         return None

@@ -59,6 +59,8 @@ class KedoREPL:
         }
 
         self._event_log: list[dict] = []
+        # 控制台输出详细度: True = 不截断（看到完整 args/output/summary）；False = 旧的简短模式
+        self._verbose: bool = True
 
         # 状态栏数据
         self._sb = {
@@ -108,6 +110,9 @@ class KedoREPL:
 
         # 启动事件监听
         self._start_event_listener()
+
+        # 启动底栏分屏（DECSTBM 滚动区域 + 底部固定状态栏）
+        self._setup_split_screen()
 
         # 进入 REPL
         try:
@@ -280,8 +285,13 @@ class KedoREPL:
             tools_hint = f" ({tool_count} tools)" if tool_count else ""
             self._print_event(f"{ACCENT}⬇ LLM 响应{C.RESET} [{phase_label}{turn_hint}{tools_hint}]")
             if summary:
-                for line in summary.split("\n")[:5]:
-                    self._print_event(f"  {MUTED}{line}{C.RESET}")
+                lines = summary.split("\n")
+                show_lines = lines if self._verbose else lines[:5]
+                for line in show_lines:
+                    text_line = line if self._verbose else line[:150]
+                    self._print_event(f"  {MUTED}{text_line}{C.RESET}")
+                if not self._verbose and len(lines) > 5:
+                    self._print_event(f"  {MUTED}... ({len(lines) - 5} more lines, /verbose on 查看完整){C.RESET}")
 
         elif etype == "llm_token":
             # 流式 token — 实时输出，不换行
@@ -320,7 +330,9 @@ class KedoREPL:
             }.get(tool_type, "⚙")
             self._print_event(f"{INFO}{tool_icon} 执行: {tool_name}{retry_hint}{C.RESET}")
             if desc:
-                self._print_event(f"  {MUTED}{desc[:120]}{C.RESET}")
+                text = desc if self._verbose else desc[:120]
+                for line in text.split("\n"):
+                    self._print_event(f"  {MUTED}{line}{C.RESET}")
 
         elif etype == "step_started":
             step = data.get("step", "")
@@ -339,8 +351,12 @@ class KedoREPL:
             display_step = step.replace("tool:", "") if step.startswith("tool:") else step
             self._print_event(f"{SUCCESS}✓ {display_step} 完成{C.RESET}")
             if output:
-                for line in output.split("\n")[:3]:
+                lines = output.split("\n")
+                show_lines = lines if self._verbose else lines[:3]
+                for line in show_lines:
                     self._print_event(f"  {MUTED}{line}{C.RESET}")
+                if not self._verbose and len(lines) > 3:
+                    self._print_event(f"  {MUTED}... ({len(lines) - 3} more lines, /verbose on 查看完整){C.RESET}")
 
         elif etype == "step_failed":
             step = data.get("step", "")
@@ -348,7 +364,9 @@ class KedoREPL:
             display_step = step.replace("tool:", "") if step.startswith("tool:") else step
             self._print_event(f"{ERROR}✗ {display_step} 失败{C.RESET}")
             if error:
-                self._print_event(f"  {ERROR}{error[:150]}{C.RESET}")
+                text = error if self._verbose else error[:150]
+                for line in text.split("\n"):
+                    self._print_event(f"  {ERROR}{line}{C.RESET}")
 
         elif etype == "candidate_created":
             self.flow_state["候选版本"] = "success"
@@ -412,27 +430,85 @@ class KedoREPL:
         """生成当前状态行文本"""
         return status_line(**self._sb)
 
+    # ─── 底栏分屏 (DECSTBM) ─────────────────────────────────────
+
+    def _setup_split_screen(self):
+        """初始化滚动区域 1..H-1 + 在第 H 行画固定状态栏。
+
+        终端必须是 tty；否则跳过（避免在管道/重定向场景里写转义符）。
+        """
+        if not sys.stdout.isatty():
+            self._split_screen_active = False
+            return
+        import shutil
+        size = shutil.get_terminal_size((80, 24))
+        self._term_height = size.lines
+        self._split_screen_active = True
+        h = self._term_height
+        with self._stdout_lock:
+            # 滚动区域 = 第 1 行 ~ 第 H-1 行（cursor 会被 DECSTBM 自动跳到 (1,1)）
+            sys.stdout.write(f"\033[1;{h - 1}r")
+            # 写底栏到第 H 行
+            sys.stdout.write(f"\033[{h};1H\033[2K{self._get_status_text()}")
+            # cursor 落到滚动区底部 (H-1)，让后续 prompt/事件从底部出现
+            # 否则 cursor 还在 (1,1)，input(PROMPT) 会覆盖 banner 顶端
+            sys.stdout.write(f"\033[{h - 1};1H")
+            sys.stdout.flush()
+        # 监听窗口 resize
+        try:
+            import signal
+            signal.signal(signal.SIGWINCH, self._on_terminal_resize)
+        except Exception:
+            pass
+
+    def _on_terminal_resize(self, *_):
+        """SIGWINCH: 重新计算高度 + 重设滚动区域 + 重画状态栏"""
+        if not getattr(self, "_split_screen_active", False):
+            return
+        import shutil
+        size = shutil.get_terminal_size((80, 24))
+        self._term_height = size.lines
+        h = self._term_height
+        with self._stdout_lock:
+            sys.stdout.write(f"\033[1;{h - 1}r")
+            sys.stdout.write(f"\0337\033[{h};1H\033[2K{self._get_status_text()}\0338")
+            sys.stdout.flush()
+
+    def _redraw_status_bar(self):
+        """只重绘底部状态栏，不影响滚动区或当前 cursor 位置"""
+        if not getattr(self, "_split_screen_active", False):
+            return
+        h = self._term_height
+        # \0337 保存光标 → 跳底行 → 清行 → 写状态栏 → \0338 恢复光标
+        sys.stdout.write(f"\0337\033[{h};1H\033[2K{self._get_status_text()}\0338")
+        sys.stdout.flush()
+
+    def _teardown_split_screen(self):
+        """退出时还原滚动区域为整屏 + 清状态栏"""
+        if not getattr(self, "_split_screen_active", False):
+            return
+        h = getattr(self, "_term_height", 24)
+        with self._stdout_lock:
+            # 清掉底栏，重置滚动区域
+            sys.stdout.write(f"\0337\033[{h};1H\033[2K\0338\033[r")
+            sys.stdout.flush()
+        self._split_screen_active = False
+
+    # ─── stdout 写入 ──────────────────────────────────────
+
     def _safe_print(self, text: str):
-        """线程安全地打印一行 (主线程用)"""
+        """线程安全地打印一行 (主线程用)。底栏会在事件之后自动刷新。"""
         with self._stdout_lock:
             sys.stdout.write(f"{text}\n")
             sys.stdout.flush()
+        self._redraw_status_bar()
 
     def _print_event(self, text: str):
         """
         线程安全地打印事件 (后台 WebSocket 线程调用)。
 
-        终端布局 (状态行可见时):
-            ...上面的输出...
-            ⚡ kimi-code/kimi-k2.5 │ 空闲          ← 状态行 (上一行)
-            kedo ❯ █                               ← prompt  (当前行)
-
-        操作:
-            1. 清除 prompt 行
-            2. 如果状态行可见，上移清除状态行
-            3. 打印事件
-            4. 打印新的状态行
-            5. 打印 prompt
+        滚动区域 (1..H-1) 内自然滚动；底栏 (H) 通过 _redraw_status_bar 单独更新，
+        不再每次事件都嵌一行状态栏。
         """
         with self._stdout_lock:
             buf = []
@@ -440,15 +516,11 @@ class KedoREPL:
             if getattr(self, "_streaming_newline", False):
                 buf.append("\n")
                 self._streaming_newline = False
-            buf.append("\r\033[2K")          # 清除 prompt 行
-            if getattr(self, "_status_line_visible", False):
-                buf.append("\033[A\033[2K")  # 上移并清除状态行
-            buf.append(f"  {text}\n")        # 打印事件
-            buf.append(f"{self._get_status_text()}\n")  # 新状态行
-            buf.append(PROMPT)               # prompt
+            buf.append(f"  {text}\n")
             sys.stdout.write("".join(buf))
             sys.stdout.flush()
-            self._status_line_visible = True
+        # 数据可能变化（progress/step/status），底栏刷新
+        self._redraw_status_bar()
 
     # ─── REPL 主循环 ────────────────────────────────────────────
 
@@ -456,33 +528,25 @@ class KedoREPL:
         """
         交互式命令循环
 
-        布局:
-            [事件输出正常滚动]
-            ⚡ kimi-code/kimi-k2.5 │ 空闲          ← 状态行
-            kedo ❯ █                               ← prompt
+        布局（DECSTBM 分屏后）:
+            [滚动区: 1..H-1]
+              ...事件流持续滚动...
+              kedo ❯ █                               ← prompt 在滚动区底部
+            [固定底栏: 第 H 行]
+              ⚡ kimi-code/kimi-k2.5 │ Task:xxx │ 执行中 ...
 
-        _print_event 会清除状态行+prompt，打印事件后重绘。
+        底栏由 _redraw_status_bar 自动维护，prompt 不再手动嵌状态行。
         """
-        import readline  # 启用行编辑和历史
-
-        # 标记: 状态行是否已输出 (用于 _print_event 判断是否需要上移清除)
-        self._status_line_visible = False
+        import readline  # noqa: F401  启用行编辑和历史
 
         while self.running:
             try:
-                # 打印状态行，再显示 prompt
-                sl = self._get_status_text()
-                sys.stdout.write(f"{sl}\n")
-                sys.stdout.flush()
-                self._status_line_visible = True
-
                 user_input = input(PROMPT).strip()
             except EOFError:
                 self._shutdown()
                 break
-
-            # 用户按回车后，状态行已随内容滚上去，标记不可见
-            self._status_line_visible = False
+            # 用户按 enter 后 cursor 可能短暂越过滚动区域，立刻回写底栏
+            self._redraw_status_bar()
 
             if not user_input:
                 continue
@@ -532,6 +596,8 @@ class KedoREPL:
             "/continue": self._cmd_continue,
             "/cont": self._cmd_continue,
             "/clear": self._cmd_clear,
+            "/verbose": self._cmd_verbose,
+            "/v": self._cmd_verbose,
             "/quit": self._cmd_quit,
             "/q": self._cmd_quit,
             "/exit": self._cmd_quit,
@@ -563,6 +629,7 @@ class KedoREPL:
             ("/web, /w", "在浏览器中打开 Dashboard"),
             ("/config", "查看当前配置"),
             ("/clear", "清屏"),
+            ("/verbose, /v [on|off]", "切换控制台详细模式（默认 on，显示完整 args/output）"),
             ("/quit, /q", "退出"),
         ]
         for cmd, desc in cmds:
@@ -919,6 +986,21 @@ class KedoREPL:
     def _cmd_clear(self, _=""):
         os.system("clear" if os.name != "nt" else "cls")
 
+    def _cmd_verbose(self, args: str = ""):
+        """切换控制台详细模式：on=显示完整 args/output（默认）, off=精简截断"""
+        arg = (args or "").strip().lower()
+        if arg in ("on", "1", "true", "yes", "y"):
+            self._verbose = True
+        elif arg in ("off", "0", "false", "no", "n"):
+            self._verbose = False
+        elif arg in ("toggle", ""):
+            self._verbose = not self._verbose
+        else:
+            self._safe_print(f"  {ERROR}用法: /verbose [on|off|toggle]{C.RESET}")
+            return
+        state = "on (完整输出)" if self._verbose else "off (精简截断)"
+        self._safe_print(f"  {SUCCESS}/verbose → {state}{C.RESET}")
+
     def _cmd_quit(self, _=""):
         self._shutdown()
 
@@ -1217,5 +1299,10 @@ class KedoREPL:
 
     def _shutdown(self):
         self.running = False
+        # 还原终端滚动区域 + 清底栏，避免 ANSI 状态遗留到 shell
+        try:
+            self._teardown_split_screen()
+        except Exception:
+            pass
         print(f"\n  {MUTED}再见! 👋{C.RESET}\n")
         sys.exit(0)

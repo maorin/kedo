@@ -19,9 +19,10 @@ class PlanTool(BaseTool):
     然后按计划逐步执行 code_generate / build / test 等工具。
     """
 
-    def __init__(self, planner=None, memory=None):
+    def __init__(self, planner=None, memory=None, state_manager=None):
         self._planner = planner
         self._memory = memory
+        self._state = state_manager
 
     @property
     def name(self) -> str:
@@ -41,13 +42,14 @@ class PlanTool(BaseTool):
         return [
             ToolParameter("requirement", "string", "The development requirement to plan"),
             ToolParameter("project_path", "string", "Project root directory"),
+            ToolParameter("task_id", "string", "Active task id (auto-injected by ReactAgent)", required=False),
         ]
 
     @property
     def is_read_only(self) -> bool:
         return True
 
-    async def execute(self, requirement: str, project_path: str = ".") -> ToolResult:
+    async def execute(self, requirement: str, project_path: str = ".", task_id: str = "") -> ToolResult:
         if not self._planner:
             return ToolResult(success=False, error="Planner not initialized")
 
@@ -80,9 +82,28 @@ class PlanTool(BaseTool):
                 }
                 project_context["project_state"] = project_state
 
-            # 调用 Planner
-            task_id = "plan_tool"
-            plan = await self._planner.create_plan(task_id, requirement, project_context)
+            # 调用 Planner（使用真实 task_id 让 planner 内部日志/事件可关联到本任务）
+            planner_task_id = task_id or "plan_tool"
+            plan = await self._planner.create_plan(planner_task_id, requirement, project_context)
+
+            # 持久化到 StateManager checkpoint，让 Dashboard 右侧子任务 panel 能读到
+            if self._state and task_id:
+                try:
+                    from api.schemas import AgentCheckpoint
+                    existing = await self._state.load_checkpoint(task_id)
+                    cp = AgentCheckpoint(
+                        task_id=task_id,
+                        current_step_index=existing.current_step_index if existing else 0,
+                        plan=plan,
+                        memory_snapshot=existing.memory_snapshot if existing else {},
+                        code_changes=existing.code_changes if existing else [],
+                        test_results=existing.test_results if existing else None,
+                        eval_report=existing.eval_report if existing else None,
+                    )
+                    await self._state.save_checkpoint(cp)
+                    logger.info(f"PlanTool: saved {len(plan.subtasks)} subtasks to checkpoint of task {task_id}")
+                except Exception as e:
+                    logger.warning(f"PlanTool: failed to persist plan to state: {e}")
 
             # 格式化输出
             subtasks = []

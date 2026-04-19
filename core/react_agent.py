@@ -219,9 +219,57 @@ class ReactAgent:
             # 调用 LLM
             response = await self._call_llm(task_id, messages, tool_schemas, turn)
 
-            # Case 1: 无工具调用 → LLM 直接回复 → 完成
+            # Case 1: 无工具调用
             if not response.tool_calls:
-                return response.content or "(empty response)"
+                text = response.content or ""
+                # 子情况 1a: 文本里出现了 ```tool_call 但解析为 0
+                # → 不是 LLM 真的想结束，而是 fence 未闭合 / JSON 坏掉 / 块内塞多个对象失败
+                # 把半截 assistant 消息留住，回灌纠错指令再循环
+                if "```tool_call" in text and not self._function_calling_available:
+                    logger.warning("Detected malformed tool_call fence; instructing LLM to retry.")
+                    messages.append({"role": "assistant", "content": text})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "[System] 上一条消息里检测到 ```tool_call``` 块，但格式不合法"
+                            "（fence 未闭合、JSON 解析失败或同一块内塞了多个对象）。\n"
+                            "请重新输出，遵守以下约束：\n"
+                            "1) 每个工具调用必须是独立的 ```tool_call``` 起、```闭合 的代码块；\n"
+                            "2) 一个块只放一个 JSON 对象，形如 {\"name\": \"...\", \"arguments\": {...}}；\n"
+                            "3) 多个工具请分多个块输出；\n"
+                            "4) 如果你想结束并直接回复用户，请用 respond 工具。"
+                        ),
+                    })
+                    consecutive_errors += 1
+                    if consecutive_errors >= self.max_consecutive_errors:
+                        error_msg = (
+                            f"Stopping: {consecutive_errors} consecutive malformed tool_call outputs."
+                        )
+                        await self._emit(task_id, EventType.STEP_FAILED, error=error_msg)
+                        return error_msg
+                    continue
+                # 子情况 1b: 内容为空 + 无 tool_call → 不是 LLM 主动结束，是上游异常/截断
+                # 不能当成 success，回灌一条 user 提示重发；累计到 max_consecutive_errors 后标 failed
+                if not text.strip():
+                    logger.warning("LLM returned empty content with no tool_calls; treating as transient error and retrying.")
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "[System] 上一次模型回复为空，且没有工具调用。这通常意味着请求被截断或上游异常。\n"
+                            "请重新输出：要么用 ```tool_call``` 调用一个工具继续推进，"
+                            "要么用 respond 工具给出最终回复。"
+                        ),
+                    })
+                    consecutive_errors += 1
+                    if consecutive_errors >= self.max_consecutive_errors:
+                        error_msg = (
+                            f"Stopping: {consecutive_errors} consecutive empty LLM responses."
+                        )
+                        await self._emit(task_id, EventType.STEP_FAILED, error=error_msg)
+                        return error_msg
+                    continue
+                # 子情况 1c: 真的有内容、无工具调用 → LLM 主动结束
+                return text
 
             # Case 2: 有工具调用 → 执行
             # 先把 assistant 消息追加到历史
@@ -322,10 +370,8 @@ class ReactAgent:
 
         elapsed_ms = (time.monotonic() - t0) * 1000
 
-        # 发射响应事件
-        summary = ""
-        if response.content:
-            summary = response.content[:150]
+        # 发射响应事件 — summary 不再源头截断，REPL 按 verbose 决定显示
+        summary = response.content or ""
         if response.tool_calls:
             tool_names = ", ".join(tc.name for tc in response.tool_calls)
             summary = f"[tools: {tool_names}] {summary}"
@@ -356,20 +402,33 @@ class ReactAgent:
             lines.append(f"- **{name}**({param_list}) — {desc}")
 
         lines.append("""
-## Tool Call Format
+## Tool Call Format — STRICT
 
-Call tools with ```tool_call``` blocks. One tool per block:
+Each tool call MUST be its own fenced block, opened with ```tool_call and closed with ```.
+Exactly ONE JSON object per block. Multiple tools = multiple blocks.
 
+✅ Correct (two reads = two blocks, both closed):
 ```tool_call
 {"name": "file_read", "arguments": {"file_path": "src/main.cpp"}}
 ```
+```tool_call
+{"name": "file_read", "arguments": {"file_path": "CMakeLists.txt"}}
+```
 
-Final answer to user — MUST use respond tool:
+❌ Wrong — two JSON in one block:
+```tool_call
+{"name": "file_read", "arguments": {"file_path": "a"}}
+{"name": "file_read", "arguments": {"file_path": "b"}}
+```
+
+❌ Wrong — fence not closed (parser will reject and force a retry).
+
+Final answer to user — MUST use respond tool, also in its own closed block:
 ```tool_call
 {"name": "respond", "arguments": {"message": "回复内容"}}
 ```
 
-IMPORTANT: You MUST output ```tool_call``` blocks to act. Do NOT just describe what to do.""")
+IMPORTANT: You MUST output properly closed ```tool_call``` blocks to act. Do NOT just describe what to do in prose.""")
         return "\n".join(lines)
 
     async def _text_react_call(
@@ -456,31 +515,77 @@ IMPORTANT: You MUST output ```tool_call``` blocks to act. Do NOT just describe w
 
     @staticmethod
     def _parse_text_tool_calls(text: str) -> list[ToolCallData]:
-        """从 LLM 文本输出中解析 ```tool_call``` 块"""
+        """从 LLM 文本输出中解析 ```tool_call``` 块。
+
+        兼容三种异常：
+        1. 未闭合 fence（输出被截断或模型遗漏 closing ```）— 用 \\Z 兜底到文末
+        2. 同一 fence 内塞多个 JSON 对象（违反 one-tool-per-block 约定）— 按花括号平衡扫描所有顶层 {…}
+        3. arguments 字段被序列化为字符串 — 二次 json.loads
+        """
         import re
-        tool_calls = []
-        # 匹配 ```tool_call ... ``` 块
-        pattern = r'```tool_call\s*\n(.*?)\n```'
+        tool_calls: list[ToolCallData] = []
+        pattern = r'```tool_call\s*\n(.*?)(?:\n```|\Z)'
         matches = re.findall(pattern, text, re.DOTALL)
-        for i, match in enumerate(matches):
-            try:
-                data = json.loads(match.strip())
+
+        idx = 0
+        for block in matches:
+            for obj_text in ReactAgent._scan_json_objects(block):
+                try:
+                    data = json.loads(obj_text)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse tool_call json: {obj_text[:120]}... ({e})")
+                    continue
+                if not isinstance(data, dict):
+                    continue
                 name = data.get("name", "")
+                if not name:
+                    continue
                 arguments = data.get("arguments", {})
                 if not arguments:
-                    # LLM 有时不嵌套 arguments，直接把参数放顶层
                     arguments = {k: v for k, v in data.items() if k != "name"}
                 if isinstance(arguments, str):
-                    arguments = json.loads(arguments)
+                    try:
+                        arguments = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        arguments = {"_raw": arguments}
                 tool_calls.append(ToolCallData(
-                    id=f"text_tc_{i}",
+                    id=f"text_tc_{idx}",
                     name=name,
                     arguments=arguments,
                 ))
-            except (json.JSONDecodeError, KeyError, TypeError) as e:
-                logger.warning(f"Failed to parse tool_call block: {match[:100]}... ({e})")
-                continue
+                idx += 1
         return tool_calls
+
+    @staticmethod
+    def _scan_json_objects(text: str):
+        """扫描文本中所有顶层 {...} JSON 对象，处理嵌套花括号与字符串内的引号。"""
+        depth = 0
+        start = -1
+        in_str = False
+        escape = False
+        for i, ch in enumerate(text):
+            if escape:
+                escape = False
+                continue
+            if in_str:
+                if ch == '\\':
+                    escape = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+                continue
+            if ch == '{':
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == '}':
+                if depth > 0:
+                    depth -= 1
+                    if depth == 0 and start >= 0:
+                        yield text[start:i + 1]
+                        start = -1
 
     # ==========================================================
     # 工具执行
@@ -496,9 +601,10 @@ IMPORTANT: You MUST output ```tool_call``` blocks to act. Do NOT just describe w
         name = tool_call.name
         args = dict(tool_call.arguments)
 
+        # 完整 args（REPL 端按 verbose 决定截断）
         await self._emit(
             task_id, EventType.TOOL_EXECUTE,
-            tool=name, args_summary=str(args)[:200],
+            tool=name, args_summary=str(args),
         )
         await self.state.update_status(
             task_id, TaskStatus.IN_PROGRESS,
@@ -513,16 +619,41 @@ IMPORTANT: You MUST output ```tool_call``` blocks to act. Do NOT just describe w
 
             param_names = [p.name for p in tool.parameters]
 
-            # 注入 project_path（如果工具需要但参数中没有）
-            if "project_path" in param_names and "project_path" not in args:
+            # 强制注入 project_path / task_id —— 不允许 LLM 自行覆盖
+            # （之前 LLM 给 plan_development 传 task_id="switch-nfs-player"，
+            #  导致 plan 被存到错误 checkpoint，dashboard 永远拿不到。）
+            if "project_path" in param_names:
                 args["project_path"] = project_path
+            if "task_id" in param_names:
+                args["task_id"] = task_id
 
             # 解析 file_path: 如果是相对路径，拼上 project_path
             if "file_path" in args and not os.path.isabs(args["file_path"]):
                 args["file_path"] = os.path.join(project_path, args["file_path"])
 
+            # 串接 code_generate 这类内部调 LLM 的工具：把 token 流转发到 LLM_TOKEN 事件
+            prev_on_token = None
+            restore_on_token = False
+            if hasattr(tool, "_on_token"):
+                prev_on_token = getattr(tool, "_on_token", None)
+                async def _emit_codegen_token(tok: str):
+                    await self._emit(task_id, EventType.LLM_TOKEN, token=tok, phase="code_generate")
+                tool._on_token = _emit_codegen_token
+                restore_on_token = True
+                # 同时发一个 LLM_REQUEST 事件让控制台知道开始
+                await self._emit(
+                    task_id, EventType.LLM_REQUEST,
+                    phase="code_generate",
+                    prompt_summary=f"{name}: {str(args)[:200]}",
+                    model=getattr(self.llm, "model", "unknown"),
+                )
+
             logger.info(f"Tool {name} args: {str(args)[:300]}")
-            result = await self.tools.execute(name, **args)
+            try:
+                result = await self.tools.execute(name, **args)
+            finally:
+                if restore_on_token:
+                    tool._on_token = prev_on_token
         except Exception as e:
             result = ToolResult(success=False, error=str(e))
 
@@ -537,12 +668,12 @@ IMPORTANT: You MUST output ```tool_call``` blocks to act. Do NOT just describe w
             await self._emit(
                 task_id, EventType.STEP_COMPLETED,
                 step=f"tool:{name}", elapsed_ms=round(elapsed_ms),
-                output_preview=(result.output or "")[:200],
+                output_preview=(result.output or ""),
             )
         else:
             await self._emit(
                 task_id, EventType.STEP_FAILED,
-                step=f"tool:{name}", error=(result.error or "")[:300],
+                step=f"tool:{name}", error=(result.error or ""),
             )
 
         return result
@@ -649,20 +780,19 @@ IMPORTANT: You MUST output ```tool_call``` blocks to act. Do NOT just describe w
     # ==========================================================
 
     async def _save_checkpoint(self, task_id: str, messages: list[dict]):
-        """保存 checkpoint（消息历史）"""
+        """保存 checkpoint（消息历史）。保留已有 plan/code_changes/test_results 等字段。"""
         try:
-            # 简化 checkpoint: 只保存消息历史
             from api.schemas import AgentCheckpoint
+            existing = await self.state.load_checkpoint(task_id)
             checkpoint = AgentCheckpoint(
                 task_id=task_id,
                 current_step_index=len(messages),
-                plan=None,
+                plan=existing.plan if existing else None,
                 memory_snapshot=self.memory.snapshot() if self.memory else {},
-                code_changes=[],
+                code_changes=existing.code_changes if existing else [],
+                test_results=existing.test_results if existing else None,
+                eval_report=existing.eval_report if existing else None,
             )
-            # 额外保存消息历史
-            checkpoint_data = checkpoint.model_dump() if hasattr(checkpoint, "model_dump") else {}
-            checkpoint_data["messages"] = messages
             await self.state.save_checkpoint(checkpoint)
         except Exception as e:
             logger.warning(f"Checkpoint save failed: {e}")

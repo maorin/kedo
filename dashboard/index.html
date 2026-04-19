@@ -3734,7 +3734,12 @@
                     consoleAppendToken(data.token || '');
                     break;
                 case 'tool_execute':
-                    consoleAppendTool(data.step || '', data.tool_type || '', data.description || '');
+                    // ReactAgent 用 data.tool / data.args_summary；旧 AgentLoop 用 step / tool_type / description
+                    consoleAppendTool(
+                        data.tool || data.step || '',
+                        data.tool_type || data.tool || '',
+                        data.args_summary || data.description || ''
+                    );
                     break;
             }
         }
@@ -3770,7 +3775,8 @@
             removeCursor();
             const span = document.createElement('span');
             span.className = 'console-done';
-            span.textContent = `<<< ${phase} done` + (summary ? `: ${summary.substring(0, 120)}` : '');
+            // 不再截断 120 字符 — 完整显示 LLM 回复（含 reasoning_content 兜底场景）
+            span.textContent = `<<< ${phase} done` + (summary ? `: ${summary}` : '');
             el.appendChild(span);
             scrollConsole();
         }
