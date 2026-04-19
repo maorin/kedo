@@ -8,7 +8,11 @@
 
 | 问题 | 文档 |
 |---|---|
-| kedo 如何解决"上下文焦虑"？长会话/大项目里怎么不撑爆 context window？ | [context-management.md](context-management.md) |
-| kedo 如何解决 Self-evaluation Drift（自评失真）？LLM 既当 executor 又当 judge，怎么防 confirmation bias？ | [self-evaluation.md](self-evaluation.md) |
+| 1️⃣ Context Anxiety（上下文焦虑）— 长会话/大项目里怎么不撑爆 context window？ | [context-management.md](context-management.md) |
+| 2️⃣ Self-evaluation Drift（自评失真）— LLM 既当 executor 又当 judge，怎么防 confirmation bias？ | [self-evaluation.md](self-evaluation.md) |
+| 3️⃣ Planning Instability（规划不稳定）— plan 生成 variance、execution drift、plan 不随进度更新 | [planning-instability.md](planning-instability.md) |
+| 4️⃣ Tool Fragility（工具依赖脆弱）— 外部依赖缺失、参数错、工具间隐式依赖 | [tool-fragility.md](tool-fragility.md) |
+| 5️⃣ Long-horizon Memory Loss（长任务遗忘）— 30+ turn 后早期约束/决策被稀释 | [long-horizon-memory.md](long-horizon-memory.md) |
+| 6️⃣ Hallucinated Execution（幻觉执行）— LLM 声称做了实际没发生 | [hallucinated-execution.md](hallucinated-execution.md) |
 
 > 欢迎增补。新问题模板：**问题本身 → 实际做了什么（对着代码引用）→ 诚实的 gap → 为何现状还 work → 下一步候选**。
