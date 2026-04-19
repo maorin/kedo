@@ -35,18 +35,34 @@ from api.websocket import ws_manager
 router = APIRouter()
 
 # 这些在 server.py 中注入
-_agent_loop = None
+_agent_loop = None  # M3 退役后保持 None；下面 routes 都用 if _agent_loop 守护
 _react_agent = None
 _state_manager = None
+_version_manager = None  # candidate API 直接用，不再走 _agent_loop.versions
+_planner = None          # planner._llm 兼容路径用
+_evaluator = None        # health 检查内省 + LLM 热切换用
 _create_llm_client = None  # create_llm_client 函数引用，避免循环导入
 _project_path: str = "."   # 项目根目录，用于文档浏览
 
 
-def set_dependencies(agent_loop, state_manager, create_llm_client_fn=None, project_path: str = ".", react_agent=None):
-    global _agent_loop, _react_agent, _state_manager, _create_llm_client, _project_path
+def set_dependencies(
+    agent_loop,
+    state_manager,
+    create_llm_client_fn=None,
+    project_path: str = ".",
+    react_agent=None,
+    version_manager=None,
+    planner=None,
+    evaluator=None,
+):
+    global _agent_loop, _react_agent, _state_manager, _version_manager
+    global _planner, _evaluator, _create_llm_client, _project_path
     _agent_loop = agent_loop
     _react_agent = react_agent
     _state_manager = state_manager
+    _version_manager = version_manager
+    _planner = planner
+    _evaluator = evaluator
     _create_llm_client = create_llm_client_fn
     _project_path = project_path
 
@@ -133,7 +149,11 @@ async def product_summary():
     tasks_context = "\n".join(task_lines)
 
     # 调用 LLM 生成需求总结
-    llm = (_react_agent.llm if _react_agent else None) or _agent_loop.planner._llm
+    llm = (_react_agent.llm if _react_agent else None) \
+        or (_planner._llm if _planner else None) \
+        or (_agent_loop.planner._llm if _agent_loop else None)
+    if llm is None:
+        return {"summary": "LLM 未配置，无法生成需求总结。", "task_count": len(tasks)}
     messages = [
         {
             "role": "system",
@@ -247,11 +267,19 @@ async def resume_from_checkpoint(task_id: str, req: ResumeCheckpointRequest = Re
                 task_id=task_id,
                 additional_context=req.additional_context,
             )
-        else:
+        elif _agent_loop:
             await _agent_loop.resume_from_checkpoint(
                 task_id=task_id,
                 additional_context=req.additional_context,
             )
+        else:
+            raise HTTPException(
+                500,
+                "Cannot resume: ReactAgent unavailable and AgentLoop deprecated. "
+                "Pre-M2 checkpoints (without messages history) cannot be resumed."
+            )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Failed to resume: {e}")
 
@@ -273,8 +301,11 @@ async def resume_from_checkpoint(task_id: str, req: ResumeCheckpointRequest = Re
 @router.get("/tasks/{task_id}/candidates")
 async def list_candidates(task_id: str):
     """获取任务的所有候选版本"""
-    candidates = _agent_loop.versions.get_candidates(task_id)
-    recommended = _agent_loop.versions.get_recommended(task_id)
+    vm = _version_manager or (_agent_loop.versions if _agent_loop else None)
+    if not vm:
+        return CandidateListResponse(task_id=task_id, candidates=[], recommended_version_id=None)
+    candidates = vm.get_candidates(task_id)
+    recommended = vm.get_recommended(task_id)
     return CandidateListResponse(
         task_id=task_id,
         candidates=candidates,
@@ -285,7 +316,10 @@ async def list_candidates(task_id: str):
 @router.get("/tasks/{task_id}/candidates/{version_id}")
 async def get_candidate(task_id: str, version_id: str):
     """获取候选版本详情"""
-    candidate = _agent_loop.versions._find(task_id, version_id)
+    vm = _version_manager or (_agent_loop.versions if _agent_loop else None)
+    if not vm:
+        raise HTTPException(404, "VersionManager unavailable")
+    candidate = vm._find(task_id, version_id)
     if not candidate:
         raise HTTPException(404, f"Candidate {version_id} not found")
     return candidate
@@ -294,7 +328,10 @@ async def get_candidate(task_id: str, version_id: str):
 @router.post("/tasks/{task_id}/candidates/{version_id}/select")
 async def select_candidate(task_id: str, version_id: str):
     """选择候选版本进行人工测试"""
-    candidate = await _agent_loop.versions.select_for_testing(task_id, version_id)
+    vm = _version_manager or (_agent_loop.versions if _agent_loop else None)
+    if not vm:
+        raise HTTPException(404, "VersionManager unavailable")
+    candidate = await vm.select_for_testing(task_id, version_id)
     if not candidate:
         raise HTTPException(404, f"Candidate {version_id} not found")
     return {"task_id": task_id, "version_id": version_id, "status": candidate.status.value}
@@ -306,8 +343,10 @@ async def select_candidate(task_id: str, version_id: str):
 
 @router.get("/tasks/{task_id}/discussion")
 async def get_discussion(task_id: str):
-    """获取当前迭代的讨论状态"""
-    iteration_state = _agent_loop._iterations.get(task_id)
+    """获取当前迭代的讨论状态。
+    M3 退役 AgentLoop 后 ReactAgent propose_alternatives 工具不维护 iteration
+    状态——它只在 LLM 调工具时即时发事件。这里返回空表示无 legacy iteration。"""
+    iteration_state = _agent_loop._iterations.get(task_id) if _agent_loop else None
     if not iteration_state or not iteration_state.discussions:
         return {"task_id": task_id, "has_discussion": False, "iteration": 1}
     latest = iteration_state.discussions[-1]
@@ -325,7 +364,7 @@ async def get_discussion(task_id: str):
 @router.get("/tasks/{task_id}/iterations")
 async def get_iterations(task_id: str):
     """获取迭代历史"""
-    iteration_state = _agent_loop._iterations.get(task_id)
+    iteration_state = _agent_loop._iterations.get(task_id) if _agent_loop else None
     if not iteration_state:
         return {"task_id": task_id, "current_iteration": 1, "max_iterations": 5, "discussions": []}
     return {
@@ -401,7 +440,9 @@ async def quick_chat(req: dict = Body(...)):
     if not message:
         raise HTTPException(status_code=400, detail="message 不能为空")
 
-    llm = (_react_agent.llm if _react_agent else None) or (_agent_loop.planner._llm if _agent_loop else None)
+    llm = (_react_agent.llm if _react_agent else None) \
+        or (_planner._llm if _planner else None) \
+        or (_agent_loop.planner._llm if _agent_loop else None)
     if not llm:
         raise HTTPException(status_code=503, detail="LLM 未初始化")
 
@@ -433,7 +474,9 @@ async def quick_chat(req: dict = Body(...)):
 @router.get("/llm/status")
 async def get_llm_status():
     """获取当前 LLM 提供商信息"""
-    llm = (_react_agent.llm if _react_agent else None) or (_agent_loop.planner._llm if _agent_loop else None)
+    llm = (_react_agent.llm if _react_agent else None) \
+        or (_planner._llm if _planner else None) \
+        or (_agent_loop.planner._llm if _agent_loop else None)
     provider = "unknown"
     model = "unknown"
     if llm:
@@ -598,16 +641,19 @@ async def switch_llm(req: dict = Body(...)):
         # 热替换 ReactAgent（主路径）
         if _react_agent:
             _react_agent.llm = new_client
-            # ReactAgent 兼容属性 .planner._llm
             if hasattr(_react_agent, "_planner_compat"):
                 _react_agent._planner_compat._llm = new_client
-            # 同步替换 ReactAgent 工具注册表里所有依赖 LLM 的工具
             for tool in _react_agent.tools._tools.values():
                 if hasattr(tool, '_llm'):
                     tool._llm = new_client
                 elif hasattr(tool, 'llm_client'):
                     tool.llm_client = new_client
-        # 兼容：AgentLoop 路径（M3 退役后整段可删）
+        # planner / evaluator 单例（M3 后独立持有，不再走 _agent_loop）
+        if _planner is not None:
+            _planner._llm = new_client
+        if _evaluator is not None:
+            _evaluator._llm = new_client
+        # 兼容：AgentLoop 路径（M3 退役后可删）
         if _agent_loop:
             _agent_loop.planner._llm = new_client
             _agent_loop.evaluator._llm = new_client
@@ -1085,12 +1131,13 @@ async def get_build_status():
     # ★ 扫描磁盘上的构建产物
     artifacts = _scan_build_artifacts()
 
-    # ★ 收集候选版本
+    # ★ 收集候选版本（优先 _version_manager，回退 _agent_loop.versions）
     candidates = []
-    if _agent_loop:
+    vm = _version_manager or (_agent_loop.versions if _agent_loop else None)
+    if vm:
         for t in tasks:
             task_id = t.get("task_id", t.get("id", ""))
-            task_candidates = _agent_loop.versions.get_candidates(task_id)
+            task_candidates = vm.get_candidates(task_id)
             for c in task_candidates:
                 candidates.append({
                     "version_id": c.version_id,
@@ -1644,8 +1691,8 @@ def _collect_agent_list() -> list:
     agents = []
 
     # Planner agent
-    if _agent_loop and hasattr(_agent_loop, "planner"):
-        planner = _agent_loop.planner
+    planner = _planner or (_agent_loop.planner if _agent_loop and hasattr(_agent_loop, "planner") else None)
+    if planner is not None:
         llm_name = type(getattr(planner, "_llm", None)).__name__ if hasattr(planner, "_llm") else "unknown"
         agents.append({
             "name": "Planner",
@@ -1657,8 +1704,8 @@ def _collect_agent_list() -> list:
         })
 
     # Evaluator agent
-    if _agent_loop and hasattr(_agent_loop, "evaluator"):
-        evaluator = _agent_loop.evaluator
+    evaluator = _evaluator or (_agent_loop.evaluator if _agent_loop and hasattr(_agent_loop, "evaluator") else None)
+    if evaluator is not None:
         llm_name = type(getattr(evaluator, "_llm", None)).__name__ if hasattr(evaluator, "_llm") else "unknown"
         agents.append({
             "name": "Evaluator",
@@ -1669,9 +1716,13 @@ def _collect_agent_list() -> list:
             "last_activity": "-",
         })
 
-    # Tool agents
-    if _agent_loop and hasattr(_agent_loop, "tool_registry"):
+    # Tool agents — 优先从 ReactAgent 拿，回退到旧 AgentLoop
+    registry = None
+    if _react_agent and hasattr(_react_agent, "tools"):
+        registry = _react_agent.tools
+    elif _agent_loop and hasattr(_agent_loop, "tool_registry"):
         registry = _agent_loop.tool_registry
+    if registry is not None:
         tools_dict = getattr(registry, "_tools", {})
         tool_stage_map = {
             "CodeGeneratorTool": ("代码生成", "coding"),

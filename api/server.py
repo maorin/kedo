@@ -13,7 +13,8 @@ from fastapi.staticfiles import StaticFiles
 
 from api.routes import router, set_dependencies
 from api.websocket import ws_manager
-from core.agent_loop import AgentLoop
+# P3-M3: AgentLoop 已退役，导入移到 _legacy；当前 server 不再使用
+# from core.agent_loop import AgentLoop  # noqa
 from core.evaluator import Evaluator
 from core.memory import AgentMemory
 from core.planner import Planner
@@ -78,7 +79,7 @@ def create_app(config: dict = None) -> FastAPI:
         max_context_chars=config.get("max_context_chars", 120_000)
     )
 
-    # ProjectProfile manager + 写拦截 guard（共享给 BuildTool / FileWriteTool / CodeGeneratorTool / AgentLoop）
+    # ProjectProfile manager + 写拦截 guard（共享给 BuildTool / FileWriteTool / CodeGeneratorTool）
     from core.project_profile import ProjectProfileManager
     from tools.profile_guard import ProfileGuard
     profile_manager = ProjectProfileManager()
@@ -128,7 +129,7 @@ def create_app(config: dict = None) -> FastAPI:
     # commit_candidate 工具（依赖 version_manager）
     tool_registry.register(CommitCandidateTool(version_manager=version_manager))
 
-    # ReactAgent (新: LLM 驱动的 ReAct Agent)
+    # ReactAgent (LLM 驱动的 ReAct Agent — P3 后唯一主路径)
     react_agent = ReactAgent(
         llm_client=llm_client,
         tool_registry=tool_registry,
@@ -137,27 +138,21 @@ def create_app(config: dict = None) -> FastAPI:
         config=config,
     )
 
-    # 旧 Agent Loop (保留向后兼容，逐步迁移)
-    agent_loop = AgentLoop(
-        state_manager=state_manager,
-        planner=planner,
-        evaluator=evaluator,
-        tool_registry=tool_registry,
-        memory=memory,
-        version_manager=version_manager,
-        config=config,
-        profile_manager=profile_manager,
-    )
-
     # 注册 WebSocket 事件处理
     state_manager.event_bus.subscribe("*", ws_manager.handle_event)
 
     # 注入依赖到路由（含 create_llm_client 引用，避免循环导入）
+    # P3-M3: agent_loop=None 表示退役；planner/evaluator/version_manager 单独传入
+    # 让 routes 不再通过 _agent_loop.X 访问这些组件
     set_dependencies(
-        agent_loop, state_manager,
+        agent_loop=None,
+        state_manager=state_manager,
         create_llm_client_fn=create_llm_client,
         project_path=config.get("project_path", "."),
         react_agent=react_agent,
+        version_manager=version_manager,
+        planner=planner,
+        evaluator=evaluator,
     )
 
     # 注册路由 — 必须在 StaticFiles 之前
