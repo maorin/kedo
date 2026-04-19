@@ -121,6 +121,14 @@ class ProposeAlternativesTool(BaseTool):
             except Exception as e:
                 logger.warning(f"propose_alternatives: event emit failed: {e}")
 
+        # ★ 把 proposals 存到 state_manager，让 /tasks/{id}/discussion REST 端点能读到
+        # （事件流 DISCUSSION_PROPOSALS 只推给 WebSocket，REPL /discuss 走 REST 查询读不到）
+        if self._state is not None:
+            try:
+                self._state.set_discussion(task_id, situation_summary, normalized)
+            except Exception as e:
+                logger.warning(f"propose_alternatives: set_discussion failed: {e}")
+
         logger.info(f"propose_alternatives waiting on user input for task {task_id} (timeout={self._timeout_s}s)")
 
         # 阻塞等用户回应
@@ -128,10 +136,23 @@ class ProposeAlternativesTool(BaseTool):
         try:
             payload = await asyncio.wait_for(queue.get(), timeout=self._timeout_s)
         except asyncio.TimeoutError:
+            # 清掉 pending discussion 让 /discuss 不再显示僵尸提案
+            if self._state is not None:
+                try:
+                    self._state.clear_discussion(task_id)
+                except Exception:
+                    pass
             return ToolResult(
                 success=False,
                 error=f"propose_alternatives timed out after {self._timeout_s}s waiting for user choice",
             )
+        finally:
+            # user 响应后也清掉
+            if self._state is not None:
+                try:
+                    self._state.clear_discussion(task_id)
+                except Exception:
+                    pass
 
         # routes.py submit_discussion_input 推 dict {action, proposal_id, human_input, additional_constraints}
         choice_id = payload.get("proposal_id") or ""

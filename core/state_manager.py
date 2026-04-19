@@ -87,6 +87,9 @@ class StateManager:
         self._checkpoints: dict[str, AgentCheckpoint] = {}
         self._logs: dict[str, list[str]] = {}
         self._pause_events: dict[str, asyncio.Event] = {}
+        # 活跃讨论：propose_alternatives 工具阻塞等 user input 时的 pending proposals
+        # key: task_id, value: {"summary": str, "proposals": list[dict], "started_at": isoformat}
+        self._discussions: dict[str, dict[str, Any]] = {}
 
         # 启动时从磁盘加载历史任务索引
         self._load_task_index()
@@ -142,6 +145,25 @@ class StateManager:
     # ----------------------------------------------------------
     # 暂停 / 恢复
     # ----------------------------------------------------------
+
+    # ----------------------------------------------------------
+    # 活跃讨论（propose_alternatives 工具阻塞等输入时的 proposals 存储）
+    # ----------------------------------------------------------
+
+    def set_discussion(self, task_id: str, summary: str, proposals: list[dict]):
+        """propose_alternatives 工具在阻塞 queue.get 前调用，让 /discuss 能拿到 proposals"""
+        from datetime import datetime, timezone
+        self._discussions[task_id] = {
+            "summary": summary,
+            "proposals": proposals,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def get_discussion(self, task_id: str) -> Optional[dict]:
+        return self._discussions.get(task_id)
+
+    def clear_discussion(self, task_id: str):
+        self._discussions.pop(task_id, None)
 
     async def pause_task(self, task_id: str):
         """暂停任务执行"""

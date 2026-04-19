@@ -754,11 +754,22 @@ class KedoREPL:
 
     def _cmd_discuss(self, _=""):
         """参与闭环讨论"""
-        if not self.current_task_id:
-            print(f"  {MUTED}暂无活跃任务{C.RESET}")
-            return
+        # current_task_id 为空时 fallback 查最近 in_progress / paused 的 task
+        # （用户通过 dashboard/API 提交的 task，REPL 不会自动设 current_task_id）
+        task_id = self.current_task_id
+        if not task_id:
+            tasks = self._api_get("/tasks") or []
+            active = [t for t in tasks if t.get("status") in ("in_progress", "paused", "planning")]
+            if active:
+                # 取时间最近的
+                active.sort(key=lambda t: t.get("created_at", ""), reverse=True)
+                task_id = active[0].get("task_id", "")
+                print(f"  {MUTED}未选中任务，自动切到最近活跃任务 {task_id}{C.RESET}")
+            else:
+                print(f"  {MUTED}暂无活跃任务{C.RESET}")
+                return
 
-        data = self._api_get(f"/tasks/{self.current_task_id}/discussion")
+        data = self._api_get(f"/tasks/{task_id}/discussion")
         if not data or not data.get("has_discussion", True) or data.get("has_discussion") is False:
             print(f"  {MUTED}当前没有进行中的讨论{C.RESET}")
             return
@@ -767,7 +778,12 @@ class KedoREPL:
         print(banner("闭环讨论", ACCENT))
         print()
 
-        # 显示问题
+        # summary（新 propose_alternatives 带）
+        summary = data.get("summary", "")
+        if summary:
+            print(f"  {MUTED}{summary[:500]}{C.RESET}\n")
+
+        # 显示问题（旧 AgentLoop 结构）
         issues = data.get("issues", [])
         if issues:
             print(f"  {ERROR}{C.BOLD}发现 {len(issues)} 个问题:{C.RESET}")
@@ -777,15 +793,25 @@ class KedoREPL:
                 print(f"    {color}{i}. [{sev}] {issue.get('category', '')}: {issue.get('description', '')}{C.RESET}")
             print()
 
-        # 显示方案
+        # 显示方案（兼容 propose_alternatives 的 {id,title,description,pros,cons}
+        # 和旧 AgentLoop 的 {proposal_id,title,description,ai_recommended,...}）
         proposals = data.get("proposals", [])
         if proposals:
             print(f"  {ACCENT}{C.BOLD}可选方案:{C.RESET}")
             for i, p in enumerate(proposals, 1):
                 rec = f" {SUCCESS}⭐推荐{C.RESET}" if p.get("ai_recommended") else ""
                 print(f"    {ACCENT}{i}. {p.get('title', '')}{C.RESET}{rec}")
-                print(f"       {MUTED}{p.get('description', '')}{C.RESET}")
-                print(f"       工作量: {p.get('estimated_effort', '?')}  风险: {p.get('risk_level', '?')}")
+                desc = p.get("description", "")
+                if desc:
+                    print(f"       {MUTED}{desc}{C.RESET}")
+                pros = p.get("pros", "")
+                cons = p.get("cons", "")
+                if pros:
+                    print(f"       {SUCCESS}优势: {pros}{C.RESET}")
+                if cons:
+                    print(f"       {WARN}劣势: {cons}{C.RESET}")
+                if p.get("estimated_effort") or p.get("risk_level"):
+                    print(f"       工作量: {p.get('estimated_effort', '?')}  风险: {p.get('risk_level', '?')}")
             print()
 
             # 让用户选择
@@ -795,9 +821,11 @@ class KedoREPL:
 
                 proposal_id = ""
                 if choice.isdigit() and 1 <= int(choice) <= len(proposals):
-                    proposal_id = proposals[int(choice) - 1].get("proposal_id", "")
+                    sel = proposals[int(choice) - 1]
+                    # propose_alternatives 用 'id'，旧 AgentLoop 用 'proposal_id'
+                    proposal_id = sel.get("id") or sel.get("proposal_id", "")
 
-                self._api_post(f"/tasks/{self.current_task_id}/discussion/input", {
+                self._api_post(f"/tasks/{task_id}/discussion/input", {
                     "proposal_id": proposal_id,
                     "human_input": human_input,
                 })

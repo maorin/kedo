@@ -343,9 +343,25 @@ async def select_candidate(task_id: str, version_id: str):
 
 @router.get("/tasks/{task_id}/discussion")
 async def get_discussion(task_id: str):
-    """获取当前迭代的讨论状态。
-    M3 退役 AgentLoop 后 ReactAgent propose_alternatives 工具不维护 iteration
-    状态——它只在 LLM 调工具时即时发事件。这里返回空表示无 legacy iteration。"""
+    """获取当前活跃讨论。
+    优先读 ReactAgent propose_alternatives 工具写入的 state.get_discussion；
+    fallback 到旧 AgentLoop iteration_state（M3 退役后永远为 None）。"""
+    # ★ 新路径：ReactAgent propose_alternatives 的活跃 proposals
+    if _state_manager:
+        active = _state_manager.get_discussion(task_id)
+        if active:
+            # 转成前端期望的 DiscussionResponse 类似结构
+            return {
+                "task_id": task_id,
+                "has_discussion": True,
+                "iteration": 1,
+                "issues": [],
+                "proposals": active["proposals"],
+                "summary": active.get("summary", ""),
+                "started_at": active.get("started_at", ""),
+                "source": "propose_alternatives",
+            }
+    # Fallback：旧 AgentLoop discussion（M3 后 _agent_loop=None，此分支永远跳过）
     iteration_state = _agent_loop._iterations.get(task_id) if _agent_loop else None
     if not iteration_state or not iteration_state.discussions:
         return {"task_id": task_id, "has_discussion": False, "iteration": 1}
