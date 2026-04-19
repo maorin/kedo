@@ -819,17 +819,18 @@ class KedoREPL:
                 choice = input(f"  {ACCENT}选择方案 (编号, 或直接回车选AI推荐): {C.RESET}").strip()
                 human_input = input(f"  {ACCENT}追加意见 (可选, 直接回车跳过): {C.RESET}").strip()
 
-                proposal_id = ""
+                # 选编号 → 取对应 proposal id；空回车 → 默认第一个（"AI 推荐"）
                 if choice.isdigit() and 1 <= int(choice) <= len(proposals):
                     sel = proposals[int(choice) - 1]
-                    # propose_alternatives 用 'id'，旧 AgentLoop 用 'proposal_id'
-                    proposal_id = sel.get("id") or sel.get("proposal_id", "")
+                else:
+                    sel = proposals[0]
+                proposal_id = sel.get("id") or sel.get("proposal_id", "")
 
                 self._api_post(f"/tasks/{task_id}/discussion/input", {
                     "proposal_id": proposal_id,
                     "human_input": human_input,
                 })
-                print(f"  {SUCCESS}✓ 已提交讨论意见{C.RESET}")
+                print(f"  {SUCCESS}✓ 已提交（选了：{sel.get('title', proposal_id)}）{C.RESET}")
             except (KeyboardInterrupt, EOFError):
                 print(f"\n  {MUTED}已取消{C.RESET}")
 

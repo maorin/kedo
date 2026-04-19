@@ -79,6 +79,15 @@ class ProposeAlternativesTool(BaseTool):
     ) -> ToolResult:
         if not task_id:
             return ToolResult(success=False, error="task_id required (auto-injection failed)")
+        # ★ 兼容 LLM 传 dict 格式 {"a": "<full text>", "b": ...} —— 转 list
+        # 不少 LLM 在 schema type=object 时倾向 dict，规整成 [{"id":k, "description":v}]
+        if isinstance(options, dict):
+            options = [
+                {"id": k, "title": str(v).split("。")[0][:80] if v else k.upper(),
+                 "description": str(v) if v else ""}
+                for k, v in options.items()
+            ]
+
         if not options or len(options) < 2:
             return ToolResult(
                 success=False,
@@ -90,7 +99,14 @@ class ProposeAlternativesTool(BaseTool):
         normalized = []
         for i, opt in enumerate(options):
             if not isinstance(opt, dict):
-                normalized.append({"id": f"opt_{i}", "title": str(opt), "description": "", "pros": "", "cons": ""})
+                # 纯字符串选项 — 把字符串当 description，前 80 字当 title
+                s = str(opt)
+                normalized.append({
+                    "id": f"opt_{i}",
+                    "title": s.split("。")[0][:80] if s else f"Option {i+1}",
+                    "description": s,
+                    "pros": "", "cons": "",
+                })
                 continue
             normalized.append({
                 "id": opt.get("id") or f"opt_{i}",
@@ -160,7 +176,12 @@ class ProposeAlternativesTool(BaseTool):
         constraints = payload.get("additional_constraints") or []
 
         chosen = next((o for o in normalized if o["id"] == choice_id), None)
-        chosen_title = chosen["title"] if chosen else f"(id={choice_id})"
+        # ★ choice_id 空或无匹配时默认选第一个（"AI 推荐" 语义）
+        if chosen is None:
+            chosen = normalized[0]
+            choice_id = chosen["id"]
+            logger.info(f"propose_alternatives: empty/unknown choice, defaulting to first option {choice_id}")
+        chosen_title = chosen["title"]
 
         return ToolResult(
             success=True,
