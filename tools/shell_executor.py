@@ -84,8 +84,23 @@ class ShellExecutorTool(BaseTool):
             # - SUDO_ASKPASS=/bin/false + DISPLAY="" + SSH_ASKPASS=/bin/false：
             #   截断 sudo / ssh 通过 askpass 程序绕过 tty 弹窗
             # - GIT_TERMINAL_PROMPT=0 / GIT_ASKPASS=/bin/echo：阻止 git http 凭证弹窗
+            #
+            # ★ PATH 兜底：当 kedo 进程通过 nohup/systemd/cron 等"清环境"方式启动时，
+            #   os.environ['PATH'] 可能为空 → subprocess 找不到任何命令 → 在 dash 下
+            #   还不会输出"command not found"到 stderr，让 LLM 看到的是空 error 莫名失败。
+            #   这里强制注入一个合理的 PATH 默认值（仅当父进程没有时）。
+            inherited = dict(os.environ)
+            if not inherited.get("PATH"):
+                inherited["PATH"] = (
+                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                    ":/opt/devkitpro/tools/bin:/opt/devkitpro/devkitA64/bin"
+                )
+                logger.warning(
+                    "Parent process PATH is empty; injected default PATH for subprocess. "
+                    "Investigate how kedo was launched (nohup/systemd/cron strip env vars)."
+                )
             child_env = {
-                **os.environ,
+                **inherited,
                 "PYTHONDONTWRITEBYTECODE": "1",
                 "SUDO_ASKPASS": "/bin/false",
                 "SSH_ASKPASS": "/bin/false",
