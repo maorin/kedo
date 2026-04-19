@@ -1,8 +1,8 @@
-# kedo 如何解决"自评失真"
+# kedo 如何解决 Self-evaluation Drift（自评失真）
 
 ## 问题
 
-LLM 既是 executor 又是 judge，天然有 confirmation bias。具体在 kedo 体现为：
+**Self-evaluation Drift**：LLM 既是 executor 又是 judge，天然有 confirmation bias——它对自己生成的代码/决策会系统性偏乐观，对失败有下意识的合理化。具体在 kedo 体现为：
 
 - **"我完成了"但没调 respond**（Kimi prose ending：`"编译成功 🎉 做了 5 件事..."` → 框架标 completed，实际可能还有未检 issue）
 - **"我修好了"但 patch 逻辑错**（auto_fix 说诊断对了，patch 其实没修到真错误）
@@ -85,13 +85,13 @@ LLM 判断不了或陷死循环时，显式把方向盘交给人类：
 
 ## 为什么现状还 work
 
-- 最硬的 bias bypass 是 **build exit_code** — 这一关无法 fake，撑住了 80% 的自评失真场景
+- 最硬的 bias bypass 是 **build exit_code** — 这一关无法 fake，撑住了 80% 的 Self-evaluation Drift 场景
 - **auto_fix 的 re-build loop 天然反自评**：LLM 说"修好了"不算，编译器说算
 - **收敛检测** 在 LLM 陷入"这次不一样" 时**直接切断**，不听 LLM 解释
 - **人工兜底** 捕捉最后 5% — 用户一眼就能看出 "build 成功但代码是 stub" 这类失真
 - ProfileGuard 的**结构检查**专门拦"LLM 以为自己改好了但实际破坏了关键 target" 这类盲点
 
-## 实战中自评失真真发生过的案例
+## 实战中 Self-evaluation Drift 真发生过的案例
 
 **switchvideo 2026-04-19 13:51 事件**：
 - LLM 用 prose 汇报："编译成功 🎉 做了 5 件事..."
@@ -101,7 +101,7 @@ LLM 判断不了或陷死循环时，显式把方向盘交给人类：
 - 但 `nfs_client.c` 被 LLM 改成**本地文件系统 stub**，根本没接真 NFS
 - LLM 的"成功"是编译层面的成功，**功能层面 silently degraded**，LLM 汇报时也没明说
 
-这就是**自评失真最棘手的形态**：LLM 没撒谎（build 真过了），但它选择了个用户没要求的简化路径（stub NFS）还当成"完成" — 功能预期和实现偏离，客观校验回路（只测 build）覆盖不到这一层。
+这就是 **Self-evaluation Drift 最棘手的形态**：LLM 没撒谎（build 真过了），但它选择了个用户没要求的简化路径（stub NFS）还当成"完成" — 功能预期和实现偏离，客观校验回路（只测 build）覆盖不到这一层。
 
 ## 下一步候选（未决）
 
