@@ -136,7 +136,7 @@ class ShellExecutorTool(BaseTool):
             return ToolResult(success=False, error=f"Execution error: {e}")
 
     def _check_safety(self, command: str) -> Optional[str]:
-        """安全检查 — 阻止危险命令 + 任何提权调用"""
+        """安全检查 — 阻止危险命令 + 任何提权调用 + 禁止污染项目根的 git clone/init"""
         cmd_lower = command.lower().strip()
 
         # 检查黑名单
@@ -155,5 +155,21 @@ class ShellExecutorTool(BaseTool):
                     f"refused to avoid prompting for password. "
                     f"Install/configure tooling out-of-band, then retry without {tok}."
                 )
+
+        # ★ 禁止 `git clone` / `git init` 污染项目根
+        # 背景：LLM 尝试"交叉编译 libnfs" 时会 git clone 整个库（1000+ 文件）
+        # 进项目根 → 污染任务链上下文 / dashboard 文件树 / 未来的 git commit。
+        # 若真要 clone 到 /tmp 请写完整路径，LLM 应走 propose_alternatives 先确认。
+        if re.search(r"\bgit\s+(clone|init|submodule\s+add)\b", cmd_lower):
+            return (
+                "Refusing git clone/init/submodule — this tends to pull third-party "
+                "source trees (often 1000+ files) into the project root and pollutes "
+                "the task context. Options:\n"
+                "  1) If you truly need a third-party library, call propose_alternatives "
+                "     to let the user decide between: local stub / user-prepared "
+                "     system package / different approach.\n"
+                "  2) If you need to experiment with something externally, ask the user "
+                "     to clone it somewhere out-of-tree and point you at it."
+            )
 
         return None

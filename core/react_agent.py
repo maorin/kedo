@@ -72,6 +72,23 @@ You decide which approach based on complexity. Simple → direct tools. Complex 
 5. Be concise in tool arguments — don't repeat the entire file when editing
 6. Use Chinese (中文) when responding to Chinese input
 7. Never include API keys or secrets in code files
+8. **Emit at most 5 tool_call blocks per response.** Batches larger than that \
+get truncated. If you need more operations, do them in separate turns.
+
+## Scope Awareness — 遇到以下"超纲" 情况立刻停手并用 `propose_alternatives`：
+
+- 需要**交叉编译一个第三方 C 库**（如 libnfs/openssl 到 Switch/ARM）—— \
+这超出单 agent 能力范围，靠 `shell_execute` 一路硬试会失败 N 次并污染项目
+- 需要 **sudo / 修改系统路径** 才能继续（shell sandbox 已经挡了）
+- 需要**在项目根 git clone 第三方仓库**（已经挡了，会收到 refused 错误）
+- 需要**访问外部网络资源**（下载/curl）才能修复当前问题
+
+这些场景请调用 `propose_alternatives`，给用户 2-3 个选项让其决定：
+  (a) 使用 **local stub** 替代第三方依赖
+  (b) 请用户在系统层面预置好依赖（如装 switch-libnfs 包）后重试
+  (c) 换一条技术路线（如 SMB 替代 NFS、服务器转码替代客户端解码）
+
+不要自己硬试 — 硬试会烧 LLM 额度、污染项目、最终仍然失败。
 
 {project_context}
 """
@@ -103,6 +120,8 @@ class ReactAgent:
         self.max_turns: int = self.config.get("max_agent_turns", 50)
         self.max_consecutive_errors: int = 3
         self.max_tool_output_chars: int = 4000
+        # Fix 2: 单次 LLM 响应里最多允许的 tool_call 数量（防"一次塞 155 个"风暴）
+        self.max_tool_calls_per_turn: int = self.config.get("max_tool_calls_per_turn", 10)
         # 收敛检测：同 (tool_name, error_fingerprint) 在最近 K 次失败中重复 N 次 → escalate
         self.convergence_window: int = self.config.get("convergence_window", 4)
         self.convergence_threshold: int = self.config.get("convergence_threshold", 3)
@@ -372,9 +391,20 @@ class ReactAgent:
                 return text
 
             # Case 2: 有工具调用 → 执行
+            # Fix 2: 单次响应 tool_call 数量上限 — 防 LLM 塞 155 个 shell_execute 那种风暴
+            if len(response.tool_calls) > self.max_tool_calls_per_turn:
+                logger.warning(
+                    f"LLM returned {len(response.tool_calls)} tool_calls in one response; "
+                    f"truncating to {self.max_tool_calls_per_turn}"
+                )
+                truncated_calls = response.tool_calls[:self.max_tool_calls_per_turn]
+                response.tool_calls = truncated_calls
             # 先把 assistant 消息追加到历史
             assistant_msg = self._format_assistant_message(response)
             messages.append(assistant_msg)
+
+            # 标记是否因工具早停需要跳出 turn 循环
+            early_stop_reason: Optional[str] = None
 
             for tc in response.tool_calls:
                 # respond 工具特殊处理 → 直接结束
@@ -405,11 +435,28 @@ class ReactAgent:
                     consecutive_errors = 0
                 else:
                     consecutive_errors += 1
-                    fp = self._error_fingerprint(result.error or "")
+                    # Fix 4: 空 error 用 [empty] 占位，让 convergence 能识别"反复返空"
+                    fp = self._error_fingerprint(result.error or "") or "[empty]"
                     self._failure_fingerprints.append((tc.name, fp))
                     # 只保留最近 N 条避免无限增长
                     if len(self._failure_fingerprints) > self.convergence_window * 2:
                         self._failure_fingerprints = self._failure_fingerprints[-self.convergence_window * 2:]
+                    # Fix 1: tool_call 循环内失败早停 — 达阈值立刻跳出，不跑完全部
+                    if consecutive_errors >= self.max_consecutive_errors:
+                        early_stop_reason = f"Stopping: {consecutive_errors} consecutive tool failures."
+                        logger.warning(f"Early stop: {early_stop_reason} (after {tc.name})")
+                        break
+                    # Fix 4 收敛检测也提前触发
+                    if self._convergence_detected():
+                        stuck_tool, stuck_fp = self._failure_fingerprints[-1]
+                        early_stop_reason = f"Stopping: convergence detected on {stuck_tool}"
+                        logger.warning(f"Early stop: {early_stop_reason}")
+                        break
+
+            # 如果在 tool_call 循环里早停，跳出 turn 循环
+            if early_stop_reason:
+                await self._emit(task_id, EventType.STEP_FAILED, error=early_stop_reason)
+                return early_stop_reason
 
             # 连续错误上限
             if consecutive_errors >= self.max_consecutive_errors:
