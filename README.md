@@ -125,19 +125,25 @@ kedo 的核心是 **ReactAgent** — 一个 LLM 驱动的 ReAct（Reasoning + Ac
 用户输入 → Agent 思考(LLM) → 选择工具 → 执行 → 观察结果 → 再思考 → ... → 回复用户
 ```
 
-### Agent 可用工具
+### Agent 可用工具（15 个）
 
 | 工具 | 说明 |
 |------|------|
 | `file_read` | 读取项目文件 |
-| `file_write` | 创建/修改文件 |
+| `file_write` | 创建/修改文件（受 ProfileGuard 拦截） |
 | `file_search` | 搜索文件 |
-| `shell_execute` | 执行 Shell 命令 |
+| `shell_execute` | 执行 Shell 命令（沙箱：拦提权 + DEVNULL stdin） |
 | `build` | 编译项目（自动探测构建系统） |
-| `code_generate` | LLM 驱动的代码生成 |
+| `code_generate` | LLM 驱动的代码生成（受 ProfileGuard 拦截） |
 | `test_run` | 运行测试 |
 | `git` | Git 操作 |
-| `respond` | 向用户发送最终回复 |
+| `plan_development` | LLM 调 Planner 拆解需求 → 写 plan checkpoint |
+| `auto_fix` | LLM-driven 单轮修复：诊断 stderr → patch → 写文件 |
+| `evaluate` | 4 维度代码质量打分（需求/质量/测试/安全） |
+| `commit_candidate` | 固化候选版本 + Git tag + dashboard 候选 panel |
+| `propose_alternatives` | 结构化"换思路 vs 你拍板"，阻塞等 dashboard 选择 |
+| `pause_for_human` | LLM 自评搞不定 → 暂停 + dashboard banner 等用户建议 |
+| `respond` | 向用户发送最终回复（必须用以正式收尾） |
 
 ### 双模式 LLM 调用
 
@@ -182,49 +188,26 @@ kedo 为每个项目自动生成 `.kedo/project_profile.json`：
 - **human_verified 保护**：标记后 auto_fix 不可修改，防止 LLM "简化"掉关键构建参数
 - **环境变量探测**：`apply_required_env` 在构建前自动探测并设置 DEVKITPRO 等变量
 
-## Bug Fix 快速通道
+## 自动修复系统（auto_fix 工具）
 
-当用户提交的需求看起来是**运行时 bug 报告**（包含"会退出"、"应该是"、"不对"、"崩溃"、"bug"、"修复"、"instead of"、"should be" 等关键词）时，kedo 自动走 Bug Fix 快速通道，**跳过 planner 五步流程**：
+P3 后 auto_fix 是 ReactAgent 可调的工具（`tools/auto_fix_tool.py`），不再是 AgentLoop 的内嵌循环。LLM 模式：build fail → call `auto_fix(failed_step, error_text)` → 收 diagnosis + patched file → 再 build → ...
 
-```
-用户: "长按R 会退出 应该是一直快进"
-  │
-  ├─ 1. _is_bug_report() 关键词识别
-  ├─ 2. _find_bug_related_files() 定位相关源文件（小项目全读，大项目按 top-N 文件大小）
-  ├─ 3. LLM 诊断（debugger 模式 prompt + 完整源码 + 平台知识）
-  ├─ 4. 应用 patch（复用 auto_fix 的白名单 + 保护逻辑）
-  └─ 5. BUILD 验证
-```
-
-与完整 pipeline 的对比：
-
-| | 完整 pipeline | Bug Fix 通道 |
-|---|---|---|
-| 步骤 | planning → code_generate → build → test → evaluate | LLM 诊断 → patch → build |
-| 源码输入 | 前 40 行摘要 | 全文完整内容 |
-| 耗时 | ~15 分钟+ | ~6 分钟 |
-| 回退策略 | — | LLM 判定无法单文件修 or 解析失败 → 回退正常流程 |
-
-**适用场景**：已有项目中的运行时行为修复（UI、逻辑、控制流）。
-**不适用**：新功能开发、架构重构、多文件级别的修改。
-
-## 自动修复系统
-
-构建/测试失败时，kedo 的 auto_fix 三层防御：
+三层防御：
 
 | 层级 | 机制 | 说明 |
 |------|------|------|
-| Prompt 引导 | `human_verified` 的 profile 在修复上下文中标 `[READ-ONLY]` | 引导 LLM 不碰已验证配置 |
-| 写入拦截 | 写文件前检查 `human_verified=true` | 阻止 LLM 修改已验证的 profile |
-| 变更验证 | 写入后检查关键字段（TOOLCHAIN_FILE / test.strategy） | 回归时自动 revert |
+| Prompt 引导 | `human_verified` profile 在修复上下文中标 `[READ-ONLY]` | 引导 LLM 不碰已验证配置 |
+| 写入拦截 | `ProfileGuard.check()` 写文件前 hook | 拦掉 human_verified profile 覆盖 + Makefile/CMake 关键 target 丢失 |
+| 收敛检测 | 同 tool + 相似 fingerprint 连续 3 次 | 自动 emit paused_for_human + state.pause_task → 升级到人工 |
 
-auto_fix 流程：
-1. 结构化解析 stderr（cmake/gcc/ld 错误分类），聚焦第一个错误
-2. 收集失败上下文：相关项目文件 + 历次失败记录（prior_attempts）
-3. LLM 诊断根因 + 输出修复 patch（完整文件内容），历次失败作为 negative examples 避免重复犯错
-4. Profile 变更白名单验证：auto_fix 只能修改 build/notes 字段，其他字段自动 revert
-5. 应用 patch → 重试构建（增量修复：每次只修一个错误）
-6. 重复错误早停：连续两次 stderr 指纹相似 → 判定 LLM 无法修复 → 升级到人工
+auto_fix 工具流程（每次调用做一轮）：
+1. 收集相关项目文件（Makefile / CMakeLists / 目标源文件 / .kedo/project_profile.json）
+2. 注入 prior_attempts 作为 negative examples，告诉 LLM 哪些修法已经试过且无效
+3. LLM 输出 JSON 补丁（`{file_to_fix, action, new_content, diagnosis}` 或 `{unfixable, reason}`）
+4. ProfileGuard 检查 → 通过则写文件，不通过返错给 LLM 让它换思路
+5. 写入 prior_attempts（patched_file + diagnosis），让下次 auto_fix 看到
+
+ReactAgent 决定循环：根据 auto_fix 返回的 success/diagnosis，LLM 自主决定再 build 一次还是放弃用 `pause_for_human`/`propose_alternatives`。
 
 ## REPL 命令
 
@@ -405,30 +388,41 @@ kedo/
 │   ├── repl.py                交互式 REPL + DECSTBM 底栏 + /verbose 切换（1,308 行）
 │   └── theme.py               终端主题
 ├── core/
-│   ├── react_agent.py         LLM 驱动的 ReAct 主循环 + 文本模式解析器（832 行）
-│   ├── agent_loop.py          旧 Agent 流水线（保留向后兼容，3,054 行）
-│   ├── planner.py             任务规划器（848 行）
-│   ├── evaluator.py           多维度质量评估（508 行）
-│   ├── project_profile.py     项目 Profile 管理（642 行）
+│   ├── react_agent.py         LLM 驱动的 ReAct 主循环 + 文本模式解析器
+│   │                          + 收敛检测 + 任务链继承 + resume_from_checkpoint
+│   ├── agent_loop.py          22 行 deprecated shim（DeprecationWarning + re-export）
+│   ├── _legacy/
+│   │   └── agent_loop.py      旧 Agent 流水线 3406 行（4-6 周后真删）
+│   ├── planner.py             任务规划器
+│   ├── evaluator.py           多维度质量评估（被 EvaluateTool 包装）
+│   ├── project_profile.py     项目 Profile 管理 + ProfileGuard 写拦截
 │   ├── platform_knowledge.py  平台知识 + CMakeLists 模板（Switch 等）
-│   ├── state_manager.py       状态持久化（378 行）
-│   ├── version_manager.py     候选版本管理（344 行）
-│   └── memory.py              上下文记忆（321 行）
+│   ├── state_manager.py       状态持久化
+│   ├── version_manager.py     候选版本管理（被 CommitCandidateTool 包装）
+│   └── memory.py              上下文记忆
 ├── api/
-│   ├── server.py              FastAPI 应用 + LLM 客户端 + dashboard 缓存中间件（1,090 行）
-│   ├── routes.py              REST API + 产品需求总结（2,072 行）
-│   ├── schemas.py             数据模型（364 行）
+│   ├── server.py              FastAPI + LLM 客户端 + 工具注册 + dashboard 缓存
+│   ├── routes.py              REST API + set_dependencies 接收 react_agent /
+│   │                          version_manager / planner / evaluator 单例
+│   ├── schemas.py             数据模型（AgentCheckpoint 含 messages 历史）
 │   └── websocket.py           WebSocket 推送
-├── tools/
-│   ├── code_generator.py      代码生成 + 校验（486 行）
-│   ├── plan_tool.py           PlanTool — 调 planner 拆解需求 + 写 checkpoint
-│   ├── build_tool.py          BuildTool — 封装 ProjectProfileManager
-│   ├── respond_tool.py        RespondTool — Agent 最终回复
-│   ├── file_tool.py           文件操作
-│   ├── shell_executor.py      Shell 执行（沙箱：DEVNULL stdin + 拦提权 + 屏蔽 askpass，159 行）
-│   └── test_runner.py         测试运行
+├── tools/                     ReactAgent 的 15 个工具
+│   ├── code_generator.py      code_generate（+ on_token 回调流式 + ProfileGuard 拦截）
+│   ├── shell_executor.py      shell_execute（沙箱：拦提权 + DEVNULL stdin）
+│   ├── file_tool.py           file_read/write/search（+ ProfileGuard 拦 write）
+│   ├── build_tool.py          build（封装 ProjectProfileManager）
+│   ├── test_runner.py         test_run
+│   ├── git_tool.py            git
+│   ├── respond_tool.py        respond（最终回复）
+│   ├── plan_tool.py           plan_development（拆解 + 写 checkpoint）
+│   ├── auto_fix_tool.py       auto_fix（LLM 单轮诊断 + patch + 受 ProfileGuard 保护）
+│   ├── pause_tool.py          pause_for_human（开放式 escalate）
+│   ├── propose_alternatives_tool.py  propose_alternatives（结构化"换思路"）
+│   ├── evaluate_tool.py       evaluate（4 维度打分）
+│   ├── commit_candidate_tool.py      commit_candidate（固化候选）
+│   └── profile_guard.py       ProfileGuard 写拦截器（共享给 file/codegen/auto_fix）
 └── dashboard/
-    └── index.html             Web Dashboard（4,809 行）
+    └── index.html             Web Dashboard（含 cache-busting middleware）
 ```
 
 ## 安全护栏（Hardening）
@@ -457,6 +451,15 @@ FastAPI 中间件给 `/` 和 `/dashboard/*` 所有响应注入 `Cache-Control: n
 ### 工具参数注入
 ReactAgent 自动注入的运行时参数（`task_id`、`project_path`）**强制覆盖** LLM 自己传的值。原因：LLM 看到 schema 里有这些参数会自己编一个看似合理的值（如 `task_id="switch-nfs-player"`），导致 PlanTool 把 plan 写到错误的 checkpoint，dashboard 永远看不到子任务列表。
 
+### 收敛检测（防 LLM 死循环）
+ReactAgent 每次工具失败记录 `(tool_name, error_fingerprint)`；最近窗口（默认 4 次）内同 tool + 相似指纹（85% SequenceMatcher 阈值）≥3 次 → 自动 emit `paused_for_human` + 调 `state.pause_task` + 标 failed。fingerprint 归一化 ANSI / 行号 / 绝对路径 / 内存地址 / tmp 路径，跨多次构建仍能识别"同一个错"。
+
+### 任务链上下文继承
+新 task 启动时 ReactAgent 检查同项目最近 failed/paused 的 task，把它的 plan 子任务标题链 + 卡点 + 描述摘要注入新 task 的 system prompt，避免 LLM 从零探索同一片雷区（你提交"修复这个问题再编译"时拿到的不是空白上下文）。
+
+### 强制 respond 收尾
+LLM 输出非空 prose 但没调任何工具时（典型 Kimi prose 结尾 quirk："编译成功🎉做了 5 件事..."），ReactAgent 第一次回灌 user "请用 respond 工具明确收尾或继续调工具" 让 LLM 重出一轮；第二次出现才接受为 final answer。避免 reasoning_content 截断的半成品被误判为任务完成。
+
 ## 已知局限与改进历程
 
 kedo 在交叉编译平台上曾暴露 6 个核心能力差距，经三轮改进已全部修复：
@@ -470,10 +473,22 @@ kedo 在交叉编译平台上曾暴露 6 个核心能力差距，经三轮改进
 | G5 | CMakeLists 生成质量差 | 按项目类型提供已验证的 CMakeLists 模板 | 已修复 |
 | G6 | 生成非代码文件 | 二进制文件走 ImageMagick/ffmpeg 生成 | 已修复 |
 
+### P3 单 Agent 架构迁移（已完成）
+
+旧版本 kedo 同时运行 `AgentLoop`（3406 行刚性流水线）和 `ReactAgent`（LLM 驱动 ReAct 循环）双轨：reasoning_content fallback 救了 ReactAgent 却毒到 AgentLoop 的 JSON parser；`_on_step_unrecoverable(error_text=...)` typo 只在 AgentLoop 侧。
+
+P3 三个里程碑统一到 ReactAgent 单轨：
+- **M1**：ReactAgent 加固（auto_fix / profile_guard / 收敛检测 / 任务链上下文继承 / pause_for_human 工具化）
+- **M2**：resume_from_checkpoint + evaluate / commit_candidate / propose_alternatives 工具化 + Kimi prose 收尾 retry
+- **M3**：AgentLoop 移到 `core/_legacy/` + 22 行 deprecated shim；server.py 不再实例化；routes 通过单独注入的 `version_manager` / `planner` / `evaluator` 访问，不再走 `_agent_loop.X`
+
+后续 LLM quirk 或工具改进只需在 ReactAgent 一处装。AgentLoop shim 计划 4-6 周后实战确认无回归再从 `_legacy/` 真删。
+
 ### 待办
 
-- **auto_fix 历次失败回溯**：auto_fix prompt 注入 prior_attempts，让 LLM 看到历次修改避免重复犯错（已实现，待实战验证）
+- **任务链上下文按 project_path 严格隔离**：当前 `_gather_prior_task_context` 取最近的 failed task，未按项目路径过滤（未来 state_manager 加 project_path 字段后再收紧）
 - **escalation 信息密度**：Dashboard 暂停 banner 中展示更完整的上下文（auto_fix 历次 diff + stderr 全文）
+- **真删 `core/_legacy/agent_loop.py`**：4-6 周实战无回归后
 
 ## 许可证
 
