@@ -115,6 +115,7 @@ ReactAgent (LLM-driven ReAct loop)
 | 我要查 REPL 命令 / API / 配置 / Dashboard 用法 | [docs/reference.md](docs/reference.md) |
 | 我要对接新 LLM / 配置多 LLM 切换 | [docs/llm-providers.md](docs/llm-providers.md) |
 | 我想了解 kedo 的改进历程和已知局限 | [docs/changelog.md](docs/changelog.md) |
+| 我想深入理解 kedo 的设计权衡和未解问题 | [docs/deep-dives/](docs/deep-dives/) |
 
 ## 许可证
 
