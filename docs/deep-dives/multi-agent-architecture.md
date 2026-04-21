@@ -286,6 +286,163 @@ Paper 里蜂群在 HumanEval 等 benchmark 上比单 Agent 高 5-10%。但**每�
 
 **结论**：蜂群在 kedo 里的角色是**"特殊情况触发的局部工具"，不是主架构**。主架构仍应是方案 A 或方案 B。
 
+## 方案 B vs 方案 C：详细对比（含 kedo 选型推荐）
+
+上文"4 候选方案"是高层概览。这一节把最值得认真考虑的两个——**B (Orchestrator-Worker)** 和 **C (双 Agent 对抗 / Actor-Critic)**——按同一套维度并列对比，附 kedo 当前阶段的选择推荐。
+
+### 结构本质
+
+**C 的拓扑 — 线性 + 关卡**
+
+```
+Producer (现 ReactAgent) ─┬─> build/test ok? ─> Reviewer ─┬─> pass ─> commit
+                          │                                │
+                          └── reject/rework <──────────────┘
+```
+
+Producer 主导 loop，Reviewer 只在**关卡点**（build 成功 / test 通过 / commit_candidate 前）被"拉进来审一道"。结构几乎不变。
+
+**B 的拓扑 — 星形 + 多节点**
+
+```
+             Orchestrator
+           ╱      │      ╲
+      Planner   Worker   Reviewer
+           ╲      │      ╱
+             Blackboard
+```
+
+Orchestrator 是协调中心，各 Agent 平行接活回结果。结构是重画的。
+
+### 9 维度对比
+
+#### 1. Agent 组成
+
+| 维度 | C | B |
+|---|---|---|
+| Agent 数 | 2 | 4–5 |
+| 顶层决策 | Producer 自己 | Orchestrator |
+| Plan | Producer（plan_development 工具） | 独立 Planner |
+| Execute | Producer | Worker（context 更窄） |
+| Review | 独立 Reviewer | 独立 Reviewer |
+| Route/协调 | 不需要 | Orchestrator |
+| Memory | 单 context + Reviewer 自 context | 可选 Memory Agent |
+
+#### 2. Context 结构
+
+- **C**：2 份 context，完全解耦。Producer 保持现状完整 messages；Reviewer 只看 [需求 + plan 最终版 + 产物路径 + build/test 输出]
+- **B**：5 份 context，需同步（Orchestrator / Planner / Worker / Reviewer / Memory 各自独立）
+
+#### 3. 通信机制
+
+| 维度 | C | B |
+|---|---|---|
+| 调用形式 | 同步 `Reviewer.review()` | Orchestrator ↔ Agent 异步消息 |
+| 协议 | 一个 dataclass `ReviewResult{approve, score, comments}` | 消息 schema（from/to/intent/payload/blackboard_ref） |
+| 并发 | 无 | Worker 可并发（kedo 强依赖限制收益） |
+| 通信次数 | ~1–3 次 | ~10–20 次 |
+
+#### 4. Checkpoint & 失败恢复
+
+| 维度 | C | B |
+|---|---|---|
+| Checkpoint 所有者 | Producer 一份 | 多份（Orchestrator + 每 Agent） |
+| Reviewer 挂了 | 重试或降级为 Producer 自评，**主 loop 不影响** | 同理但恢复路径更长 |
+| Worker 挂了 | 不存在 | Orchestrator 重分派 / 换 Worker |
+| Orchestrator 挂了 | N/A | 谁管 Orchestrator 是开放问题 |
+| Resume-checkpoint 语义 | 不变 | 重写 |
+
+#### 5. Token / 延迟成本（每 task 粗估，N = 主 loop 轮数）
+
+| 维度 | 单 Agent 基准 | C | B |
+|---|---|---|---|
+| 主 loop tokens | N × 8k | N × 8k（不变） | N × 6k（context 收窄） |
+| 协调 overhead | 0 | +18k（Reviewer 1–3 次） | +110k（Orchestrator + Planner + Reviewer + Memory） |
+| 相对单 Agent | 1× | **1.2–1.3×** | **1.8–2.5×** |
+| 墙钟延迟 | 串行 | +20–30% | +10–40% |
+
+#### 6. 对 kedo deep-dive 6 大问题的缓解
+
+| 问题 | C | B | 备注 |
+|---|---|---|---|
+| Self-eval drift | ★★★★★ | ★★★★★ | C 已足够 |
+| Context anxiety | ★★ | ★★★★ | B 显著更强 |
+| Planning instability | ★★ | ★★★ | B 拆了 Planner |
+| Hallucinated execution | ★★ | ★★ | ReAct 本身已抑制 |
+| Long-horizon memory | ★ | ★★★ | 需 Memory Agent |
+| Role conflict | ★★★★ | ★★★★★ | 都破，B 更彻底 |
+
+#### 7. 工程改动量
+
+- **C（~1 周）**：新 `Reviewer` Agent 类（~200 行）；`EvaluateTool` / `CommitCandidateTool` 把"调同 LLM"换成"调 Reviewer.review()"；配置项 `reviewer_provider / reviewer_model / reviewer_api_key`。**现有 15 工具、checkpoint、dashboard、routes 全不变**。
+- **B（~4–6 周）**：Agent 基类 + 4 个 Agent（~2000 行）；消息协议 schema；dispatch 机制；per-agent checkpoint；`POST /tasks` 改入口到 Orchestrator；dashboard 多 Agent 时间线可视化；Worker context 窄化；跨 Agent convergence detection 重实现；resume-checkpoint 语义重写。
+
+#### 8. Risk surface
+
+| 风险 | C | B |
+|---|---|---|
+| Reviewer 过严 / 过宽 | 有（可 threshold 调） | 有（同） |
+| State divergence | 几乎无（Reviewer 只读产物） | 显著（多 Worker 视角分歧） |
+| Convergence 失效 | 继承现有 M1 机制 | 需重建跨 Agent convergence |
+| Dashboard 不一致 | 无风险（不改） | 中风险（新引入） |
+| 迁移 bug | 低 | 高 |
+
+#### 9. 可试错性 / Rollback
+
+| 维度 | C | B |
+|---|---|---|
+| A/B 测量 | 易（同批 task 开/关 Reviewer 对比） | 难（架构已换，回不去） |
+| Feature flag 关闭 | 一行配置（`reviewer_provider: none`） | 整套基础设施已引入 |
+| 回退到单 Agent | 瞬时 | 需撤大量代码 |
+
+### 4 个反直觉点
+
+1. **B 的"并行"收益在 kedo 几乎不存在**
+   code_gen → build → test 有强依赖，没 subtask 能并发。真正要并行需"探索多方案"（libnfs vs SMB 同跑）——这个场景**单 Agent 串行两次也 OK**。**不应以并行为主理由选 B**。
+
+2. **C 的 Reviewer Agent vs Phase 1 "工具内独立 LLM client" 的差别**
+   表面看一样——都是独立 LLM、独立 context。区别：
+   - **Phase 1 工具版**：每次 evaluate 重建 LLM client，**无跨调用状态**
+   - **方案 C Agent 版**：Reviewer 是持久化对象，**跨关卡点累积判决历史**（"这次 build 的代码我上次 review 过，只看增量"）、有自己的 convergence tracking
+   长任务 + 多轮改代码场景差异显著。
+
+3. **B 的 Worker context 收窄收益被低估**
+   现 ReactAgent 长 task 时 messages 可膨胀到 40–60k，Kimi 的长 context quirk（reasoning-only fallback、未闭合 fence）发生率上升。Worker 只看 ~8k subtask 时这类 quirk **显著下降**。C 拿不到这个红利。
+
+4. **C → B 演进的前置条件**
+   C 跑一段时间后若发现"Self-eval drift 破了但仍因 context anxiety 翻车"——B 的 Worker 收窄价值凸显。**未实证就上 B 是"为架构而架构"**。
+
+### 两个具体场景走查
+
+**场景 1：switchvideo NFS 视频播放器完整 run**
+- **C**：~12 Producer 轮 + 3 Reviewer 介入（build ok 审 #1 / test ok 审 #2 / commit 前审 #3）→ done
+- **B**：Orchestrator → Planner 5-step plan → 多 Worker 逐 step 执行 → Reviewer 审总体 → Orchestrator commit。多 ~5 次 Agent 间调用（+40k tokens），并发收益此场景 ≈ 0
+
+**场景 2：简单 bug fix（改一个 if 判断）**
+- **C**：Producer 2–3 轮 + Reviewer 审 1 次
+- **B**：Orchestrator 路由判断（+1–2 LLM 调用）→ Worker → Reviewer → Orchestrator commit。**overhead 不成比例**
+
+### 决策矩阵：什么情况选哪个
+
+| 情况 | 推荐 |
+|---|---|
+| kedo 当前 = 个人工具 / 单用户 / pipeline 任务主导 | **C** |
+| 已实证 Self-eval drift 是主要瓶颈 | **C**（一周出结果） |
+| 长任务里 Producer context 经常超 40k、Kimi quirk 频繁触发 | **B**（Worker context 收窄有不可替代价值） |
+| 需要真正的多 task 并发（libnfs / SMB 同跑） | **B** |
+| 产品化：多用户 + 多并发 + dashboard 丰富可视化 | **B** |
+| 只有一周投入 | **C** |
+
+### 推荐（kedo 当前阶段）：**先做 C，实证满足度后再决定是否演进到 B**
+
+理由：
+1. kedo 当前最大 pain 是 **Self-eval drift + 长 context Kimi quirk**。C 直接解决第一个，第二个**单 Agent 内剪裁也能缓解一半**。
+2. C 的 ROI（1 周 / Self-eval drift 完全破解）碾压其它方案。
+3. C **不锁定未来演进**——跑 1–2 个月后若瓶颈变成"Producer context 仍爆"，再从 C 演进到 B，Reviewer Agent 组件可直接复用。
+4. B 当前"并行"和"多用户"需求尚不存在；为假想需求做 4–6 周基础设施不合算。
+
+**一句话**：C 是"最小破 Self-eval drift 手段"，B 是"kedo 产品化基础设施"。阶段不对就上 B 会给自己制造问题。
+
 ## 方案 B 详细设计：Orchestrator-Worker
 
 下面是方案 B 的**具体**形态，不是空想 framework。
@@ -484,16 +641,19 @@ Phase 2-4 值得做的条件：
 - kedo 使用场景扩大到多用户 / 多并发 task
 - 有时间做基础设施（distributed tracing、消息协议、dashboard 多 Agent 可视化）
 
-## 下一步候选（未决）
+## 下一步计划（已决：方案 C 先行）
+
+**2026-04-21 决策**：先实现方案 C（双 Agent 对抗 / Actor-Critic），实证 Self-eval drift 破解效果后再决定是否演进到方案 B。详见上文"方案 B vs 方案 C：详细对比"。
 
 | 优先级 | 任务 | 工作量 | 前置 |
 |---|---|---|---|
-| **P0**（ROI 最高） | Phase 1：Reviewer 跨 provider | ~1 周 | 无 |
-| P1 | ai_confidence 校准统计（和 Reviewer 配合用） | ~2h | Phase 1 |
-| P1 | 单 Agent 内的 context / 约束 reminder 改进 | ~5h | 无（可先做） |
-| P2 | Phase 2：Planner 独立 context | ~1-2 周 | Phase 1 实战验证后 |
-| P3 | Phase 3：Orchestrator + 多 Worker | ~2-3 周 | Phase 2 成功 |
-| P3 | Phase 4：Memory Agent | ~1 周 | Phase 3 基础设施就绪 |
+| **P0**（进行中） | **方案 C：Reviewer 独立 Agent**（持久化对象、跨关卡累积判决、独立 LLM provider） | ~1 周 | 无 |
+| P1 | ai_confidence 校准统计（和 Reviewer 配合） | ~2h | 方案 C |
+| P1 | 单 Agent 内的 context / 约束 reminder 改进（与 C 正交、可并行） | ~5h | 无 |
+| P2 | 评估是否演进到方案 B（触发条件：C 跑 1–2 个月后 Producer context 仍经常 >40k，或需多 task 并发 / 多用户） | 评估 | 方案 C 实战 1–2 个月 |
+| P3 | 方案 B Phase 2：Planner 独立 context | ~1-2 周 | P2 判定需演进 |
+| P3 | 方案 B Phase 3：Orchestrator + 多 Worker | ~2-3 周 | Phase 2 成功 |
+| P3 | 方案 B Phase 4：Memory Agent | ~1 周 | Phase 3 基础设施就绪 |
 
 ## 一句话总结
 
