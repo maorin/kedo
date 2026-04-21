@@ -172,6 +172,120 @@ kedo 现状是 1，旧 AgentLoop 是 2（已弃用），本文档默认演进方
 | 方案 C | 只做 Phase 1 的加强版（Reviewer 升格为独立 Agent 而非工具内独立 client） |
 | 方案 D | 跳过 Phase 1-3 直接重构为 blackboard（不推荐作为起点） |
 
+## 蜂群（Swarm）技术专题
+
+光谱里的第 5 种模式（Peer/Swarm）需要单独展开——"蜂群"在多 Agent 领域是被滥用的词（从 AutoGen 群聊到 6 Agent 对话瀑布都被叫 swarm），对 kedo 场景的判断需要比其它方案更细致。
+
+### 定义：蜂群 ≠ 多 Agent
+
+- **层级（Orchestrator-Worker）**：有明确分派者，Worker 之间不直接通信，只和 Boss 通信（star topology）
+- **蜂群（Swarm / Peer）**：**无固定领导**，Agent 之间直接通信或通过共享通道广播，协调行为**涌现**而非预设
+
+核心区分特征：
+1. peer-to-peer 通信（非 star topology）
+2. 决策去中心化（谁下一个说话由机制决定，不是老板点名）
+3. 行为涌现（没有全局 plan，结果由交互产生）
+4. 角色作为 prompt 而非调用目标（CEO / 架构师 / 程序员是角色扮演，不是"调用 CEO Agent"）
+
+### 4 种典型蜂群形态
+
+#### 1. Group Chat（群聊模式）
+
+所有 Agent 在同一消息通道里，每轮由 **speaker selection** 机制挑发言者。
+
+- **代表**：AutoGen `GroupChat`
+- **speaker selection 三种策略**：
+  - **round-robin**（轮流）—— 简单但死板
+  - **LLM-pick-next**（让 LLM 看历史决定下一个该谁说）—— 灵活但有 bias（LLM 倾向挑话多的）
+  - **manual**（人挑）—— 退化成人工调度
+- **终止**：max_round 或特殊 token（"TERMINATE"）
+
+#### 2. Role-Playing Debate（角色对抗）
+
+固定角色对，轮流发言。典型是双 Agent：user proxy 出题、assistant 解答，或 defender vs challenger 互怼。
+
+- **代表**：CAMEL、Constitutional AI 的 critic-defender
+- **机制**：一方提问/挑战，另一方回答/防守，直到 task instruction 达成
+- **为什么 work**：对抗产生信息，单 Agent 同时自我批评效果远不如双 Agent 真互喷
+
+#### 3. Waterfall Role（瀑布角色）
+
+借用软件工程 SOP：ProductManager → Architect → Engineer → QA，每角色是 Agent，按流程交接。
+
+- **代表**：MetaGPT、ChatDev
+- **争议**：本质是 Pipeline + 角色扮演，**不是真蜂群**；被叫 swarm 是市场话术
+- **与 kedo 旧 AgentLoop 的关系**：同一类架构
+
+#### 4. Handoff-based（交接式）
+
+Agent 之间无共享消息通道，**主动 hand off** 控制权给下一个 Agent。当前 Agent 说"交给 BillingAgent 吧"，框架切换。
+
+- **代表**：OpenAI Swarm (2024) —— 最轻量的蜂群框架
+- **机制**：每 Agent 有 `functions=[transfer_to_X]`，调用即切换
+- **本质**：把"分派"从 Orchestrator 改成 Agent 自主决定
+- **好处**：代码极简（几百行框架）；**坏处**：agent 间容易"踢皮球"
+
+### 关键技术机制
+
+| 机制 | 作用 | 常见失败模式 |
+|---|---|---|
+| **Speaker Selection** | 决定下一个发言者 | LLM-pick-next 有 confirmation bias（挑同意自己的） |
+| **Termination Detection** | 何时停 | 绝大多数蜂群靠 max_round 硬截断，不是真收敛 |
+| **Shared Memory** | Agent 间共享什么 | 全广播 → O(N²) token 成本；私聊 → 信息孤岛 |
+| **Role Prompting** | 角色差异化 | 多轮后角色漂移（Engineer 开始指点需求） |
+| **Consensus / Voting** | 多 Agent 投票 | 多数 ≠ 正确；同模型多 Agent 意见高度相关 |
+| **Debate Rounds** | 对抗轮次 | 越多越贵；3 轮后边际收益递减 |
+
+### 代表系统一览
+
+| 系统 | 类型 | 亮点 | 坑 |
+|---|---|---|---|
+| **AutoGen** (Microsoft) | Group Chat | speaker_selection 可配、UserProxy 人在回路 | token 爆炸、speaker 选择难调 |
+| **CAMEL** | Role-Playing 双 Agent | 理论清晰、paper 被引高 | 实用案例少 |
+| **MetaGPT** | Waterfall Role | 模拟软件公司 SOP、生成完整项目 | 本质 pipeline、不适应迭代 |
+| **ChatDev** | Chat Chain | 多阶段 multi-agent 瀑布 | 对简单任务严重过度设计 |
+| **OpenAI Swarm** | Handoff | 框架极简、教育友好 | 官方标 "experimental"，非生产框架 |
+| **CrewAI** | Role + Task | 工程化好、上手快 | 仍是 pipeline flavor |
+
+### Work vs Not Work
+
+**Work 的场景**
+- 开放式创造：brainstorming、写作、角色扮演剧本、架构设计讨论
+- 需要对抗性验证：代码审查、debate、adversarial testing
+- 模拟人类组织：PM + 设计师 + 工程师的 SOP 很难用单 Agent 模拟
+- 无客观评价函数：艺术、UX、策略
+
+**Not Work 的场景**
+- 有 ground truth 的 pipeline：code → build → test 有明确成功信号，蜂群扯皮浪费 token
+- 预算敏感：蜂群 token 消耗常是单 Agent 的 3-10 倍
+- 需要 debug：3 个 Agent 的消息交错到一条 timeline 上，bug 基本没法定位
+- task 目标明确：单 Agent + ReAct 足够，蜂群只是演剧
+
+### 学术 vs 生产的割裂
+
+Paper 里蜂群在 HumanEval 等 benchmark 上比单 Agent 高 5-10%。但**每条 query 的 token 成本也高 5-10×**。这个 ratio 在 paper 里很少被突出。**生产环境里 cost-adjusted performance 常常持平甚至倒退**。
+
+### 对 kedo 的启示（诚实版）
+
+**主架构不上蜂群**。理由：
+- kedo 核心路径 code_gen → build → test → evaluate 是明确 pipeline
+- 蜂群的扯皮成本（1.5-2.5× → 3-10×）在 Kimi token 敏感场景不可接受
+- state divergence 在蜂群里更严重（N 个 Agent 各自缓存文件内容）
+- 调试复杂度：dashboard 目前是单 task 一条线，蜂群意味着大改
+
+**但 3 个局部可借用的蜂群 idea**：
+
+1. **Debate 式 Reviewer**（方案 C 的蜂群增强版）
+   当 Reviewer 打分 < `min_eval_score` 且 Worker 不同意时，**第三 Agent 作裁判**。这是"2 Agent 分歧 → 召唤裁判"的极小蜂群，只在分歧时触发，非常态。
+
+2. **Multi-critic on low confidence**
+   `ai_confidence < 0.6` 的 commit 候选，**并行多 Reviewer**（不同 prompt、不同 provider），一致 → 过；不一致 → `pause_for_human`。"市场投票"式蜂群的局部应用。
+
+3. **Brainstorm on propose_alternatives**
+   LLM 纠结选 libnfs 还是 SMB 时，2-3 Agent 各自扮演一方案的"辩护律师"，写 pro/con 给用户选择。role-debate 的单次应用，不是持续蜂群。
+
+**结论**：蜂群在 kedo 里的角色是**"特殊情况触发的局部工具"，不是主架构**。主架构仍应是方案 A 或方案 B。
+
 ## 方案 B 详细设计：Orchestrator-Worker
 
 下面是方案 B 的**具体**形态，不是空想 framework。
