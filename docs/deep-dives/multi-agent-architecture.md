@@ -58,9 +58,123 @@
 - **上下文隔离**：planner 也能看到所有工具调用历史（其实不需要），context 被迅速污染
 - **专长路由**：简单 bug fix 调用 15 工具能力过剩，复杂多文件重构 15 工具又不够结构
 
-## 多 Agent 架构设计
+## 架构模式设计方案对比
 
-下面是 kedo 可以演进的一个**具体**多 Agent 架构，不是空想 framework。
+多 Agent 不是单一架构而是一个光谱。本节把可选模式并列比较，下一节（"方案 B 详细设计"）是其中一个方案的具体展开。
+
+### 光谱：5 种典型模式
+
+刚性程度 2 > 3 > 4 > 5，Agent 自主性 2 < 3 < 4 < 5。
+
+| # | 模式 | 结构 | 代表 |
+|---|---|---|---|
+| 1 | 单 Agent + 多工具 | 一个 LLM loop，工具有独立 prompt | kedo 现状、Cursor agent |
+| 2 | Pipeline（刚性流水线） | Planner → Coder → Tester → Reviewer 顺序交接 | kedo 旧 AgentLoop、传统 RAG pipeline |
+| 3 | Sub-agent as Tool | 主 Agent 把 worker agent 当工具调 | Claude Code、OpenAI Assistants |
+| 4 | Orchestrator-Worker（层级） | "领导"Agent 分派给专家 Agent，独立 context | Anthropic multi-agent research |
+| 5 | Peer / Swarm（对等协作） | 多 Agent 平等通过共享通道/群聊协商 | AutoGen group chat、CAMEL |
+
+kedo 现状是 1，旧 AgentLoop 是 2（已弃用），本文档默认演进方向是 4。
+
+### 4 个候选方案
+
+#### 方案 A — Sub-agent as Tool（最轻量）
+
+主 ReactAgent 不变，把 Reviewer / Planner 包装成**特殊工具**。调用时工具内部起独立 LLM client + 独立 messages，返回结果后并入主 context 作为 tool_result。
+
+- **本质**：调用栈上的 agent，没有真正的"同时存在"
+- **工程量**：~1-2 周
+- **像什么**：Claude Code 的 Task 工具、OpenAI Assistants 的 sub-assistant
+- **破的 bias**：Self-eval drift（Reviewer 独立 provider 即可）+ Planner context 污染
+
+#### 方案 B — Orchestrator-Worker（本文档原版设计）
+
+顶层 Orchestrator 决定路由、分派 subtask 给 Worker/Planner/Reviewer，各 Agent 有独立 messages、独立 LLM、独立 checkpoint。详见下一节。
+
+- **本质**：真正的并发 + 角色隔离 + 独立失败域
+- **工程量**：~4-6 周（含消息协议、checkpoint 拆分、dashboard 多 agent 可视化）
+
+#### 方案 C — 双 Agent 对抗（Actor-Critic）
+
+只分两个 Agent：生产者（现 ReactAgent）+ 审查者。每次 build/test 成功后，Reviewer 强制过一道（独立 LLM、独立 context）。不引入 Orchestrator、不拆 Planner。
+
+- **本质**：Phase 1 Reviewer 跨 provider 的"硬化版"——从工具升级为独立 Agent，有自己的判决 loop
+- **工程量**：~1 周
+- **破的 bias**：Self-eval drift（足以）
+
+#### 方案 D — Blackboard + 任务队列
+
+不画 Agent 角色，只定义任务类型 → LLM 池。文件系统 + `.kedo/state/` 当 blackboard，任一 Agent pull 任务、写结果。
+
+- **本质**：最解耦、最像微服务
+- **工程量**：~3-4 周
+- **代价**：失去 ReAct 的"LLM 自主决定下一步"的灵活性；需要任务调度器
+
+### 优缺点矩阵
+
+#### 优点（按"真实度"排序）
+
+| 收益 | 哪些方案提供 | 真实度 |
+|---|---|---|
+| Self-eval drift 破解（唯一物理可解） | B、C | ★★★★★ 实打实，单 Agent 内做不到 |
+| context 隔离（planner 不被工具历史污染） | B、D | ★★★★ 显著；单 Agent 内靠剪裁只能缓解一半 |
+| 专业化 LLM 选配（code/judge 不同 provider） | A、B、C | ★★★★ 纯配置收益 |
+| 并行执行 subtask | B、D | ★★★ kedo 实际可并行的 subtask 稀少（code→build→test 强依赖），价值常被夸大 |
+| 失败域隔离（worker 挂了 orchestrator 恢复） | B、D | ★★★ 有价值，单 Agent checkpoint 已覆盖 70% |
+| 独立压测新 LLM | A、B、C、D | ★★ 有但非核心诉求 |
+
+#### 缺点（容易被低估的）
+
+| 代价 | 严重度 | 说明 |
+|---|---|---|
+| Agent 间 state divergence | ★★★★★ | "我以为 main.c 长这样"——filesystem blackboard 也救不了，Agent messages 缓存里还有上次读的旧内容。单 Agent 内天然无此问题 |
+| Convergence detection 变难 | ★★★★ | M1 的"同工具相似 fingerprint 3 次 pause"是在单一 loop 内统计的；跨 Agent 需要重写（Orchestrator 反复分派给同一 Worker 的识别） |
+| Checkpoint 语义爆炸 | ★★★★ | 谁的 checkpoint？Orchestrator 分派记录 + Worker 内部 messages + Reviewer 判决——三份状态同步是 Phase 3 最大设计负担 |
+| 调试可观测性坍塌 | ★★★★ | 单 Agent 一条 journal；多 Agent 需要 trace id + 时间线合并。distributed tracing 搭起来前，bug 定位时间 ×3 |
+| Token 成本 1.5-2.5× | ★★★ | Agent 间摘要结构化重复；Orchestrator 本身也消耗 LLM |
+| Framework over-engineering 诱惑 | ★★★ | 一旦引入消息协议、Agent registry、dispatch，就会想把所有东西"架构化"。kedo 现有 ~400 行 ReactAgent + 15 工具的简洁是资产 |
+| 用户心智负担 | ★★ | dashboard 从"一 task 一 loop"变成"一 task 多 agent 时间线" |
+
+### 4 个反直觉点
+
+1. **Phase 3 并行收益被夸大**
+   code_gen → build → test 有强依赖，真正可并行的只有"探索多方案"（propose_alternatives）。这个场景单 Agent 串行两次也 OK。并行不应作为选方案 B 的主理由。
+
+2. **方案 A (Sub-agent as Tool) 是 kedo 可能最合适的起点**
+   - 保留 ReactAgent 作为唯一决策中心
+   - Reviewer / Planner 作为工具被调——内部起独立 LLM client + messages
+   - 不需要消息协议、不需要 dispatch、不需要新 checkpoint 语义
+   - 仍然破了 Self-eval drift
+   - 等价于 Phase 1 + Phase 2 的轻量融合，工程量远小于方案 B
+
+3. **Orchestrator-Worker 真正价值是"可替换"不是"更聪明"**
+   Worker 挂了换实现、Reviewer 换 provider、Planner 从 Opus 降到 Sonnet——这些**运维灵活性**才是方案 B 主要价值。如果 kedo 不需要这种灵活性（个人工具），B 的成本 > 收益。
+
+4. **单 Agent 的瓶颈不是"能力"是 role conflict**
+   多 Agent 价值不在"更多脑子"，在把"我写的代码我评分"这种结构性 bias 拆掉。这是方案 C 就能做到的事，不一定要上 B。
+
+### 场景推荐
+
+| 场景 | 推荐方案 |
+|---|---|
+| kedo 保持个人工具 / 小团队 | **A（Sub-agent as Tool）或 C（双 Agent）**——成本低、收益真 |
+| kedo 走向多用户 / 多并发 task | B（Orchestrator-Worker）值得投入 |
+| 已实证 Self-eval drift 严重但不想大改 | C（最小改动破 bias） |
+| 想实验 agent-agent 协作本身 | B 或 D |
+| 仍是小规模 | 不上 D（过度设计） |
+
+### 与迁移路径的映射
+
+| 选定方案 | 对应迁移路径 |
+|---|---|
+| 方案 A | Phase 1 + Phase 2 合并为一步（工具形态而非独立 Agent） |
+| 方案 B | Phase 1 → Phase 2 → Phase 3 → Phase 4 完整走完 |
+| 方案 C | 只做 Phase 1 的加强版（Reviewer 升格为独立 Agent 而非工具内独立 client） |
+| 方案 D | 跳过 Phase 1-3 直接重构为 blackboard（不推荐作为起点） |
+
+## 方案 B 详细设计：Orchestrator-Worker
+
+下面是方案 B 的**具体**形态，不是空想 framework。
 
 ### 架构图
 
