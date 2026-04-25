@@ -19,6 +19,7 @@ from core.evaluator import Evaluator
 from core.memory import AgentMemory
 from core.planner import Planner
 from core.react_agent import ReactAgent
+from core.reject_tracker import RejectTracker
 from core.reviewer import Reviewer
 from core.state_manager import StateManager
 from tools.base import ToolRegistry
@@ -153,11 +154,18 @@ def create_app(config: dict = None) -> FastAPI:
         event_bus=state_manager.event_bus,
         git_tool=GitTool(shell) if config.get("git_enabled", True) else None,
     )
-    # commit_candidate 工具（依赖 version_manager + 可选 reviewer pre-commit gate）
+    # 升级护栏共享对象：commit_candidate 多次被 Reviewer 拒后强制 Producer
+    # 升级（pause_for_human / propose_alternatives），不让它绕过 respond 假装完成
+    reject_tracker = RejectTracker(
+        escalation_threshold=config.get("commit_reject_escalation_threshold", 3),
+    )
+
+    # commit_candidate 工具（依赖 version_manager + 可选 reviewer pre-commit gate + reject_tracker）
     tool_registry.register(CommitCandidateTool(
         version_manager=version_manager,
         reviewer=reviewer,
         pre_commit_gate=config.get("reviewer_pre_commit_gate", True),
+        reject_tracker=reject_tracker,
     ))
 
     # ReactAgent (LLM 驱动的 ReAct Agent — P3 后唯一主路径)
@@ -167,6 +175,7 @@ def create_app(config: dict = None) -> FastAPI:
         state=state_manager,
         memory=memory,
         config=config,
+        reject_tracker=reject_tracker,
     )
 
     # 注册 WebSocket 事件处理

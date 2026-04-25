@@ -87,14 +87,17 @@ def load_config(config_path: str = None) -> dict:
                 config = yaml.safe_load(f) or {}
             break
 
-    # 2) 合并用户配置（~/.config/kedo/config.yaml），API key 等敏感字段优先从这里读取
+    # 2) 合并用户配置（~/.config/kedo/config.yaml）— 用户态优先
+    # 历史：原逻辑是 `if v and (not config.get(k))`（user 仅在 repo 为空时生效），
+    # 与 memory 里"用户态优先"的契约相反。当 repo config 加了非空默认（如
+    # reviewer_provider: "none"）后，user 设的 reviewer_provider 会被静默丢掉。
+    # 现在改成：user 任何非空值都覆盖 repo。
     user_cfg_path = os.path.expanduser("~/.config/kedo/config.yaml")
     if Path(user_cfg_path).exists():
         with open(user_cfg_path, encoding="utf-8") as f:
             user_cfg = yaml.safe_load(f) or {}
-        # 用户配置中有值的字段覆盖项目配置中的空值
         for k, v in user_cfg.items():
-            if v and (not config.get(k)):
+            if v not in (None, ""):
                 config[k] = v
 
     # 环境变量覆盖

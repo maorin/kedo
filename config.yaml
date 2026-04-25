@@ -43,6 +43,10 @@ reviewer_base_url: ""             # Kimi/Ollama 可覆盖
 reviewer_min_score: 70            # Reviewer approve 阈值（可比 min_eval_score 更严）
 reviewer_pre_commit_gate: true    # commit_candidate 前强制过 Reviewer；false 则只在 evaluate 调用时才过
 
+# 升级护栏：commit_candidate 连续被 Reviewer 拒 N 次后，禁止 Producer 用 respond
+# 假装完成；必须先 pause_for_human / propose_alternatives 升级才解锁 respond。
+commit_reject_escalation_threshold: 3
+
 # 文档配置
 doc_language: "zh"              # SDD 文档语言: zh (中文) | en (English) | ja (日本語) 等
 

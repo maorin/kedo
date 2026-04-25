@@ -24,10 +24,18 @@ logger = logging.getLogger(__name__)
 
 
 class CommitCandidateTool(BaseTool):
-    def __init__(self, version_manager=None, reviewer=None, pre_commit_gate: bool = True):
+    def __init__(
+        self,
+        version_manager=None,
+        reviewer=None,
+        pre_commit_gate: bool = True,
+        reject_tracker=None,
+    ):
         self._vm = version_manager
         self._reviewer = reviewer          # 方案 C：独立 Reviewer Agent（可为 None）
         self._pre_commit_gate = pre_commit_gate
+        # 跨工具/Agent 共享的 reject 计数器，触发 respond 屏蔽护栏（可为 None）
+        self._reject_tracker = reject_tracker
 
     @property
     def name(self) -> str:
@@ -150,13 +158,49 @@ class CommitCandidateTool(BaseTool):
                 miss_preview = "; ".join(review.requirements_missed[:3]) or "(none)"
                 risk_preview = "; ".join(review.risks[:3]) or "(none)"
                 sugg_preview = "; ".join(review.suggestions[:3]) or "(none)"
-                return ToolResult(
-                    success=False,
-                    error=(
+
+                # 累计 reject + 触发升级建议
+                reject_n = 0
+                threshold = 0
+                escalation_required = False
+                if self._reject_tracker is not None:
+                    reject_n = self._reject_tracker.on_reject(task_id)
+                    threshold = self._reject_tracker.escalation_threshold
+                    escalation_required = reject_n >= threshold
+
+                if escalation_required:
+                    # 软提示：到阈值，明确告诉 LLM 不要再走 respond 逃生
+                    error_msg = (
+                        f"Reviewer REJECTED ({reject_n}/{threshold} consecutive rejects, "
+                        f"escalation required). Score {review.score:.1f} < "
+                        f"{self._reviewer.min_score}. Review {review.review_id}.\n"
+                        f"⚠ DO NOT call `respond` to declare task done — Reviewer's findings "
+                        f"are unresolved and respond is now BLOCKED until you escalate.\n"
+                        f"You MUST call one of:\n"
+                        f"  - `pause_for_human` — ask the user for guidance / new approach\n"
+                        f"  - `propose_alternatives` — offer the user 2-3 concrete paths to choose from"
+                    )
+                    extra_output = (
+                        f"\n\n⚠ ESCALATION REQUIRED ({reject_n}/{threshold} consecutive rejects)\n"
+                        f"`respond` is BLOCKED until you call `pause_for_human` or "
+                        f"`propose_alternatives`. Don't try to declare success — "
+                        f"the Reviewer's findings above must be acknowledged to the user."
+                    )
+                else:
+                    error_msg = (
+                        f"Reviewer REJECTED this candidate (score {review.score:.1f} < "
+                        f"{self._reviewer.min_score}). Do NOT retry commit with the same code — "
+                        f"iterate first. Review {review.review_id}. "
+                        f"({reject_n}/{threshold} rejects so far)" if threshold else
                         f"Reviewer REJECTED this candidate (score {review.score:.1f} < "
                         f"{self._reviewer.min_score}). Do NOT retry commit with the same code — "
                         f"iterate first. Review {review.review_id}."
-                    ),
+                    )
+                    extra_output = ""
+
+                return ToolResult(
+                    success=False,
+                    error=error_msg,
                     output=(
                         f"Reviewer[{self._reviewer.provider_name}/{review.reviewer_model}] "
                         f"rejected pre-commit gate.\n"
@@ -167,6 +211,7 @@ class CommitCandidateTool(BaseTool):
                         f"Next: address the findings above, re-run build/test, then try "
                         f"commit_candidate again. If you cannot resolve, use "
                         f"propose_alternatives or pause_for_human."
+                        f"{extra_output}"
                     ),
                     data={
                         **reviewer_meta,
@@ -174,8 +219,15 @@ class CommitCandidateTool(BaseTool):
                         "missed": review.requirements_missed,
                         "risks": review.risks,
                         "suggestions": review.suggestions,
+                        "reject_count": reject_n,
+                        "escalation_threshold": threshold,
+                        "escalation_required": escalation_required,
                     },
                 )
+
+            # approve → 清掉这个 task 的 reject 累计
+            if self._reject_tracker is not None:
+                self._reject_tracker.on_approve(task_id)
 
         # --- Reviewer 通过（或未激活） → 实际创建候选版本 ---
         try:

@@ -109,12 +109,15 @@ class ReactAgent:
         state: StateManager,
         memory: AgentMemory,
         config: dict = None,
+        reject_tracker=None,
     ):
         self.llm = llm_client
         self.tools = tool_registry
         self.state = state
         self.memory = memory
         self.config = config or {}
+        # 跨工具/Agent 共享的 reject 计数器；屏蔽 respond 直到 Producer 升级
+        self._reject_tracker = reject_tracker
 
         # 可配置参数
         self.max_turns: int = self.config.get("max_agent_turns", 50)
@@ -409,6 +412,46 @@ class ReactAgent:
             for tc in response.tool_calls:
                 # respond 工具特殊处理 → 直接结束
                 if tc.name == "respond":
+                    # 升级护栏：commit_candidate 多次被 Reviewer 拒后，禁止 Producer
+                    # 用 respond 当逃生路径直接报告完成。必须先 pause_for_human /
+                    # propose_alternatives 升级，才能解锁 respond。
+                    if (
+                        self._reject_tracker is not None
+                        and self._reject_tracker.should_block_respond(task_id)
+                    ):
+                        n = self._reject_tracker.reject_count(task_id)
+                        thr = self._reject_tracker.escalation_threshold
+                        block_msg = (
+                            f"`respond` is BLOCKED: Reviewer has rejected commit_candidate "
+                            f"{n} times (threshold {thr}) and the findings remain unresolved.\n"
+                            f"You MUST call ONE of these tools first, then you can call respond:\n"
+                            f"  - `pause_for_human` — ask user for guidance / new approach\n"
+                            f"  - `propose_alternatives` — offer 2-3 concrete paths for user to pick\n"
+                            f"Do NOT declare the task done while critical Reviewer findings "
+                            f"(missed requirements / risks) are still on the table."
+                        )
+                        logger.warning(
+                            f"ReactAgent[{task_id}] blocked respond — {n} rejects pending escalation"
+                        )
+                        await self._emit(
+                            task_id, EventType.STEP_FAILED,
+                            step="respond_blocked",
+                            error=f"respond blocked: {n}/{thr} rejects pending escalation",
+                        )
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": block_msg,
+                        })
+                        consecutive_errors += 1
+                        if consecutive_errors >= self.max_consecutive_errors:
+                            early_stop_reason = (
+                                f"Stopping: {consecutive_errors} consecutive failures "
+                                f"(respond blocked, no escalation called)"
+                            )
+                            break
+                        continue  # 处理下一个 tool_call
+
                     final_msg = tc.arguments.get("message", "")
                     await self._emit(
                         task_id, EventType.LLM_RESPONSE,
@@ -420,6 +463,12 @@ class ReactAgent:
 
                 # 执行工具
                 result = await self._execute_tool(task_id, tc, project_path)
+
+                # 升级解锁：成功调了 pause_for_human / propose_alternatives 后清 unhandled flag
+                if result.success and self._reject_tracker is not None:
+                    from core.reject_tracker import ESCALATION_TOOL_NAMES
+                    if tc.name in ESCALATION_TOOL_NAMES:
+                        self._reject_tracker.on_escalate(task_id)
                 tool_output = result.output if result.success else (result.error or "Unknown error")
 
                 # 追加 tool result 到消息历史
