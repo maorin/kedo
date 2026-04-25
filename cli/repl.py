@@ -34,11 +34,22 @@ class KedoREPL:
     3. 进入 REPL 循环等待用户输入
     """
 
-    def __init__(self, config: dict = None, project_path: str = "."):
+    def __init__(self, config: dict = None, project_path: str = ".", connect_url: Optional[str] = None):
         self.config = config or {}
         self.project_path = os.path.abspath(project_path)
-        self.port = self.config.get("port", 8000)
-        self.host = self.config.get("host", "127.0.0.1")
+        # connect_url: 非 None 时走 thin-client 模式（连已有 server，不自起 uvicorn）
+        # None 时走 embedded 模式（自己起 uvicorn，沿用旧行为）
+        self.connect_url = (connect_url or "").rstrip("/") or None
+        if self.connect_url:
+            from urllib.parse import urlparse
+            u = urlparse(self.connect_url)
+            self.host = u.hostname or "127.0.0.1"
+            self.port = u.port or (443 if u.scheme == "https" else 80)
+            self._scheme = u.scheme or "http"
+        else:
+            self.port = self.config.get("port", 8000)
+            self.host = self.config.get("host", "127.0.0.1")
+            self._scheme = "http"
 
         # 运行时状态
         self.current_task_id: Optional[str] = None
@@ -82,10 +93,15 @@ class KedoREPL:
         print(LOGO)
         print(f"  {MUTED}项目路径: {HIGHLIGHT}{self.project_path}{C.RESET}")
         display_host = "127.0.0.1" if self.host in ("0.0.0.0", "::") else self.host
-        print(f"  {MUTED}Dashboard: {ACCENT}http://{display_host}:{self.port}{C.RESET}")
+        print(f"  {MUTED}Dashboard: {ACCENT}{self._scheme}://{display_host}:{self.port}{C.RESET}")
 
-        # 启动服务器
-        self._start_server_thread()
+        if self.connect_url:
+            # thin-client：复用已有 server，不自启 uvicorn
+            print(f"  {MUTED}模式: {ACCENT}thin-client{MUTED}（连接已有 server，REPL 退出不影响 task）{C.RESET}")
+            self.server_ready.set()  # 让等就绪的逻辑直接通过
+        else:
+            # embedded：自己起 uvicorn（旧行为）
+            self._start_server_thread()
 
         # 获取 LLM 提供商状态 (填充 _sb)
         self._fetch_provider_status()
@@ -185,7 +201,8 @@ class KedoREPL:
 
         await asyncio.sleep(1)  # 等服务器就绪
 
-        uri = f"ws://{self.host}:{self.port}/api/ws"
+        ws_scheme = "wss" if self._scheme == "https" else "ws"
+        uri = f"{ws_scheme}://{self._api_host}:{self.port}/api/ws"
         retry = 0
         while self.running and retry < 5:
             try:
@@ -990,7 +1007,7 @@ class KedoREPL:
         print()
 
     def _cmd_web(self, _=""):
-        url = f"http://{self.host}:{self.port}"
+        url = f"{self._scheme}://{self._api_host}:{self.port}"
         print(f"  {ACCENT}打开 Dashboard: {url}{C.RESET}")
         webbrowser.open(url)
 
@@ -1299,7 +1316,7 @@ class KedoREPL:
     def _api_get(self, path: str) -> Optional[dict]:
         try:
             import urllib.request
-            url = f"http://{self._api_host}:{self.port}/api{path}"
+            url = f"{self._scheme}://{self._api_host}:{self.port}/api{path}"
             req = urllib.request.Request(url)
             with urllib.request.urlopen(req, timeout=5) as resp:
                 return json.loads(resp.read())
@@ -1310,7 +1327,7 @@ class KedoREPL:
         try:
             import urllib.request
             import urllib.error
-            url = f"http://{self._api_host}:{self.port}/api{path}"
+            url = f"{self._scheme}://{self._api_host}:{self.port}/api{path}"
             data = json.dumps(body or {}).encode()
             req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
             with urllib.request.urlopen(req, timeout=10) as resp:

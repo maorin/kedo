@@ -24,6 +24,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 # 确保项目目录在 Python path 中
 project_root = Path(__file__).parent
@@ -132,6 +133,15 @@ def main():
     parser.add_argument("--config", default=None, help="配置文件路径")
     parser.add_argument("--verbose", "-v", action="store_true", help="详细日志")
     parser.add_argument("--strict", action="store_true", help="严格模式: 缺少 API Key 时报错而非回退到 Mock")
+    parser.add_argument(
+        "--connect", default="http://localhost:8000",
+        help="REPL 默认连接已运行的 kedo server (默认 http://localhost:8000)。"
+             "探测失败自动 fallback 内嵌模式",
+    )
+    parser.add_argument(
+        "--embedded", action="store_true",
+        help="REPL 强制走内嵌模式（自己起 uvicorn），跳过 --connect 探测",
+    )
 
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("server", help="仅启动 Web 服务 (无 REPL)")
@@ -141,11 +151,18 @@ def main():
     # 加载配置
     config = load_config(args.config)
 
-    # REPL 模式日志写入文件，避免污染 CLI 输出；server 模式输出到 stderr
+    # 判断 REPL 是 thin-client 还是 embedded：thin-client 不需要文件日志（server 自己记）
     is_repl = args.command != "server"
+    connect_url = None
+    if is_repl and not args.embedded:
+        # 默认尝试连已运行的 server；探测在 _run_repl 里再做（提前打到文件日志会污染）
+        connect_url = args.connect
+
     project_path_abs = os.path.abspath(args.project_path or ".")
     log_dir = config.get("storage_dir", os.path.join(project_path_abs, ".kedo"))
     Path(log_dir).mkdir(parents=True, exist_ok=True)
+    # thin-client 模式（决定要等到 _run_repl 探测后才知）：先按"会落到文件"配，
+    # 探测成功是 thin-client 时再清掉根 logger handler — 见 _run_repl
     setup_logging(verbose=args.verbose, log_to_file=is_repl, log_dir=log_dir)
 
     # 命令行参数覆盖
@@ -178,14 +195,48 @@ def main():
         _run_server_only(config)
     else:
         # 交互式 REPL
-        _run_repl(config, project_path)
+        _run_repl(config, project_path, connect_url=connect_url)
 
 
-def _run_repl(config: dict, project_path: str):
-    """启动交互式 REPL"""
+def _probe_server(url: str, timeout: float = 1.0) -> bool:
+    """探测 url/api/llm/status 是否可达，可达即视为已有 server 在跑。"""
+    import urllib.request
+    import urllib.error
+    probe_url = url.rstrip("/") + "/api/llm/status"
+    try:
+        with urllib.request.urlopen(probe_url, timeout=timeout) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError):
+        return False
+
+
+def _run_repl(config: dict, project_path: str, connect_url: Optional[str] = None):
+    """启动交互式 REPL（默认尝试 thin-client 连已有 server，连不上 fallback 内嵌）"""
+    effective_connect: Optional[str] = None
+    if connect_url:
+        if _probe_server(connect_url):
+            effective_connect = connect_url
+            # thin-client 不产生本地 server log，文件 handler 是 setup_logging 提前装的，
+            # 这里清掉避免污染 .kedo/state/kedo.log（server 自己写）
+            import logging as _logging
+            for h in list(_logging.getLogger().handlers):
+                if isinstance(h, _logging.FileHandler):
+                    _logging.getLogger().removeHandler(h)
+                    h.close()
+            print(f"  \033[32m✓ 已连接到 server: {connect_url}\033[0m")
+        else:
+            print(
+                f"  \033[33m⚠ 探测 {connect_url} 未响应，回退内嵌模式（自己起 server）\033[0m\n"
+                f"  \033[90m提示: 想强制内嵌模式可加 --embedded；想换地址用 --connect URL\033[0m"
+            )
+
     try:
         from cli.repl import KedoREPL
-        repl = KedoREPL(config=config, project_path=project_path)
+        repl = KedoREPL(
+            config=config,
+            project_path=project_path,
+            connect_url=effective_connect,
+        )
         repl.start()
     except KeyboardInterrupt:
         print("\n  再见! 👋\n")
