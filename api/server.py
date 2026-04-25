@@ -145,7 +145,10 @@ def create_app(config: dict = None) -> FastAPI:
     tool_registry.register(ProposeAlternativesTool(
         state_manager=state_manager,
         event_bus=state_manager.event_bus,
-        timeout_s=config.get("discussion_timeout_s", 1800),
+        # 默认 600s（10 分钟）— 实战发现 1800s 太长，常常用户没注意 dashboard 提示就被
+        # 30 分钟超时 + 3 连失败拖死整个 task。配置兼容旧字段 discussion_timeout_s。
+        timeout_s=config.get("propose_alternatives_timeout_s",
+                             config.get("discussion_timeout_s", 600)),
     ))
     # commit_candidate 需要 version_manager — 必须在 version_manager 创建后再注册（下面）
 

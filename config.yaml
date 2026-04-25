@@ -53,6 +53,11 @@ commit_reject_escalation_threshold: 3
 # approve 或人工升级后自动还原原始角色。需要 reviewer_provider != none 才生效。
 enable_swap_on_reject: false
 
+# propose_alternatives 等用户选择的超时秒数（默认 600s = 10 分钟）。
+# 1800s 太长，实战常常用户没注意就 30 分钟超时拖死任务。
+# 超时后工具返回失败，提示 LLM 改用 pause_for_human（UI 更显眼）或自己做最佳选择。
+propose_alternatives_timeout_s: 600
+
 # 文档配置
 doc_language: "zh"              # SDD 文档语言: zh (中文) | en (English) | ja (日本語) 等
 

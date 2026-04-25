@@ -34,7 +34,7 @@ def get_discussion_queue(task_id: str) -> asyncio.Queue:
 
 
 class ProposeAlternativesTool(BaseTool):
-    def __init__(self, state_manager=None, event_bus=None, timeout_s: int = 1800):
+    def __init__(self, state_manager=None, event_bus=None, timeout_s: int = 600):
         self._state = state_manager
         self._event_bus = event_bus
         self._timeout_s = timeout_s  # 默认 30 分钟，超时返回 timeout
@@ -160,7 +160,12 @@ class ProposeAlternativesTool(BaseTool):
                     pass
             return ToolResult(
                 success=False,
-                error=f"propose_alternatives timed out after {self._timeout_s}s waiting for user choice",
+                error=(
+                    f"propose_alternatives timed out after {self._timeout_s}s waiting for "
+                    f"user choice (no input on dashboard). Suggestions: "
+                    f"1) call `pause_for_human` instead — it has more visible UI banner; "
+                    f"2) if you have a clear best option, just take it and continue."
+                ),
             )
         finally:
             # user 响应后也清掉

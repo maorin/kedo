@@ -94,16 +94,36 @@ class FileWriteTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Write or create a file with given content."
+        return (
+            "Write or create a file with given content. "
+            "Optional `append=true` appends to existing file (creating if missing). "
+            "★ Big files: if the content would be ~300+ lines or ~10KB, the LLM output "
+            "may get truncated by max_tokens, leaving an unclosed ```tool_call``` fence. "
+            "In that case write the file in chunks: first call with content=part1, then "
+            "call again with append=true content=part2, etc. Always verify with file_read "
+            "after writing a large file."
+        )
 
     @property
     def parameters(self) -> list[ToolParameter]:
         return [
             ToolParameter("file_path", "string", "Path to the file"),
-            ToolParameter("content", "string", "Content to write"),
+            ToolParameter("content", "string", "Content to write (or append)"),
+            ToolParameter(
+                "append", "boolean",
+                "If true, append to existing file (or create if missing). Default false (overwrite). "
+                "Use append=true for chunked writes of large files.",
+                required=False,
+            ),
         ]
 
-    async def execute(self, file_path: str, content: str) -> ToolResult:
+    async def execute(
+        self,
+        file_path: str,
+        content: str,
+        append: bool = False,
+        **_extra,  # 兜底吞未知 kwargs（同 file_read 修复一致）
+    ) -> ToolResult:
         try:
             p = Path(file_path)
             # 安全检查：确保解析后的路径不会在当前目录下创建绝对路径结构
@@ -116,18 +136,42 @@ class FileWriteTool(BaseTool):
             p = resolved
 
             # ProfileGuard：拦 human_verified profile 覆盖 + 拦 Makefile/CMake 关键 target 丢失
-            if self._guard:
+            # append 模式跳过 guard（追加几行不应触发 profile 重写检测）
+            if self._guard and not append:
                 violation = self._guard.check(str(p), content)
                 if violation:
                     logger.warning(f"FileWriteTool blocked: {violation[:120]}")
                     return ToolResult(success=False, error=violation)
 
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(content, encoding="utf-8")
+
+            # append vs overwrite
+            mode_label = "appended"
+            existing_size = 0
+            if append:
+                if p.exists():
+                    existing_size = p.stat().st_size
+                with open(p, "a", encoding="utf-8") as f:
+                    f.write(content)
+                final_size = p.stat().st_size if p.exists() else 0
+                output = (
+                    f"Appended {len(content)} bytes to {p} "
+                    f"(was {existing_size}, now {final_size})"
+                )
+            else:
+                p.write_text(content, encoding="utf-8")
+                final_size = len(content)
+                output = f"Written {len(content)} bytes to {p}"
+
             return ToolResult(
                 success=True,
-                output=f"Written {len(content)} bytes to {p}",
-                data={"file_path": str(p), "size": len(content)},
+                output=output,
+                data={
+                    "file_path": str(p),
+                    "size": final_size,
+                    "appended": bool(append),
+                    "bytes_written": len(content),
+                },
             )
         except Exception as e:
             return ToolResult(success=False, error=str(e))

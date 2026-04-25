@@ -44,6 +44,48 @@ class CodeGeneratorTool(BaseTool):
         ".bin", ".dat", ".nro", ".elf", ".o", ".a", ".so", ".dylib",
     }
 
+    def _auto_inject_header_context(
+        self, target: Path, context_files: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        """
+        生成 .c/.cpp 时自动找同 basename 的 .h/.hpp 加进 context，防止函数签名漂移。
+        - target: 要生成的文件路径
+        - context_files: LLM 已经显式传入的上下文（保留，自动注入的不覆盖）
+        返回更新后的 context_files dict（即使原本是 None 也会返回 dict）。
+        """
+        suffix = target.suffix.lower()
+        if suffix not in self._SOURCE_SUFFIXES:
+            return context_files
+
+        # 候选：同目录、同 basename、不同 header 后缀
+        base_dir = target.parent if target.parent != Path("") else Path(".")
+        stem = target.stem
+        out = dict(context_files or {})
+        for ext in self._HEADER_SUFFIXES:
+            candidate = base_dir / f"{stem}{ext}"
+            try:
+                if not candidate.is_file():
+                    continue
+                key = str(candidate)
+                if key in out:
+                    continue  # LLM 已显式传过，不覆盖
+                content = candidate.read_text(encoding="utf-8", errors="replace")
+                # 防止 header 太大爆 prompt（保留前 4000 字符通常够看签名）
+                if len(content) > 4000:
+                    content = content[:4000] + "\n/* ...truncated, see file_read for full */\n"
+                out[key] = content
+                logger.info(
+                    f"code_generate auto-injected header {candidate} ({len(content)} chars) "
+                    f"as context for generating {target.name}"
+                )
+            except Exception as e:
+                logger.debug(f"auto_inject_header: read {candidate} failed: {e}")
+        return out if out else context_files
+
+    # 源文件后缀 → 自动找同名 .h/.hpp 注入 context（防止函数签名漂移）
+    _SOURCE_SUFFIXES = {".c", ".cpp", ".cc", ".cxx", ".m", ".mm"}
+    _HEADER_SUFFIXES = (".h", ".hpp", ".hh", ".hxx")
+
     async def execute(
         self,
         instruction: str,
@@ -52,6 +94,7 @@ class CodeGeneratorTool(BaseTool):
         context_files: dict[str, str] = None,
         platform_constraints: str = "",
         cmake_template: str = "",
+        **_extra,  # 兜底吞 LLM 偶传未知参数
     ) -> ToolResult:
         """生成或修改代码。对 .md 文档使用分段生成避免截断。"""
         try:
@@ -60,6 +103,11 @@ class CodeGeneratorTool(BaseTool):
             # ★ G6 修复：二进制文件不走 LLM，用系统工具生成
             if target.suffix.lower() in self._BINARY_EXTENSIONS:
                 return await self._generate_binary(instruction, file_path, target)
+
+            # ★ 实战 bug 修：生成 .c/.cpp 时自动找同 basename 的 .h/.hpp 塞进 context_files
+            #   防止 code_generate 不读 header 就重写 .c，函数签名跟头文件不一致 → build FAIL
+            #   （switchvideo 任务 b943c9d0 实测踩到）
+            context_files = self._auto_inject_header_context(target, context_files)
 
             is_doc = target.suffix.lower() in (".md", ".txt", ".rst")
 
