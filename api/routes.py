@@ -546,6 +546,10 @@ async def get_llm_status():
             "any_swapped": any(
                 _role_swap.is_swapped(tid) for tid in (_role_swap._state.keys() if hasattr(_role_swap, "_state") else [])
             ),
+            # 用户手动从 dashboard 触发的 swap 是否处于 active 状态
+            "manual_swapped": getattr(_role_swap, "manual_swapped", False),
+            # 手动 swap 是否可用（reviewer_provider != none 即可）
+            "can_manual_swap": getattr(_role_swap, "can_manual_swap", False),
         }
 
     return {
@@ -640,6 +644,27 @@ async def validate_llm_key(req: dict = Body(...)):
             "error": None if ok else msg,
         }
     return {"success": False, "error": f"暂不支持校验 provider={provider}"}
+
+
+@router.post("/llm/swap-roles")
+async def swap_llm_roles():
+    """
+    手动交换 Producer 和 Reviewer 的 LLM 角色。
+    点击 → 翻转 ReactAgent.llm 与 Reviewer._llm 的指针；再点击翻回。
+    需要 reviewer_provider != none（即两个 LLM 都已配置）。
+    """
+    if _role_swap is None:
+        return {"success": False, "error": "RoleSwap manager not configured"}
+    if not getattr(_role_swap, "can_manual_swap", False):
+        return {
+            "success": False,
+            "error": (
+                "Cannot swap roles: Reviewer not configured. "
+                "Set reviewer_provider in config.yaml first."
+            ),
+        }
+    result = _role_swap.manual_swap()
+    return result
 
 
 @router.post("/llm/switch")

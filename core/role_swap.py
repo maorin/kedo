@@ -45,6 +45,7 @@ class RoleSwapManager:
         self._reviewer = None # Reviewer
         self._state: dict[str, str] = {}
         self._snapshot: dict[str, dict] = {}
+        self._manual_swapped: bool = False  # 用户在 dashboard 手动 swap 的累计奇偶性
         self._lock = threading.Lock()
 
     # ----------------------------------------------------------
@@ -60,6 +61,16 @@ class RoleSwapManager:
     def enabled(self) -> bool:
         """是否启用 swap 机制。需要 enable_swap_on_reject=True 且 react_agent + reviewer 都已绑定。"""
         return self._enabled_flag and self._ra is not None and self._reviewer is not None
+
+    @property
+    def can_manual_swap(self) -> bool:
+        """手动 swap 不依赖 enable_swap_on_reject 配置，只需双方都绑定即可。"""
+        return self._ra is not None and self._reviewer is not None
+
+    @property
+    def manual_swapped(self) -> bool:
+        """当前是否处于"手动 swap 后未还原"状态（dashboard 顶栏指示用）。"""
+        return self._manual_swapped
 
     # ----------------------------------------------------------
     # 状态查询
@@ -193,3 +204,57 @@ class RoleSwapManager:
         with self._lock:
             self._state.pop(task_id, None)
             self._snapshot.pop(task_id, None)
+
+    # ----------------------------------------------------------
+    # 手动 swap（用户从 dashboard 触发）
+    # ----------------------------------------------------------
+
+    def manual_swap(self) -> dict:
+        """
+        用户从 dashboard 点按钮触发的全局角色对换。
+        和 do_swap/restore 的 per-task 自动 swap **不同**：
+          - 不绑 task_id；直接交换 ReactAgent.llm / Reviewer._llm 指针
+          - 不依赖 enable_swap_on_reject 配置（只需双方都已 bind）
+          - 翻转 _manual_swapped 标志，让 /api/llm/status 反映状态
+          - 不动 per-task 自动 swap 状态机；如果某 task 正处 SWAPPED，那个状态
+            机的 snapshot 仍指向 swap 前的客户端，restore 时仍按 snapshot 还原 —
+            可能与"手动 swap 后的当前状态"不一致。**实战边界：尽量在没有 in-flight
+            commit_candidate 拒绝循环时手动 swap。**
+
+        返回 dict {producer, reviewer, manual_swapped}
+        """
+        if not self.can_manual_swap:
+            return {
+                "success": False,
+                "error": "Reviewer not bound (reviewer_provider=none?). Cannot manual swap.",
+            }
+
+        with self._lock:
+            ra, rv = self._ra, self._reviewer
+            prev_p = type(ra.llm).__name__
+            prev_r = type(rv._llm).__name__
+
+            # 交换指针
+            ra_llm = ra.llm
+            rv_llm = rv._llm
+            ra.llm = rv_llm
+            rv._llm = ra_llm
+            rv._inner._llm = ra_llm
+            ra._function_calling_available = None  # 重新探测
+
+            self._manual_swapped = not self._manual_swapped
+
+        new_p = type(self._ra.llm).__name__
+        new_r = type(self._reviewer._llm).__name__
+        logger.info(
+            f"Manual role swap: Producer {prev_p}→{new_p}, Reviewer {prev_r}→{new_r}, "
+            f"manual_swapped={self._manual_swapped}"
+        )
+        return {
+            "success": True,
+            "producer_class": new_p,
+            "producer_model": getattr(self._ra.llm, "model", "unknown"),
+            "reviewer_class": new_r,
+            "reviewer_model": getattr(self._reviewer._llm, "model", "unknown"),
+            "manual_swapped": self._manual_swapped,
+        }
