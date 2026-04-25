@@ -207,11 +207,25 @@ reviewer_pre_commit_gate: true    # commit_candidate 前是否过 Reviewer
 
 ## 启用 / 关闭
 
-### 启用（在 192.168.1.8 上）
+### 启用
 1. 编辑 `~/.config/kedo/config.yaml` 加 `reviewer_provider` + `reviewer_api_key`
 2. 重启 kedo（无热重载，Reviewer 只在 `create_app` 时构造）
 3. `curl http://localhost:8000/api/llm/status` 确认返回 `"reviewer":{"active":true,...}`
 4. Dashboard 顶栏会变成 `🛡 双Agent: Producer=... | Reviewer=...`
+
+### 推荐运行形态：daemon + thin-client REPL（2026-04-25 起）
+
+```bash
+# 终端 A — server daemon（机器开着就一直跑）
+nohup kedo /path/to/project server > /tmp/kedo.log 2>&1 < /dev/null & disown
+
+# 终端 B — REPL 瘦客户端（关掉它 daemon 继续跑，task 不被杀）
+kedo                                       # 自动探测 :8000
+kedo --connect http://192.168.1.8:8000     # 远端连
+kedo --embedded                            # 强制旧行为（REPL 自起 server）
+```
+
+旧的"REPL 自起 server"模式仍可用（`--embedded` 或探测失败时自动 fallback），但同进程 task 易随 REPL 退出被杀。Reviewer 不依赖运行形态，两种都能用。
 
 ### 关闭（rollback）
 1. `reviewer_provider: "none"` 
