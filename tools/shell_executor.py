@@ -40,10 +40,15 @@ class ShellExecutorTool(BaseTool):
         working_dir: str = ".",
         timeout: int = 120,
         sandbox_mode: bool = True,
+        profile_manager=None,
     ):
         self.working_dir = working_dir
         self.timeout = timeout
         self.sandbox_mode = sandbox_mode
+        # profile_manager 用来把 project_profile 的 required_env 注入到子进程，
+        # 让 LLM 直接 shell_execute 跑 make/cmake 时也能拿到 DEVKITPRO 这类变量。
+        # 只做同步的 load()，不触发 LLM 生成 profile —— 不命中就跳过。
+        self._profile_manager = profile_manager
 
     @property
     def name(self) -> str:
@@ -77,6 +82,19 @@ class ShellExecutorTool(BaseTool):
                 return ToolResult(success=False, error=f"Blocked: {safety_check}")
 
         logger.info(f"Executing: {command} (cwd={cwd}, timeout={timeout}s)")
+
+        # ★ 与 BuildTool 对齐：把 project profile 的 required_env（如 DEVKITPRO）注入
+        #   到 os.environ，让后续 subprocess 继承。只读已存在的 profile，不触发 LLM。
+        #   LLM 直接 shell_execute 跑 make/cmake 时就不会因缺 DEVKITPRO 秒退。
+        if self._profile_manager:
+            try:
+                profile = self._profile_manager.load(cwd)
+                if profile:
+                    applied = self._profile_manager.apply_required_env(profile)
+                    if applied:
+                        logger.debug(f"shell_execute injected profile env: {list(applied.keys())}")
+            except Exception as e:
+                logger.debug(f"profile env inject failed (non-fatal): {e}")
 
         try:
             # 屏蔽任何交互式密码 / 确认提示：
@@ -131,6 +149,23 @@ class ShellExecutorTool(BaseTool):
             if stderr_str:
                 output_parts.append(f"[stderr]\n{stderr_str}")
 
+            # ★ 失败且 stderr 空时回填 error — 避免 `2>&1` / `2>/dev/null` 这类场景
+            #   让 LLM 只看到 "error=" 空串，以为工具崩了（实际信息在 stdout）。
+            #   常见触发：`make 2>&1` 把错误并进 stdout；`ls *.nonexist 2>/dev/null`
+            #   glob 无匹配退出码非 0 但 stderr 被重定向。
+            err_field: Optional[str] = None
+            if not success:
+                if stderr_str:
+                    err_field = stderr_str
+                elif stdout_str:
+                    tail = stdout_str[-400:]
+                    err_field = (
+                        f"exit {proc.returncode}; stderr empty "
+                        f"(stdout tail): {tail}"
+                    )
+                else:
+                    err_field = f"exit {proc.returncode}; no output"
+
             return ToolResult(
                 success=success,
                 output="\n".join(output_parts) or "(no output)",
@@ -139,7 +174,7 @@ class ShellExecutorTool(BaseTool):
                     "stdout": stdout_str,
                     "stderr": stderr_str,
                 },
-                error=stderr_str if not success else None,
+                error=err_field,
             )
 
         except asyncio.TimeoutError:
