@@ -4604,21 +4604,124 @@
                 var propTitle = document.createElement('div');
                 propTitle.className = 'sidebar-title';
                 propTitle.style.padding = '1rem 0 0.5rem 0';
-                propTitle.textContent = '\u89E3\u51B3\u65B9\u6848';
+                propTitle.style.color = '#ffd93d';
+                propTitle.textContent = '解决方案 — 选一个提交，Agent 等你';
                 dom.discussionContent.appendChild(propTitle);
+
+                if (!appState.discussion._selectedProposalId) {
+                    appState.discussion._selectedProposalId = '';
+                }
+                var taskId = appState.currentTaskId;
+
                 appState.discussion.proposals.forEach(function(p) {
                     var el = document.createElement('div');
                     el.className = 'proposal-item fade-in';
+                    el.style.cssText = 'cursor:pointer;border:1px solid transparent;padding:0.6rem;border-radius:5px;margin-bottom:0.4rem;';
+
                     var pt = document.createElement('div');
-                    pt.style.cssText = 'font-weight:600;color:#0099cc;';
-                    pt.textContent = p.title || '';
+                    pt.style.cssText = 'font-weight:600;color:#0099cc;display:flex;justify-content:space-between;align-items:center;';
+                    var ptTitle = document.createElement('span');
+                    ptTitle.textContent = '[' + (p.id || '?') + '] ' + (p.title || '');
+                    pt.appendChild(ptTitle);
+                    var pickBtn = document.createElement('button');
+                    pickBtn.textContent = '选这个';
+                    pickBtn.style.cssText = 'background:rgba(100,200,255,0.15);border:1px solid rgba(100,200,255,0.4);color:#64b5f6;font-size:0.7rem;padding:0.2rem 0.6rem;border-radius:3px;cursor:pointer;';
+                    pt.appendChild(pickBtn);
                     el.appendChild(pt);
+
                     var pd = document.createElement('div');
                     pd.className = 'proposal-text';
                     pd.textContent = p.description || '';
                     el.appendChild(pd);
+
+                    if (p.pros) {
+                        var prosEl = document.createElement('div');
+                        prosEl.style.cssText = 'font-size:0.72rem;color:#22c55e;margin-top:0.3rem;';
+                        prosEl.textContent = '✓ ' + p.pros;
+                        el.appendChild(prosEl);
+                    }
+                    if (p.cons) {
+                        var consEl = document.createElement('div');
+                        consEl.style.cssText = 'font-size:0.72rem;color:#ef4444;margin-top:0.2rem;';
+                        consEl.textContent = '⚠ ' + p.cons;
+                        el.appendChild(consEl);
+                    }
+
+                    if (appState.discussion._selectedProposalId === p.id) {
+                        el.style.borderColor = '#ffd93d';
+                        el.style.background = 'rgba(255,217,61,0.05)';
+                    }
+
+                    function selectThis() {
+                        appState.discussion._selectedProposalId = p.id;
+                        renderDiscussion();
+                    }
+                    pickBtn.addEventListener('click', function(e) { e.stopPropagation(); selectThis(); });
+                    el.addEventListener('click', selectThis);
+
                     dom.discussionContent.appendChild(el);
                 });
+
+                var footer = document.createElement('div');
+                footer.style.cssText = 'margin-top:0.6rem;padding:0.6rem;background:rgba(0,0,0,0.2);border-radius:5px;';
+
+                var hint = document.createElement('div');
+                hint.style.cssText = 'font-size:0.72rem;color:#888;margin-bottom:0.4rem;';
+                var sel = appState.discussion._selectedProposalId;
+                hint.textContent = sel
+                    ? ('已选: ' + sel + '  — 可补充追加意见，点 提交 发给 Agent')
+                    : '先点上面任一方案 "选这个"，再提交';
+                footer.appendChild(hint);
+
+                var ta = document.createElement('textarea');
+                ta.id = 'discussionHumanInput';
+                ta.placeholder = '可选: 补充意见、调整需求、限制条件...';
+                ta.style.cssText = 'width:100%;min-height:50px;padding:0.4rem;background:rgba(30,41,59,0.6);border:1px solid rgba(100,200,255,0.2);border-radius:4px;color:#e0e0e0;font-size:0.78rem;box-sizing:border-box;resize:vertical;';
+                footer.appendChild(ta);
+
+                var submitBtn = document.createElement('button');
+                submitBtn.textContent = '提交选择';
+                submitBtn.disabled = !sel;
+                submitBtn.style.cssText = 'margin-top:0.4rem;background:' + (sel ? '#0099cc' : 'rgba(100,100,100,0.3)') + ';border:none;color:white;padding:0.4rem 0.9rem;border-radius:4px;cursor:' + (sel ? 'pointer' : 'not-allowed') + ';font-size:0.78rem;';
+                submitBtn.addEventListener('click', async function() {
+                    if (!appState.discussion._selectedProposalId) return;
+                    if (!taskId) {
+                        addLog('讨论', '未选任务，无法提交', 'error');
+                        return;
+                    }
+                    submitBtn.disabled = true;
+                    submitBtn.textContent = '提交中...';
+                    var human = (document.getElementById('discussionHumanInput') || {}).value || '';
+                    try {
+                        var resp = await fetch(API_BASE + '/tasks/' + taskId + '/discussion/input', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({
+                                action: 'select',
+                                proposal_id: appState.discussion._selectedProposalId,
+                                human_input: human,
+                                additional_constraints: []
+                            })
+                        });
+                        if (resp.ok) {
+                            addLog('讨论', '已提交: ' + appState.discussion._selectedProposalId + (human ? ' (含补充意见)' : ''), 'success');
+                            appState.discussion = null;
+                            renderDiscussion();
+                        } else {
+                            var err = await resp.json().catch(function() { return {}; });
+                            addLog('讨论', '提交失败: ' + (err.detail || resp.status), 'error');
+                            submitBtn.disabled = false;
+                            submitBtn.textContent = '提交选择';
+                        }
+                    } catch (e) {
+                        addLog('讨论', '提交异常: ' + e, 'error');
+                        submitBtn.disabled = false;
+                        submitBtn.textContent = '提交选择';
+                    }
+                });
+                footer.appendChild(submitBtn);
+
+                dom.discussionContent.appendChild(footer);
             }
         }
 
