@@ -1,6 +1,8 @@
 # 架构
 
-kedo 是 **单 Agent 架构**：唯一的 `ReactAgent` 通过 15 个工具完成所有任务，没有 if/else 特判的流水线。
+kedo 默认是 **单 Agent 架构**：唯一的 `ReactAgent` 通过 15 个工具完成所有任务，没有 if/else 特判的流水线。
+
+> 也支持开启 **双 Agent 对抗模式**（方案 C / Actor-Critic）—— Producer + 独立 Reviewer，物理破 Self-eval drift。详见 [`dual-agent-architecture.md`](dual-agent-architecture.md)。
 
 ## ReactAgent：LLM 驱动的 ReAct 循环
 
