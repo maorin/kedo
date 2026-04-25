@@ -42,6 +42,7 @@ _version_manager = None  # candidate API 直接用，不再走 _agent_loop.versi
 _planner = None          # planner._llm 兼容路径用
 _evaluator = None        # health 检查内省 + LLM 热切换用
 _reviewer = None         # 方案 C 独立审查 Agent，/llm/status 需要展示是否激活
+_role_swap = None        # 角色对换管理器，/llm/status 反映 swap 状态
 _create_llm_client = None  # create_llm_client 函数引用，避免循环导入
 _project_path: str = "."   # 项目根目录，用于文档浏览
 
@@ -56,9 +57,10 @@ def set_dependencies(
     planner=None,
     evaluator=None,
     reviewer=None,
+    role_swap=None,
 ):
     global _agent_loop, _react_agent, _state_manager, _version_manager
-    global _planner, _evaluator, _reviewer, _create_llm_client, _project_path
+    global _planner, _evaluator, _reviewer, _role_swap, _create_llm_client, _project_path
     _agent_loop = agent_loop
     _react_agent = react_agent
     _state_manager = state_manager
@@ -66,6 +68,7 @@ def set_dependencies(
     _planner = planner
     _evaluator = evaluator
     _reviewer = reviewer
+    _role_swap = role_swap
     _create_llm_client = create_llm_client_fn
     _project_path = project_path
 
@@ -534,11 +537,23 @@ async def get_llm_status():
             "min_score": _reviewer.min_score,
         }
 
+    # 角色对换状态（如启用且当前正在 SWAPPED）
+    role_swap_info: dict = {"enabled": False}
+    if _role_swap is not None:
+        role_swap_info = {
+            "enabled": _role_swap.enabled,
+            # 当前是否有任何 task 处于 SWAPPED — 给 dashboard 顶栏挂指示用
+            "any_swapped": any(
+                _role_swap.is_swapped(tid) for tid in (_role_swap._state.keys() if hasattr(_role_swap, "_state") else [])
+            ),
+        }
+
     return {
         "provider": provider,
         "model": model,
         "project_path": _project_path,
         "reviewer": reviewer_info,
+        "role_swap": role_swap_info,
     }
 
 

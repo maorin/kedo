@@ -110,6 +110,7 @@ class ReactAgent:
         memory: AgentMemory,
         config: dict = None,
         reject_tracker=None,
+        role_swap=None,
     ):
         self.llm = llm_client
         self.tools = tool_registry
@@ -118,6 +119,8 @@ class ReactAgent:
         self.config = config or {}
         # 跨工具/Agent 共享的 reject 计数器；屏蔽 respond 直到 Producer 升级
         self._reject_tracker = reject_tracker
+        # Producer ↔ Reviewer 角色对换管理器（可为 None）
+        self._role_swap = role_swap
 
         # 可配置参数
         self.max_turns: int = self.config.get("max_agent_turns", 50)
@@ -469,6 +472,12 @@ class ReactAgent:
                     from core.reject_tracker import ESCALATION_TOOL_NAMES
                     if tc.name in ESCALATION_TOOL_NAMES:
                         self._reject_tracker.on_escalate(task_id)
+                        # 同时还原 role swap：用户人工介入 → 回到原始 LLM 配置
+                        if (
+                            self._role_swap is not None
+                            and self._role_swap.is_swapped(task_id)
+                        ):
+                            self._role_swap.restore(task_id)
                 tool_output = result.output if result.success else (result.error or "Unknown error")
 
                 # 追加 tool result 到消息历史

@@ -30,12 +30,16 @@ class CommitCandidateTool(BaseTool):
         reviewer=None,
         pre_commit_gate: bool = True,
         reject_tracker=None,
+        role_swap=None,
     ):
         self._vm = version_manager
         self._reviewer = reviewer          # 方案 C：独立 Reviewer Agent（可为 None）
         self._pre_commit_gate = pre_commit_gate
         # 跨工具/Agent 共享的 reject 计数器，触发 respond 屏蔽护栏（可为 None）
         self._reject_tracker = reject_tracker
+        # Producer ↔ Reviewer 角色对换管理器（可为 None），到阈值时优先 swap，
+        # swap 后还失败再走 reject_tracker 的 respond 屏蔽路径
+        self._role_swap = role_swap
 
     @property
     def name(self) -> str:
@@ -168,6 +172,53 @@ class CommitCandidateTool(BaseTool):
                     threshold = self._reject_tracker.escalation_threshold
                     escalation_required = reject_n >= threshold
 
+                # ★ 优先尝试 role swap：到阈值且 swap 启用且 NORMAL 状态 → 对换 LLM 救援
+                #   swap 之后重置 reject_tracker 给新 Producer 一个干净计数窗口
+                swap_msg = ""
+                if (
+                    escalation_required
+                    and self._role_swap is not None
+                    and self._role_swap.can_swap(task_id)
+                ):
+                    swap_msg = self._role_swap.do_swap(
+                        task_id,
+                        missed=review.requirements_missed,
+                        risks=review.risks,
+                    )
+                    if swap_msg:
+                        # swap 已执行，重置 reject_tracker 让新 producer 重头计数
+                        if self._reject_tracker is not None:
+                            self._reject_tracker.on_approve(task_id)
+                        # 改写错误信息：不再要求人工，告诉新 Producer 接手
+                        return ToolResult(
+                            success=False,
+                            error=(
+                                f"Reviewer REJECTED 3 times consecutively — automatic ROLE SWAP "
+                                f"triggered. You are now the new Producer; address the missed "
+                                f"requirements above and try commit_candidate again. "
+                                f"Review {review.review_id}."
+                            ),
+                            output=(
+                                f"Reviewer[{self._reviewer.provider_name}/{review.reviewer_model}] "
+                                f"rejected pre-commit gate.\n"
+                                f"score: {review.score:.1f}/100  stage: {review.stage}\n"
+                                f"missed: {miss_preview}\n"
+                                f"risks: {risk_preview}\n"
+                                f"suggestions: {sugg_preview}"
+                                + swap_msg
+                            ),
+                            data={
+                                **reviewer_meta,
+                                "approved": False,
+                                "missed": review.requirements_missed,
+                                "risks": review.risks,
+                                "suggestions": review.suggestions,
+                                "reject_count": reject_n,
+                                "escalation_threshold": threshold,
+                                "role_swap_executed": True,
+                            },
+                        )
+
                 if escalation_required:
                     # 软提示：到阈值，明确告诉 LLM 不要再走 respond 逃生
                     error_msg = (
@@ -229,6 +280,11 @@ class CommitCandidateTool(BaseTool):
             if self._reject_tracker is not None:
                 self._reject_tracker.on_approve(task_id)
 
+            # 如果当前是 SWAPPED 状态（说明前面 swap 之后这次过审了），还原原始角色
+            restore_msg = ""
+            if self._role_swap is not None and self._role_swap.is_swapped(task_id):
+                restore_msg = self._role_swap.restore(task_id)
+
         # --- Reviewer 通过（或未激活） → 实际创建候选版本 ---
         try:
             # 方案 C 后：ai_confidence 优先用 reviewer 的独立打分；没有 reviewer 时用 Producer 自评
@@ -269,12 +325,14 @@ class CommitCandidateTool(BaseTool):
                 f"summary: {summary[:200] if summary else '(none)'}"
                 f"{reviewer_line}\n"
                 f"Visible in dashboard candidates panel."
+                + restore_msg
             ),
             data={
                 "version_id": version_id,
                 "version_number": version_number,
                 "title": title,
                 **reviewer_meta,
+                "role_swap_restored": bool(restore_msg),
             },
         )
 

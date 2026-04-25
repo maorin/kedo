@@ -47,6 +47,12 @@ reviewer_pre_commit_gate: true    # commit_candidate 前强制过 Reviewer；fal
 # 假装完成；必须先 pause_for_human / propose_alternatives 升级才解锁 respond。
 commit_reject_escalation_threshold: 3
 
+# 角色对换（实验）：commit_candidate 连续被拒到阈值后，先让 Producer 与 Reviewer 的
+# LLM 角色对换再试一次（保持双 Agent 写/审分离不变；只是换"哪个 LLM 写哪个审"）。
+# 对换后还失败到阈值就走 reject_tracker 的 respond 屏蔽路径强制人工。
+# approve 或人工升级后自动还原原始角色。需要 reviewer_provider != none 才生效。
+enable_swap_on_reject: false
+
 # 文档配置
 doc_language: "zh"              # SDD 文档语言: zh (中文) | en (English) | ja (日本語) 等
 

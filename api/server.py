@@ -21,6 +21,7 @@ from core.planner import Planner
 from core.react_agent import ReactAgent
 from core.reject_tracker import RejectTracker
 from core.reviewer import Reviewer
+from core.role_swap import RoleSwapManager
 from core.state_manager import StateManager
 from tools.base import ToolRegistry
 from tools.build_tool import BuildTool
@@ -160,12 +161,19 @@ def create_app(config: dict = None) -> FastAPI:
         escalation_threshold=config.get("commit_reject_escalation_threshold", 3),
     )
 
-    # commit_candidate 工具（依赖 version_manager + 可选 reviewer pre-commit gate + reject_tracker）
+    # 角色对换管理器：到阈值时优先 swap LLM 角色再试一次（默认关闭）
+    # bind 在 react_agent 创建后调用
+    role_swap = RoleSwapManager(
+        enabled=config.get("enable_swap_on_reject", False) and reviewer is not None,
+    )
+
+    # commit_candidate 工具（依赖 version_manager + 可选 reviewer pre-commit gate + reject_tracker + role_swap）
     tool_registry.register(CommitCandidateTool(
         version_manager=version_manager,
         reviewer=reviewer,
         pre_commit_gate=config.get("reviewer_pre_commit_gate", True),
         reject_tracker=reject_tracker,
+        role_swap=role_swap,
     ))
 
     # ReactAgent (LLM 驱动的 ReAct Agent — P3 后唯一主路径)
@@ -176,7 +184,16 @@ def create_app(config: dict = None) -> FastAPI:
         memory=memory,
         config=config,
         reject_tracker=reject_tracker,
+        role_swap=role_swap,
     )
+
+    # role_swap 需要 react_agent + reviewer 都创建好后才能 bind
+    role_swap.bind(react_agent=react_agent, reviewer=reviewer)
+    if role_swap.enabled:
+        logger.info(
+            f"RoleSwap active: producer↔reviewer swap on commit_candidate reject "
+            f"threshold={reject_tracker.escalation_threshold}"
+        )
 
     # 注册 WebSocket 事件处理
     state_manager.event_bus.subscribe("*", ws_manager.handle_event)
@@ -194,6 +211,7 @@ def create_app(config: dict = None) -> FastAPI:
         planner=planner,
         evaluator=evaluator,
         reviewer=reviewer,
+        role_swap=role_swap,
     )
 
     # 注册路由 — 必须在 StaticFiles 之前
