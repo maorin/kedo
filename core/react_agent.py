@@ -125,7 +125,8 @@ class ReactAgent:
         # 可配置参数
         self.max_turns: int = self.config.get("max_agent_turns", 50)
         self.max_consecutive_errors: int = 3
-        self.max_tool_output_chars: int = 4000
+        # 12000 字符约 300-400 行 C 代码；4000 太小，源文件读取一直被中间截断
+        self.max_tool_output_chars: int = self.config.get("max_tool_output_chars", 12000)
         # Fix 2: 单次 LLM 响应里最多允许的 tool_call 数量（防"一次塞 155 个"风暴）
         self.max_tool_calls_per_turn: int = self.config.get("max_tool_calls_per_turn", 10)
         # 收敛检测：同 (tool_name, error_fingerprint) 在最近 K 次失败中重复 N 次 → escalate

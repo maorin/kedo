@@ -39,6 +39,13 @@ class FileReadTool(BaseTool):
             ToolParameter("offset", "integer", "Skip this many lines before returning (0 = start of file)", required=False),
         ]
 
+    # 主动切片安全阈值 — 文件超过这个字符数时即便 LLM 没传 limit/offset 也自动只返前
+    # SAFE_CHUNK_LINES 行，并在 note 里告诉 LLM 下一段用什么 offset。
+    # 这避免下游 ReactAgent._truncate 的中间截断（"...省略X字符..."）让 LLM 看到
+    # 看不懂的截断标记后笨拙地重发 offset=0 limit=0 死循环。
+    SAFE_CHUNK_CHARS = 8000     # ~250-300 行 C 代码
+    SAFE_CHUNK_LINES = 300
+
     async def execute(self, file_path: str, limit: int = 0, offset: int = 0, **_extra) -> ToolResult:
         # **_extra 兜底吞掉 LLM 偶发传的未知参数（如某些模型会传 cache_control / encoding 等），
         # 避免 0ms TypeError 失败触发 convergence detection
@@ -48,6 +55,7 @@ class FileReadTool(BaseTool):
                 return ToolResult(success=False, error=f"File not found: {file_path}")
             content = p.read_text(encoding="utf-8", errors="replace")
             total_lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+            total_chars = len(content)
 
             # 应用 offset/limit 切片（仅在显式传入时生效，默认全文）
             try:
@@ -57,27 +65,55 @@ class FileReadTool(BaseTool):
                 limit_n = 0
                 offset_n = 0
 
+            auto_chunked = False
             sliced_note = ""
+
             if limit_n > 0 or offset_n > 0:
+                # LLM 显式给了 offset/limit
                 lines = content.splitlines(keepends=True)
                 start = max(0, offset_n)
                 end = (start + limit_n) if limit_n > 0 else len(lines)
                 lines = lines[start:end]
                 content = "".join(lines)
+                more_after = end < total_lines
+                next_off = end if more_after else 0
                 sliced_note = (
-                    f" [sliced: lines {start + 1}..{start + len(lines)} of {total_lines}]"
+                    f"\n[sliced: lines {start + 1}..{start + len(lines)} of {total_lines}"
+                    + (f"; more after — read next with offset={next_off} limit={limit_n or self.SAFE_CHUNK_LINES}]"
+                       if more_after else "]")
+                )
+            elif total_chars > self.SAFE_CHUNK_CHARS:
+                # ★ LLM 没传 offset/limit 但文件太大 → 自动切前 N 行
+                #   不再放任 ReactAgent 中间截断让 LLM 看到不可读的"...省略..."标记
+                lines = content.splitlines(keepends=True)
+                out_lines = []
+                ch = 0
+                for ln in lines:
+                    if ch + len(ln) > self.SAFE_CHUNK_CHARS and out_lines:
+                        break
+                    out_lines.append(ln)
+                    ch += len(ln)
+                returned_n = len(out_lines)
+                content = "".join(out_lines)
+                auto_chunked = True
+                sliced_note = (
+                    f"\n[AUTO-CHUNKED: file is {total_lines} lines / {total_chars} chars; "
+                    f"returned first {returned_n} lines (~{ch} chars). "
+                    f"To read next chunk: file_read offset={returned_n} limit={self.SAFE_CHUNK_LINES}. "
+                    f"Repeat with growing offset until note no longer says 'more after'.]"
                 )
 
             return ToolResult(
                 success=True,
-                output=content + (sliced_note if sliced_note else ""),
+                output=content + sliced_note,
                 data={
                     "file_path": file_path,
                     "lines_returned": content.count("\n") + (1 if content and not content.endswith("\n") else 0),
                     "total_lines": total_lines,
-                    "size": len(content),
+                    "size": total_chars,
                     "offset": offset_n,
                     "limit": limit_n,
+                    "auto_chunked": auto_chunked,
                 },
             )
         except Exception as e:
