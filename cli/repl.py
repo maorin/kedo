@@ -880,7 +880,8 @@ class KedoREPL:
             ("1", "claude", "Claude (Anthropic)", "claude-sonnet-4-6", "ANTHROPIC_API_KEY"),
             ("2", "kimi-code", "Kimi Code 2.5 (编程专用)", "kimi-k2.5", "KIMI_API_KEY"),
             ("3", "kimi", "Kimi K2.5 (通用)", "kimi-k2.5", "MOONSHOT_API_KEY"),
-            ("4", "mock", "Mock 模式 (无需 Key)", "mock", None),
+            ("4", "deepseek", "DeepSeek v4-pro", "deepseek-v4-pro", "DEEPSEEK_API_KEY"),
+            ("5", "mock", "Mock 模式 (无需 Key)", "mock", None),
         ]
 
         for num, _, label, model, _ in providers:
@@ -888,7 +889,7 @@ class KedoREPL:
         print()
 
         try:
-            choice = input(f"  {ACCENT}选择提供商 [1/2/3/4]: {C.RESET}").strip()
+            choice = input(f"  {ACCENT}选择提供商 [1/2/3/4/5]: {C.RESET}").strip()
         except (KeyboardInterrupt, EOFError):
             print(f"\n  {MUTED}已取消{C.RESET}\n")
             return
@@ -943,6 +944,8 @@ class KedoREPL:
                 print(f"  {MUTED}获取 Key: https://kimi.com (Kimi Code 订阅){C.RESET}")
             elif provider_id == "kimi":
                 print(f"  {MUTED}获取 Key: https://platform.moonshot.ai{C.RESET}")
+            elif provider_id == "deepseek":
+                print(f"  {MUTED}获取 Key: https://platform.deepseek.com{C.RESET}")
             try:
                 api_key = getpass.getpass(f"  {ACCENT}输入 API Key: {C.RESET}")
             except (KeyboardInterrupt, EOFError):

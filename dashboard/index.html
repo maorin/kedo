@@ -1030,8 +1030,8 @@
                         <div class="status-indicator" id="connectionStatus"></div>
                         <span id="connectionText">Connecting...</span>
                     </div>
-                    <div class="status-item" title="当前 LLM 提供商">
-                        <span style="color:#888;">LLM:</span>
+                    <div class="status-item" id="llmStatusItem" title="当前 LLM 提供商">
+                        <span id="llmStatusLabel" style="color:#888;">LLM:</span>
                         <strong id="llmProviderText" style="color:#00d9ff;">-</strong>
                     </div>
                     <div class="status-item" title="项目路径">
@@ -4721,9 +4721,52 @@
                 const resp = await fetch('/api/llm/status');
                 const data = await resp.json();
                 const el = document.getElementById('llmProviderText');
+                const labelEl = document.getElementById('llmStatusLabel');
+                const itemEl = document.getElementById('llmStatusItem');
                 const pathEl = document.getElementById('projectPathText');
                 if (el && data.provider) {
-                    el.textContent = data.provider + '/' + (data.model || '');
+                    const producer = data.provider + '/' + (data.model || '');
+                    const rv = data.reviewer || {};
+                    // 清空后用 textContent + createElement 安全拼接
+                    while (el.firstChild) el.removeChild(el.firstChild);
+                    if (rv.active) {
+                        // 方案 C：双 Agent 对抗 — Producer (写代码) + Reviewer (独立审查)
+                        const reviewer = (rv.provider || '?') + '/' + (rv.model || '?');
+                        if (labelEl) {
+                            labelEl.textContent = '\u{1F6E1} 双Agent:';
+                            labelEl.style.color = '#ffd93d';
+                        }
+                        const mkSpan = function(text, style) {
+                            const s = document.createElement('span');
+                            s.textContent = text;
+                            if (style) s.style.cssText = style;
+                            return s;
+                        };
+                        el.appendChild(mkSpan('Producer', 'color:#00d9ff;'));
+                        el.appendChild(mkSpan('=', 'color:#888;'));
+                        el.appendChild(mkSpan(producer, 'color:#00d9ff;'));
+                        el.appendChild(mkSpan('│', 'color:#555;margin:0 0.35rem;'));
+                        el.appendChild(mkSpan('Reviewer', 'color:#ff6b9d;'));
+                        el.appendChild(mkSpan('=', 'color:#888;'));
+                        el.appendChild(mkSpan(reviewer, 'color:#ff6b9d;'));
+                        if (itemEl) {
+                            itemEl.title =
+                                '方案 C 双 Agent 对抗模式\n' +
+                                'Producer (写代码): ' + producer + '\n' +
+                                'Reviewer (独立审查，跨 provider 破 Self-eval drift): ' + reviewer + '\n' +
+                                'min_score: ' + (rv.min_score != null ? rv.min_score : 70);
+                        }
+                    } else {
+                        // 单 Agent 模式（reviewer 未激活）
+                        if (labelEl) {
+                            labelEl.textContent = 'LLM:';
+                            labelEl.style.color = '#888';
+                        }
+                        el.textContent = producer;
+                        if (itemEl) {
+                            itemEl.title = '当前 LLM 提供商（单 Agent 模式）';
+                        }
+                    }
                 }
                 if (pathEl && data.project_path) {
                     // 只显示最后两级目录

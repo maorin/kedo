@@ -3,19 +3,22 @@
 # ============================================================
 
 # LLM 配置
-# 可选: anthropic | openai | kimi-code | kimi | ollama | mock
+# 可选: anthropic | openai | kimi-code | kimi | deepseek | ollama | mock
 #   kimi-code: Kimi Code 2.5 编程专用端点 (推荐编程任务)
 #   kimi:      Kimi K2.5 通用端点 (Moonshot API)
+#   deepseek:  DeepSeek v4-pro (OpenAI 兼容端点)
 #   mock:      模拟模式，不需要 API Key，用于测试和演示
 llm_provider: "kimi-code"
-# model 留空则自动使用 provider 的默认模型（kimi-code → kimi-k2.5）
+# model 留空则自动使用 provider 的默认模型（kimi-code → kimi-k2.5，deepseek → deepseek-v4-pro）
 # model: "kimi-k2.5"
 
 # API Keys (优先读取环境变量，其次使用这里的值)
-# 环境变量: ANTHROPIC_API_KEY, OPENAI_API_KEY, KIMI_API_KEY
+# 环境变量: ANTHROPIC_API_KEY, OPENAI_API_KEY, KIMI_API_KEY, DEEPSEEK_API_KEY
 anthropic_api_key: ""           # 从 https://console.anthropic.com 获取
 openai_api_key: ""
 kimi_api_key: ""                # 通过 /login 设置，存储在 ~/.config/kedo/config.yaml
+deepseek_api_key: ""            # 从 https://platform.deepseek.com 获取
+deepseek_base_url: ""           # 留空默认 https://api.deepseek.com/v1
 ollama_url: "http://localhost:11434"
 
 
@@ -28,6 +31,17 @@ max_retries: 3                  # 子任务最大重试次数
 auto_fix: true                  # 是否启用自动修复
 review_gate: true               # 是否启用人工审查门
 min_eval_score: 70              # 最低评估通过分数 (0-100)
+
+# 方案 C（双 Agent 对抗 / Actor-Critic）
+# Reviewer 是独立于 Producer 的审查 Agent，使用不同 LLM provider 物理破 Self-eval drift。
+# 激活后 EvaluateTool 与 CommitCandidateTool 会调 Reviewer 判决，不再用 Producer 自评分。
+# reviewer_provider: none 即关闭，回退到单 Agent 行为。
+reviewer_provider: "none"         # none | anthropic | openai | kimi | kimi-code | deepseek | ollama | mock
+reviewer_model: ""                # 留空用 provider 默认（kimi 系 → kimi-k2.5）
+reviewer_api_key: ""              # 独立 key；留空则复用 ANTHROPIC_API_KEY / OPENAI_API_KEY / KIMI_API_KEY 环境变量
+reviewer_base_url: ""             # Kimi/Ollama 可覆盖
+reviewer_min_score: 70            # Reviewer approve 阈值（可比 min_eval_score 更严）
+reviewer_pre_commit_gate: true    # commit_candidate 前强制过 Reviewer；false 则只在 evaluate 调用时才过
 
 # 文档配置
 doc_language: "zh"              # SDD 文档语言: zh (中文) | en (English) | ja (日本語) 等

@@ -41,6 +41,7 @@ _state_manager = None
 _version_manager = None  # candidate API 直接用，不再走 _agent_loop.versions
 _planner = None          # planner._llm 兼容路径用
 _evaluator = None        # health 检查内省 + LLM 热切换用
+_reviewer = None         # 方案 C 独立审查 Agent，/llm/status 需要展示是否激活
 _create_llm_client = None  # create_llm_client 函数引用，避免循环导入
 _project_path: str = "."   # 项目根目录，用于文档浏览
 
@@ -54,15 +55,17 @@ def set_dependencies(
     version_manager=None,
     planner=None,
     evaluator=None,
+    reviewer=None,
 ):
     global _agent_loop, _react_agent, _state_manager, _version_manager
-    global _planner, _evaluator, _create_llm_client, _project_path
+    global _planner, _evaluator, _reviewer, _create_llm_client, _project_path
     _agent_loop = agent_loop
     _react_agent = react_agent
     _state_manager = state_manager
     _version_manager = version_manager
     _planner = planner
     _evaluator = evaluator
+    _reviewer = reviewer
     _create_llm_client = create_llm_client_fn
     _project_path = project_path
 
@@ -487,30 +490,56 @@ async def quick_chat(req: dict = Body(...)):
 # LLM 提供商切换 API
 # ============================================================
 
+_PROVIDER_MAP = {
+    "AnthropicClient": "claude",
+    "KimiClient": "kimi",
+    "OpenAIClient": "openai",
+    "DeepseekClient": "deepseek",
+    "OllamaClient": "ollama",
+    "MockLLMClient": "mock",
+}
+
+
+def _identify_llm(llm) -> tuple[str, str]:
+    """把 LLM client 实例识别成 (provider, model)，供 /llm/status 与 reviewer 展示复用。"""
+    if not llm:
+        return "unknown", "unknown"
+    cls_name = type(llm).__name__
+    provider = _PROVIDER_MAP.get(cls_name, cls_name)
+    # 区分 Kimi Code 和 Kimi 通用
+    if cls_name == "KimiClient" and getattr(llm, "base_url", ""):
+        if "api.kimi.com" in llm.base_url:
+            provider = "kimi-code"
+    return provider, getattr(llm, "model", "unknown")
+
+
 @router.get("/llm/status")
 async def get_llm_status():
-    """获取当前 LLM 提供商信息"""
+    """获取当前 LLM 提供商信息（含方案 C 双 Agent 的 Reviewer 状态）"""
     llm = (_react_agent.llm if _react_agent else None) \
         or (_planner._llm if _planner else None) \
         or (_agent_loop.planner._llm if _agent_loop else None)
-    provider = "unknown"
-    model = "unknown"
-    if llm:
-        cls_name = type(llm).__name__
-        provider_map = {
-            "AnthropicClient": "claude",
-            "KimiClient": "kimi",
-            "OpenAIClient": "openai",
-            "OllamaClient": "ollama",
-            "MockLLMClient": "mock",
+    provider, model = _identify_llm(llm)
+
+    # 方案 C：独立审查 Agent 是否激活
+    reviewer_info: dict = {"active": False}
+    if _reviewer is not None and _reviewer.is_active:
+        # Reviewer 内部持有独立 LLM client，复用同一套识别逻辑
+        rev_llm = getattr(_reviewer, "_llm", None)
+        rev_provider, rev_model = _identify_llm(rev_llm)
+        reviewer_info = {
+            "active": True,
+            "provider": rev_provider,
+            "model": rev_model,
+            "min_score": _reviewer.min_score,
         }
-        provider = provider_map.get(cls_name, cls_name)
-        # 区分 Kimi Code 和 Kimi 通用
-        if cls_name == "KimiClient" and hasattr(llm, "base_url"):
-            if "api.kimi.com" in llm.base_url:
-                provider = "kimi-code"
-        model = getattr(llm, "model", "unknown")
-    return {"provider": provider, "model": model, "project_path": _project_path}
+
+    return {
+        "provider": provider,
+        "model": model,
+        "project_path": _project_path,
+        "reviewer": reviewer_info,
+    }
 
 
 def _persist_llm_config(switch_config: dict) -> tuple[bool, str]:
@@ -537,6 +566,7 @@ def _persist_llm_config(switch_config: dict) -> tuple[bool, str]:
     keys = (
         "llm_provider", "model",
         "anthropic_api_key", "kimi_api_key", "kimi_base_url", "openai_api_key",
+        "deepseek_api_key", "deepseek_base_url",
     )
     changed = False
     for k in keys:
@@ -577,6 +607,20 @@ async def validate_llm_key(req: dict = Body(...)):
             "success": ok,
             "stage": "network",
             "provider": "claude",
+            "model": client.model,
+            "error": None if ok else msg,
+        }
+    if provider == "deepseek":
+        from api.server import DeepseekClient, DEFAULT_DEEPSEEK_MODEL
+        fmt_ok, fmt_msg = DeepseekClient.validate_key_format(api_key)
+        if not fmt_ok:
+            return {"success": False, "stage": "format", "error": fmt_msg}
+        client = DeepseekClient(api_key=api_key, model=model or DEFAULT_DEEPSEEK_MODEL)
+        ok, msg = await client.validate()
+        return {
+            "success": ok,
+            "stage": "network",
+            "provider": "deepseek",
             "model": client.model,
             "error": None if ok else msg,
         }
@@ -640,6 +684,23 @@ async def switch_llm(req: dict = Body(...)):
             switch_config["model"] = model
         else:
             switch_config["model"] = "kimi-k2.5"
+    elif provider == "deepseek":
+        # DeepSeek — OpenAI 兼容端点
+        switch_config["llm_provider"] = "deepseek"
+        if api_key:
+            from api.server import DeepseekClient
+            ok, msg = DeepseekClient.validate_key_format(api_key)
+            if not ok:
+                return {"success": False, "error": f"API Key 校验失败: {msg}"}
+            switch_config["deepseek_api_key"] = api_key
+        from api.server import DEFAULT_DEEPSEEK_MODEL
+        switch_config["model"] = model or DEFAULT_DEEPSEEK_MODEL
+        if api_key:
+            from api.server import DeepseekClient
+            probe = DeepseekClient(api_key=api_key, model=switch_config["model"])
+            ok, msg = await probe.validate()
+            if not ok:
+                return {"success": False, "error": f"DeepSeek 连通性校验失败: {msg}"}
     elif provider == "mock":
         switch_config["llm_provider"] = "mock"
     else:
@@ -651,6 +712,8 @@ async def switch_llm(req: dict = Body(...)):
         os.environ["ANTHROPIC_API_KEY"] = api_key
     elif provider in ("kimi", "kimi-code") and api_key:
         os.environ["KIMI_API_KEY"] = api_key
+    elif provider == "deepseek" and api_key:
+        os.environ["DEEPSEEK_API_KEY"] = api_key
 
     try:
         new_client = _create_llm_client(switch_config)

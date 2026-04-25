@@ -19,6 +19,7 @@ from core.evaluator import Evaluator
 from core.memory import AgentMemory
 from core.planner import Planner
 from core.react_agent import ReactAgent
+from core.reviewer import Reviewer
 from core.state_manager import StateManager
 from tools.base import ToolRegistry
 from tools.build_tool import BuildTool
@@ -92,6 +93,7 @@ def create_app(config: dict = None) -> FastAPI:
     shell = ShellExecutorTool(
         working_dir=config.get("project_path", "."),
         sandbox_mode=config.get("sandbox_mode", True),
+        profile_manager=profile_manager,
     )
     tool_registry = ToolRegistry()
     tool_registry.register(CodeGeneratorTool(llm_client, config=config, profile_guard=profile_guard))
@@ -108,11 +110,36 @@ def create_app(config: dict = None) -> FastAPI:
     planner = Planner(llm_client, memory, config=config)
     evaluator = Evaluator(llm_client, memory, config=config)
 
+    # Reviewer — 方案 C（双 Agent 对抗）的独立审查 Agent
+    # reviewer_provider=none → reviewer_llm=None → Reviewer 不激活，回退到单 Agent 行为
+    reviewer_llm = create_reviewer_llm_client(config)
+    reviewer = (
+        Reviewer(
+            llm_client=reviewer_llm,
+            memory=memory,
+            config=config,
+            min_score=config.get("reviewer_min_score", config.get("min_eval_score", 70)),
+        )
+        if reviewer_llm is not None
+        else None
+    )
+    if reviewer is not None:
+        logger.info(
+            f"Reviewer Agent active: provider={reviewer.provider_name} "
+            f"model={reviewer.model_name} min_score={reviewer.min_score}"
+        )
+    else:
+        logger.info("Reviewer Agent disabled (reviewer_provider=none)")
+
     # PlanTool 依赖 planner，必须在 planner 创建后注册
     tool_registry.register(PlanTool(planner=planner, memory=memory, state_manager=state_manager))
     tool_registry.register(PauseForHumanTool(state_manager=state_manager, event_bus=state_manager.event_bus))
     tool_registry.register(AutoFixTool(llm_client=llm_client, profile_manager=profile_manager, profile_guard=profile_guard))
-    tool_registry.register(EvaluateTool(evaluator=evaluator, min_score=config.get("min_eval_score", 70)))
+    tool_registry.register(EvaluateTool(
+        evaluator=evaluator,
+        reviewer=reviewer,
+        min_score=config.get("min_eval_score", 70),
+    ))
     tool_registry.register(ProposeAlternativesTool(
         state_manager=state_manager,
         event_bus=state_manager.event_bus,
@@ -126,8 +153,12 @@ def create_app(config: dict = None) -> FastAPI:
         event_bus=state_manager.event_bus,
         git_tool=GitTool(shell) if config.get("git_enabled", True) else None,
     )
-    # commit_candidate 工具（依赖 version_manager）
-    tool_registry.register(CommitCandidateTool(version_manager=version_manager))
+    # commit_candidate 工具（依赖 version_manager + 可选 reviewer pre-commit gate）
+    tool_registry.register(CommitCandidateTool(
+        version_manager=version_manager,
+        reviewer=reviewer,
+        pre_commit_gate=config.get("reviewer_pre_commit_gate", True),
+    ))
 
     # ReactAgent (LLM 驱动的 ReAct Agent — P3 后唯一主路径)
     react_agent = ReactAgent(
@@ -153,6 +184,7 @@ def create_app(config: dict = None) -> FastAPI:
         version_manager=version_manager,
         planner=planner,
         evaluator=evaluator,
+        reviewer=reviewer,
     )
 
     # 注册路由 — 必须在 StaticFiles 之前
@@ -295,6 +327,18 @@ def create_llm_client(config: dict):
             base_url=config.get("kimi_base_url", "https://api.moonshot.ai/v1"),
         )
 
+    elif provider == "deepseek":
+        # DeepSeek — OpenAI 兼容端点
+        api_key = os.environ.get("DEEPSEEK_API_KEY") or config.get("deepseek_api_key", "")
+        if not api_key:
+            return _handle_missing_key("DeepSeek", "DEEPSEEK_API_KEY", "https://platform.deepseek.com")
+        config["_mock_fallback"] = False
+        return DeepseekClient(
+            api_key=api_key,
+            model=config.get("model", DEFAULT_DEEPSEEK_MODEL),
+            base_url=config.get("deepseek_base_url", ""),
+        )
+
     elif provider == "ollama":
         config["_mock_fallback"] = False
         return OllamaClient(
@@ -304,6 +348,102 @@ def create_llm_client(config: dict):
 
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")
+
+
+def create_reviewer_llm_client(config: dict):
+    """
+    为 Reviewer Agent 构造独立 LLM client（方案 C）。
+
+    优先级：reviewer_api_key > 对应环境变量 > 主 LLM 的 api_key 配置
+    返回 None 表示 Reviewer 不激活（reviewer_provider=none 或 key 缺失）。
+
+    注意：Reviewer 故意不回退到 Mock —— 缺 key 时 reviewer=None，上层保持单 Agent 行为，
+    而不是悄悄用 Mock 给不真实的分数。
+    """
+    import os
+
+    provider = (config.get("reviewer_provider") or "none").strip().lower()
+    if provider in ("", "none", "off", "disabled", "false"):
+        return None
+
+    model = (config.get("reviewer_model") or "").strip()
+    reviewer_key = (config.get("reviewer_api_key") or "").strip()
+    base_url = (config.get("reviewer_base_url") or "").strip()
+
+    if provider == "mock":
+        logger.info("Reviewer using Mock LLM (reviewer_provider=mock)")
+        return MockLLMClient()
+
+    if provider == "anthropic":
+        api_key = (
+            reviewer_key
+            or os.environ.get("ANTHROPIC_API_KEY")
+            or config.get("anthropic_api_key", "")
+        )
+        if not api_key:
+            logger.warning("reviewer_provider=anthropic but no API key; Reviewer disabled")
+            return None
+        return AnthropicClient(
+            api_key=api_key,
+            model=model or DEFAULT_ANTHROPIC_MODEL,
+        )
+
+    if provider == "openai":
+        api_key = (
+            reviewer_key
+            or os.environ.get("OPENAI_API_KEY")
+            or config.get("openai_api_key", "")
+        )
+        if not api_key:
+            logger.warning("reviewer_provider=openai but no API key; Reviewer disabled")
+            return None
+        return OpenAIClient(api_key=api_key, model=model or "gpt-4")
+
+    if provider in ("kimi", "kimi-code"):
+        api_key = (
+            reviewer_key
+            or os.environ.get("KIMI_API_KEY")
+            or os.environ.get("MOONSHOT_API_KEY")
+            or config.get("kimi_api_key", "")
+        )
+        if not api_key:
+            logger.warning(f"reviewer_provider={provider} but no API key; Reviewer disabled")
+            return None
+        default_url = (
+            "https://api.kimi.com/coding/v1" if provider == "kimi-code"
+            else "https://api.moonshot.ai/v1"
+        )
+        mdl = model or "kimi-k2.5"
+        if not mdl.startswith("kimi") and not mdl.startswith("moonshot"):
+            logger.warning(
+                f"reviewer_model '{mdl}' 与 {provider} 不兼容，自动切换为 kimi-k2.5"
+            )
+            mdl = "kimi-k2.5"
+        return KimiClient(api_key=api_key, model=mdl, base_url=base_url or default_url)
+
+    if provider == "deepseek":
+        api_key = (
+            reviewer_key
+            or os.environ.get("DEEPSEEK_API_KEY")
+            or config.get("deepseek_api_key", "")
+        )
+        if not api_key:
+            logger.warning("reviewer_provider=deepseek but no API key; Reviewer disabled")
+            return None
+        return DeepseekClient(
+            api_key=api_key,
+            model=model or DEFAULT_DEEPSEEK_MODEL,
+            base_url=base_url,
+        )
+
+    if provider == "ollama":
+        return OllamaClient(
+            base_url=base_url or config.get("ollama_url", "http://localhost:11434"),
+            model=model or "codellama",
+        )
+
+    logger.warning(f"Unknown reviewer_provider '{provider}', Reviewer disabled")
+    return None
 
 
 # ============================================================
@@ -436,14 +576,24 @@ if __name__ == "__main__":
 
 
 class OpenAIClient(BaseLLMClient):
-    def __init__(self, api_key: str, model: str = "gpt-4"):
+    # 错误标签 —— 子类可覆盖，让异常信息指向正确 provider
+    PROVIDER_LABEL = "OpenAI"
+
+    def __init__(self, api_key: str, model: str = "gpt-4", base_url: str = ""):
         self.api_key = api_key
         self.model = model
+        self.base_url = base_url or ""
+
+    def _client(self):
+        import openai
+        kwargs = {"api_key": self.api_key}
+        if self.base_url:
+            kwargs["base_url"] = self.base_url
+        return openai.AsyncOpenAI(**kwargs)
 
     async def chat(self, messages: list[dict]) -> str:
         try:
-            import openai
-            client = openai.AsyncOpenAI(api_key=self.api_key)
+            client = self._client()
             response = await client.chat.completions.create(
                 model=self.model,
                 messages=messages,
@@ -451,12 +601,11 @@ class OpenAIClient(BaseLLMClient):
             )
             return response.choices[0].message.content
         except Exception as e:
-            raise RuntimeError(f"OpenAI API error: {e}")
+            raise RuntimeError(f"{self.PROVIDER_LABEL} API error: {e}")
 
     async def stream_chat(self, messages: list[dict]):
         try:
-            import openai
-            client = openai.AsyncOpenAI(api_key=self.api_key)
+            client = self._client()
             stream = await client.chat.completions.create(
                 model=self.model,
                 messages=messages,
@@ -468,13 +617,12 @@ class OpenAIClient(BaseLLMClient):
                 if delta.content:
                     yield delta.content
         except Exception as e:
-            raise RuntimeError(f"OpenAI API stream error: {e}")
+            raise RuntimeError(f"{self.PROVIDER_LABEL} API stream error: {e}")
 
     async def chat_with_tools(self, messages: list[dict], tools: list[dict]):
         from api.schemas import LLMResponse, ToolCallData
         try:
-            import openai
-            client = openai.AsyncOpenAI(api_key=self.api_key)
+            client = self._client()
             kwargs = {"model": self.model, "messages": messages, "temperature": 0.1}
             if tools:
                 kwargs["tools"] = tools
@@ -492,7 +640,59 @@ class OpenAIClient(BaseLLMClient):
                     ))
             return LLMResponse(content=msg.content, tool_calls=tool_calls)
         except Exception as e:
-            raise RuntimeError(f"OpenAI API error: {e}")
+            raise RuntimeError(f"{self.PROVIDER_LABEL} API error: {e}")
+
+
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+
+
+class DeepseekClient(OpenAIClient):
+    """
+    DeepSeek API 客户端。
+
+    DeepSeek 的 API 完全兼容 OpenAI Chat Completions 协议（含 stream 与 tool_calls），
+    所以直接继承 OpenAIClient，把 base_url 指向 https://api.deepseek.com/v1。
+
+    申请 Key: https://platform.deepseek.com
+    环境变量: DEEPSEEK_API_KEY
+    默认模型: deepseek-v4-pro （可通过 config.model / config.reviewer_model 覆盖）
+    """
+
+    PROVIDER_LABEL = "DeepSeek"
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = DEFAULT_DEEPSEEK_MODEL,
+        base_url: str = "",
+    ):
+        super().__init__(
+            api_key=api_key,
+            model=model or DEFAULT_DEEPSEEK_MODEL,
+            base_url=base_url or DEEPSEEK_BASE_URL,
+        )
+
+    @staticmethod
+    def validate_key_format(api_key: str) -> tuple[bool, str]:
+        if not api_key:
+            return False, "API Key 为空"
+        key = api_key.strip()
+        if not key.startswith("sk-"):
+            return False, "格式错误: DeepSeek API Key 通常以 'sk-' 开头"
+        if len(key) < 20:
+            return False, "长度异常: DeepSeek API Key 过短"
+        return True, ""
+
+    async def validate(self) -> tuple[bool, str]:
+        ok, msg = self.validate_key_format(self.api_key)
+        if not ok:
+            return False, msg
+        try:
+            await self.chat([{"role": "user", "content": "ping"}])
+            return True, "ok"
+        except Exception as e:
+            return False, str(e)
 
 
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"

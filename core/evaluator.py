@@ -78,6 +78,8 @@ class Evaluator:
         self._memory = memory
         self._config = config or {}
         self._dimensions = self._config.get("eval_dimensions", DEFAULT_DIMENSIONS)
+        # 系统提示可被覆盖 — Reviewer Agent 会注入独立裁判风格的 prompt
+        self._system_prompt = self._config.get("eval_system_prompt") or EVAL_SYSTEM_PROMPT
 
     async def evaluate(
         self,
@@ -336,7 +338,7 @@ class Evaluator:
             )
 
         messages = [
-            {"role": "system", "content": EVAL_SYSTEM_PROMPT},
+            {"role": "system", "content": self._system_prompt},
             {
                 "role": "user",
                 "content": (
