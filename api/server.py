@@ -609,6 +609,11 @@ class OpenAIClient(BaseLLMClient):
     # 错误标签 —— 子类可覆盖，让异常信息指向正确 provider
     PROVIDER_LABEL = "OpenAI"
 
+    # 超时配置 — 实战发现 default httpx timeout 对 deepseek-v4-pro 这类 reasoning 模型
+    # 不够：复杂 prompt 时 reasoning 阶段 stream 长时间无字节，触发 idle timeout（约
+    # 17-20s 一致失败）。给 5 分钟 read 兜底，足以容纳大 reasoning。
+    REQUEST_TIMEOUT = 300.0  # 秒
+
     def __init__(self, api_key: str, model: str = "gpt-4", base_url: str = ""):
         self.api_key = api_key
         self.model = model
@@ -616,7 +621,11 @@ class OpenAIClient(BaseLLMClient):
 
     def _client(self):
         import openai
-        kwargs = {"api_key": self.api_key}
+        kwargs = {
+            "api_key": self.api_key,
+            "timeout": self.REQUEST_TIMEOUT,
+            "max_retries": 0,  # ReactAgent 自己有 3 次重试，避免 SDK 层再叠加
+        }
         if self.base_url:
             kwargs["base_url"] = self.base_url
         return openai.AsyncOpenAI(**kwargs)
@@ -634,6 +643,9 @@ class OpenAIClient(BaseLLMClient):
             raise RuntimeError(f"{self.PROVIDER_LABEL} API error: {e}")
 
     async def stream_chat(self, messages: list[dict]):
+        # ★ 双层兜底：stream 任何失败都回落到非 stream chat()，避免一时网络抖动
+        # 或 reasoning idle timeout 让整轮重试全挂
+        emitted_any = False
         try:
             client = self._client()
             stream = await client.chat.completions.create(
@@ -645,9 +657,34 @@ class OpenAIClient(BaseLLMClient):
             async for chunk in stream:
                 delta = chunk.choices[0].delta
                 if delta.content:
+                    emitted_any = True
                     yield delta.content
+            if emitted_any:
+                return  # stream 成功
         except Exception as e:
-            raise RuntimeError(f"{self.PROVIDER_LABEL} API stream error: {e}")
+            logger.warning(
+                f"{self.PROVIDER_LABEL} stream failed ({e}), falling back to non-stream chat"
+            )
+            try:
+                fallback = await self.chat(messages)
+                if fallback:
+                    yield fallback
+                return
+            except Exception as e2:
+                raise RuntimeError(f"{self.PROVIDER_LABEL} API stream error: {e}")
+
+        # stream 跑完但没发任何 chunk（reasoning-only 兜底场景）→ 也走非 stream
+        if not emitted_any:
+            logger.warning(
+                f"{self.PROVIDER_LABEL} stream returned 0 chunks, falling back to non-stream chat "
+                f"(likely reasoning_content was generated but content stayed empty)"
+            )
+            try:
+                fallback = await self.chat(messages)
+                if fallback:
+                    yield fallback
+            except Exception as e:
+                raise RuntimeError(f"{self.PROVIDER_LABEL} API stream error: {e}")
 
     async def chat_with_tools(self, messages: list[dict], tools: list[dict]):
         from api.schemas import LLMResponse, ToolCallData
