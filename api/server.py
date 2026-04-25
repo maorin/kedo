@@ -705,7 +705,16 @@ class OpenAIClient(BaseLLMClient):
                     tool_calls.append(ToolCallData(
                         id=tc.id, name=tc.function.name, arguments=args
                     ))
-            return LLMResponse(content=msg.content, tool_calls=tool_calls)
+            # ★ DeepSeek-v4-pro thinking mode：reasoning_content 必须传回下一轮
+            #   pydantic v2 BaseModel 默认 model_extra 持有未声明字段
+            reasoning = getattr(msg, "reasoning_content", None)
+            if not reasoning and hasattr(msg, "model_extra") and msg.model_extra:
+                reasoning = msg.model_extra.get("reasoning_content")
+            return LLMResponse(
+                content=msg.content,
+                tool_calls=tool_calls,
+                reasoning_content=reasoning,
+            )
         except Exception as e:
             raise RuntimeError(f"{self.PROVIDER_LABEL} API error: {e}")
 

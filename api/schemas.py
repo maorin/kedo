@@ -106,6 +106,11 @@ class LLMResponse(BaseModel):
     """LLM 带工具调用的响应"""
     content: Optional[str] = None
     tool_calls: list[ToolCallData] = Field(default_factory=list)
+    # DeepSeek-v4-pro / Kimi reasoner 类的 thinking-mode reasoning trace。
+    # 这些 provider 协议要求：上一轮 assistant 返的 reasoning_content 必须在下一轮
+    # messages 里原样传回，否则 400 invalid_request_error。
+    # ReactAgent 会把这字段写入下一轮 assistant message 让 SDK 透传。
+    reasoning_content: Optional[str] = None
 
 
 # ============================================================

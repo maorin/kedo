@@ -1097,10 +1097,17 @@ IMPORTANT: You MUST output properly closed ```tool_call``` blocks to act. Do NOT
 
     @staticmethod
     def _format_assistant_message(response: LLMResponse) -> dict:
-        """将 LLMResponse 转为 OpenAI 格式的 assistant 消息"""
+        """将 LLMResponse 转为 OpenAI 格式的 assistant 消息
+
+        含 reasoning_content（DeepSeek-v4-pro / Kimi reasoner 的 thinking trace）时
+        透传给下一轮 messages —— 这是 thinking-mode 协议硬要求，否则 provider 返 400。
+        OpenAI SDK 1.x 接受 dict 形式 messages 时透传未知字段。
+        """
         msg: dict[str, Any] = {"role": "assistant"}
         if response.content:
             msg["content"] = response.content
+        if response.reasoning_content:
+            msg["reasoning_content"] = response.reasoning_content
         if response.tool_calls:
             msg["tool_calls"] = [
                 {
