@@ -3688,17 +3688,36 @@
                     addLog('推荐版本', `推荐版本: ${data.version_id} (信心分数: ${data.confidence_score})`, 'success');
                     break;
                 case 'discussion_started':
-                    appState.discussion = { issues: data.issues || [], proposals: data.proposals || [] };
+                    appState.discussion = {
+                        issues: data.issues || [],
+                        proposals: data.proposals || [],
+                        summary: data.summary || '',
+                    };
                     renderDiscussion();
                     addLog('讨论启动', '闭环讨论已启动', 'warning');
                     break;
                 case 'discussion_proposals':
-                    if (appState.discussion) appState.discussion.proposals = data.proposals;
+                    if (appState.discussion) {
+                        appState.discussion.proposals = data.proposals;
+                    } else {
+                        appState.discussion = { proposals: data.proposals, issues: [], summary: '' };
+                    }
                     renderDiscussion();
+                    // ★ 同步在控制台内嵌交互 widget — 用户不用切 tab
+                    var dTaskId = message.task_id || appState.currentTaskId;
+                    if (dTaskId) {
+                        consoleAppendProposalWidget(
+                            dTaskId,
+                            appState.discussion.summary || '',
+                            data.proposals || []
+                        );
+                        // 切到控制台 tab，让用户立刻看到 widget
+                        switchTab('console');
+                    }
                     addLog('讨论提案', `新提案数: ${data.proposals.length}`, 'info');
                     break;
                 case 'discussion_waiting_human':
-                    switchTab('discussion');
+                    // 不再强制切到 discussion；console 内嵌 widget 已经在那
                     addLog('等待输入', '等待人工输入', 'warning');
                     break;
                 case 'discussion_resolved':
@@ -3791,6 +3810,155 @@
             span.className = 'console-tool';
             span.textContent = `[${toolType}] ${step}: ${description}`;
             el.appendChild(span);
+            addCursor();
+            scrollConsole();
+        }
+
+        // ★ 在控制台内嵌交互式 propose_alternatives widget
+        // proposals 来自 LLM 的 propose_alternatives 工具；用户在这选择，
+        // 提交后 POST /api/tasks/<task_id>/discussion/input，agent 立刻续跑
+        function consoleAppendProposalWidget(taskId, summary, proposals) {
+            const el = dom.consoleOutput;
+            removeCursor();
+
+            // 同 task 已有 widget（重新规划场景）→ 移除旧的避免叠加
+            const exist = el.querySelector(`[data-proposal-widget-task="${taskId}"]`);
+            if (exist) exist.remove();
+
+            const wrap = document.createElement('div');
+            wrap.dataset.proposalWidgetTask = taskId;
+            wrap.style.cssText = 'border:2px solid #ffd93d;background:rgba(255,217,61,0.06);padding:0.7rem;border-radius:6px;margin:0.6rem 0;font-family:inherit;';
+
+            const header = document.createElement('div');
+            header.style.cssText = 'color:#ffd93d;font-weight:700;font-size:0.85rem;margin-bottom:0.4rem;';
+            header.textContent = '⚡ Agent 等你选方案';
+            wrap.appendChild(header);
+
+            if (summary) {
+                const sumEl = document.createElement('div');
+                sumEl.style.cssText = 'color:#c9d1d9;font-size:0.78rem;margin-bottom:0.5rem;line-height:1.4;';
+                sumEl.textContent = summary;
+                wrap.appendChild(sumEl);
+            }
+
+            // widget 内本地选中状态（不污染 appState）
+            const state = { selectedId: '' };
+            const cards = [];
+
+            (proposals || []).forEach(function(p) {
+                const card = document.createElement('div');
+                card.style.cssText = 'cursor:pointer;border:1px solid rgba(100,200,255,0.2);padding:0.5rem;border-radius:4px;margin-bottom:0.35rem;background:rgba(0,0,0,0.2);';
+
+                const title = document.createElement('div');
+                title.style.cssText = 'display:flex;justify-content:space-between;align-items:center;font-weight:600;color:#0099cc;font-size:0.8rem;';
+                const ts = document.createElement('span');
+                ts.textContent = '[' + (p.id || '?') + '] ' + (p.title || '');
+                title.appendChild(ts);
+                const pickBtn = document.createElement('button');
+                pickBtn.textContent = '选这个';
+                pickBtn.style.cssText = 'background:rgba(100,200,255,0.15);border:1px solid rgba(100,200,255,0.4);color:#64b5f6;font-size:0.7rem;padding:0.15rem 0.5rem;border-radius:3px;cursor:pointer;';
+                title.appendChild(pickBtn);
+                card.appendChild(title);
+
+                const desc = document.createElement('div');
+                desc.style.cssText = 'color:#888;font-size:0.74rem;margin-top:0.25rem;line-height:1.4;';
+                desc.textContent = p.description || '';
+                card.appendChild(desc);
+
+                if (p.pros) {
+                    const pros = document.createElement('div');
+                    pros.style.cssText = 'font-size:0.7rem;color:#22c55e;margin-top:0.2rem;';
+                    pros.textContent = '✓ ' + p.pros;
+                    card.appendChild(pros);
+                }
+                if (p.cons) {
+                    const cons = document.createElement('div');
+                    cons.style.cssText = 'font-size:0.7rem;color:#ef4444;margin-top:0.15rem;';
+                    cons.textContent = '⚠ ' + p.cons;
+                    card.appendChild(cons);
+                }
+
+                function selectThis() {
+                    state.selectedId = p.id;
+                    cards.forEach(function(c) {
+                        const isSel = (c.dataset.optId === p.id);
+                        c.style.borderColor = isSel ? '#ffd93d' : 'rgba(100,200,255,0.2)';
+                        c.style.background = isSel ? 'rgba(255,217,61,0.1)' : 'rgba(0,0,0,0.2)';
+                    });
+                    submitBtn.disabled = false;
+                    submitBtn.style.background = '#0099cc';
+                    submitBtn.style.cursor = 'pointer';
+                    hint.textContent = '已选: ' + p.id + ' — 可填补充意见，按 Cmd/Ctrl+Enter 或点 提交';
+                }
+                pickBtn.addEventListener('click', function(e) { e.stopPropagation(); selectThis(); });
+                card.addEventListener('click', selectThis);
+                card.dataset.optId = p.id;
+                cards.push(card);
+                wrap.appendChild(card);
+            });
+
+            const hint = document.createElement('div');
+            hint.style.cssText = 'font-size:0.7rem;color:#888;margin:0.4rem 0 0.3rem 0;';
+            hint.textContent = '先点上面任一方案 "选这个"，再提交';
+            wrap.appendChild(hint);
+
+            const ta = document.createElement('textarea');
+            ta.placeholder = '可选: 补充意见、调整需求、限制条件...（Cmd/Ctrl+Enter 直接提交）';
+            ta.style.cssText = 'width:100%;min-height:42px;padding:0.35rem;background:rgba(30,41,59,0.6);border:1px solid rgba(100,200,255,0.2);border-radius:4px;color:#e0e0e0;font-size:0.75rem;box-sizing:border-box;resize:vertical;font-family:inherit;';
+            wrap.appendChild(ta);
+
+            const submitBtn = document.createElement('button');
+            submitBtn.textContent = '提交选择';
+            submitBtn.disabled = true;
+            submitBtn.style.cssText = 'margin-top:0.35rem;background:rgba(100,100,100,0.3);border:none;color:white;padding:0.4rem 0.9rem;border-radius:4px;cursor:not-allowed;font-size:0.78rem;';
+
+            async function doSubmit() {
+                if (!state.selectedId || submitBtn.disabled) return;
+                submitBtn.disabled = true;
+                submitBtn.textContent = '提交中...';
+                const human = ta.value || '';
+                try {
+                    const resp = await fetch(API_BASE + '/tasks/' + taskId + '/discussion/input', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({
+                            action: 'select',
+                            proposal_id: state.selectedId,
+                            human_input: human,
+                            additional_constraints: []
+                        })
+                    });
+                    if (resp.ok) {
+                        // 替换 widget 为 inline 确认 — 保留视觉历史
+                        wrap.innerHTML = '';
+                        const ok = document.createElement('div');
+                        ok.style.cssText = 'color:#22c55e;font-weight:600;font-size:0.82rem;';
+                        ok.textContent = '✓ 已选 ' + state.selectedId + (human ? ' (含补充意见) ' : ' ') + '— Agent 已收到，继续...';
+                        wrap.appendChild(ok);
+                        wrap.style.borderColor = 'rgba(34,197,94,0.4)';
+                        wrap.style.background = 'rgba(34,197,94,0.05)';
+                        addLog('讨论', '已提交: ' + state.selectedId, 'success');
+                        appState.discussion = null;
+                        renderDiscussion();
+                    } else {
+                        const err = await resp.json().catch(function() { return {}; });
+                        addLog('讨论', '提交失败: ' + (err.detail || resp.status), 'error');
+                        submitBtn.disabled = false;
+                        submitBtn.textContent = '提交选择';
+                    }
+                } catch (e) {
+                    addLog('讨论', '提交异常: ' + e, 'error');
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = '提交选择';
+                }
+            }
+            submitBtn.addEventListener('click', doSubmit);
+            ta.addEventListener('keydown', function(e) {
+                if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); doSubmit(); }
+            });
+            wrap.appendChild(submitBtn);
+
+            el.appendChild(wrap);
             addCursor();
             scrollConsole();
         }
