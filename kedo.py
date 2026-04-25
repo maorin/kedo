@@ -163,6 +163,11 @@ def main():
 
     project_path_abs = os.path.abspath(args.project_path or ".")
     log_dir = config.get("storage_dir", os.path.join(project_path_abs, ".kedo"))
+    # 实战 bug 修：log_dir/storage_dir 在 config.yaml 里通常写成相对路径
+    # ".kedo/state"，没 abs 化时基于 cwd 解析（nohup 启动 cwd=$HOME →
+    # 写到 ~/.kedo/state，跑偏）。这里相对 project_path 解析。
+    if not os.path.isabs(log_dir):
+        log_dir = os.path.join(project_path_abs, log_dir)
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     # thin-client 模式（决定要等到 _run_repl 探测后才知）：先按"会落到文件"配，
     # 探测成功是 thin-client 时再清掉根 logger handler — 见 _run_repl
@@ -189,7 +194,13 @@ def main():
     config["project_path"] = project_path
 
     # 确保 storage 目录（StateManager 期望 .kedo/state 子目录，与 default 对齐）
+    # ★ 实战 bug 修复：config.yaml 里 storage_dir: ".kedo/state" 是相对路径，
+    #   StateManager 直接拿来 Path() 会基于进程 cwd 解析，导致 nohup 启动时
+    #   task_index.json / *_checkpoint.json 跑到 $HOME/.kedo/state 而不是项目里。
+    #   现在显式相对 project_path 解析。
     storage_dir = config.get("storage_dir", os.path.join(project_path, ".kedo", "state"))
+    if not os.path.isabs(storage_dir):
+        storage_dir = os.path.join(project_path, storage_dir)
     config["storage_dir"] = storage_dir
     Path(storage_dir).mkdir(parents=True, exist_ok=True)
 

@@ -271,20 +271,64 @@ class StateManager:
     # ----------------------------------------------------------
 
     def _persist_task_index(self):
-        """将任务列表持久化到磁盘，供下次启动时恢复"""
+        """将任务列表持久化到磁盘，供下次启动时恢复
+
+        2026-04-25 改成"读-合并-写 + atomic rename"：
+        - 多进程共享同一 storage_dir 时（典型：daemon + 残留 REPL），原始覆盖式写法
+          会让任意一边的写无意中清掉对方还不知道的 task。
+        - 现在先读现存，再用本进程内存覆盖同 task_id 的条目，新条目追加，
+          其他进程的条目保留。最后 .tmp + rename 保证 reader 不会看到半文件。
+        """
         index_path = self.storage_path / "task_index.json"
-        entries = []
+
+        # 1) 读磁盘现存（可能由其它进程写）
+        existing_by_id: dict[str, dict] = {}
+        if index_path.exists():
+            try:
+                existing = json.loads(index_path.read_text(encoding="utf-8"))
+                if isinstance(existing, list):
+                    for entry in existing:
+                        if isinstance(entry, dict) and "task_id" in entry:
+                            existing_by_id[entry["task_id"]] = entry
+            except Exception as e:
+                logger.warning(f"_persist_task_index: existing index unreadable, overwriting: {e}")
+
+        # 2) 用本进程内存覆盖
         for t in self._tasks.values():
             status = t["status"]
-            entries.append({
+            existing_by_id[t["task_id"]] = {
                 "task_id": t["task_id"],
                 "description": t["description"],
                 "status": status.value if hasattr(status, "value") else str(status),
                 "created_at": t.get("created_at", ""),
                 "current_step": t.get("current_step"),
                 "progress_percent": t.get("progress_percent", 0),
-            })
-        index_path.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+            }
+
+        # 3) 按 created_at 排序输出
+        entries = sorted(
+            existing_by_id.values(),
+            key=lambda t: t.get("created_at", "") or "",
+        )
+
+        # 4) atomic write: 先写 .tmp 再 rename（同 fs 内 rename 是原子的）
+        tmp_path = index_path.with_suffix(".json.tmp")
+        try:
+            tmp_path.write_text(
+                json.dumps(entries, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp_path.replace(index_path)
+        except Exception as e:
+            logger.warning(f"_persist_task_index: atomic write failed: {e}")
+            # 兜底：直接覆盖（旧行为），至少别让整个 create_task 抛出
+            try:
+                index_path.write_text(
+                    json.dumps(entries, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception as e2:
+                logger.error(f"_persist_task_index: fallback write also failed: {e2}")
 
     def _load_task_index(self):
         """启动时从磁盘加载历史任务索引（仅恢复元数据，不恢复运行状态）"""

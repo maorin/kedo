@@ -4,6 +4,7 @@ Git 操作工具 — 版本控制操作
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 from tools.base import BaseTool, ToolParameter, ToolResult
@@ -48,6 +49,21 @@ class GitTool(BaseTool):
         project_path: str,
         args: str = "",
     ) -> ToolResult:
+        # 项目非 git 仓库时立刻返回 actionable 错误，避免 LLM 反复试失败触发 convergence
+        # （实战观察：Producer 想 git log 找回失落代码，3 次 'fatal: 不是 git 仓库' 直接早停）
+        if action != "init":
+            git_dir = Path(project_path) / ".git"
+            if not git_dir.exists():
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"Not a git repository at {project_path} (.git missing). "
+                        f"Cannot use `git`. Try file_read / shell_execute instead, or run "
+                        f"`git init` once if version control is needed."
+                    ),
+                    data={"action": action, "reason": "not_a_git_repo"},
+                )
+
         command_map = {
             "status": "git status --short",
             "diff": "git diff",
@@ -59,6 +75,7 @@ class GitTool(BaseTool):
             "stash": f"git stash {args}",
             "reset": f"git reset {args}",
             "checkout": f"git checkout {args}",
+            "init": f"git init {args}".strip(),
         }
 
         cmd = command_map.get(action)

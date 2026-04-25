@@ -21,7 +21,11 @@ class FileReadTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Read file contents from the project."
+        return (
+            "Read file contents from the project. "
+            "Optional `limit` (max lines, 0=all) and `offset` (skip first N lines, 0=start). "
+            "Useful for large files: read with offset+limit in chunks."
+        )
 
     @property
     def is_read_only(self) -> bool:
@@ -31,18 +35,50 @@ class FileReadTool(BaseTool):
     def parameters(self) -> list[ToolParameter]:
         return [
             ToolParameter("file_path", "string", "Path to the file to read"),
+            ToolParameter("limit", "integer", "Max number of lines to return (0 = all)", required=False),
+            ToolParameter("offset", "integer", "Skip this many lines before returning (0 = start of file)", required=False),
         ]
 
-    async def execute(self, file_path: str) -> ToolResult:
+    async def execute(self, file_path: str, limit: int = 0, offset: int = 0, **_extra) -> ToolResult:
+        # **_extra 兜底吞掉 LLM 偶发传的未知参数（如某些模型会传 cache_control / encoding 等），
+        # 避免 0ms TypeError 失败触发 convergence detection
         try:
             p = Path(file_path)
             if not p.exists():
                 return ToolResult(success=False, error=f"File not found: {file_path}")
             content = p.read_text(encoding="utf-8", errors="replace")
+            total_lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+
+            # 应用 offset/limit 切片（仅在显式传入时生效，默认全文）
+            try:
+                limit_n = int(limit) if limit else 0
+                offset_n = int(offset) if offset else 0
+            except (TypeError, ValueError):
+                limit_n = 0
+                offset_n = 0
+
+            sliced_note = ""
+            if limit_n > 0 or offset_n > 0:
+                lines = content.splitlines(keepends=True)
+                start = max(0, offset_n)
+                end = (start + limit_n) if limit_n > 0 else len(lines)
+                lines = lines[start:end]
+                content = "".join(lines)
+                sliced_note = (
+                    f" [sliced: lines {start + 1}..{start + len(lines)} of {total_lines}]"
+                )
+
             return ToolResult(
                 success=True,
-                output=content,
-                data={"file_path": file_path, "lines": len(content.splitlines()), "size": len(content)},
+                output=content + (sliced_note if sliced_note else ""),
+                data={
+                    "file_path": file_path,
+                    "lines_returned": content.count("\n") + (1 if content and not content.endswith("\n") else 0),
+                    "total_lines": total_lines,
+                    "size": len(content),
+                    "offset": offset_n,
+                    "limit": limit_n,
+                },
             )
         except Exception as e:
             return ToolResult(success=False, error=str(e))
