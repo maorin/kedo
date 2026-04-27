@@ -20,5 +20,6 @@
 | 主题 | 文档 |
 |---|---|
 | 🛠 从单 Agent 到多 Agent — 4 候选方案对比（Sub-agent as Tool / Orchestrator-Worker / Actor-Critic / Blackboard）+ 蜂群（Swarm）技术专题 + 优缺点矩阵 + 4 Phase 迁移路径 | [multi-agent-architecture.md](multi-agent-architecture.md) |
+| 🧭 自主 Agent 与 LLM Workflow 的 Hybrid 化 — 从光谱两端到分层混合，4 种典型结合方式对比，kedo 当前位置(②)的固有 limit，推荐演进 ③ Plan-as-Contract → ④ Hierarchical Agent | [agent-workflow-hybrid.md](agent-workflow-hybrid.md) |
 
 > 欢迎增补。新问题模板：**问题本身 → 实际做了什么（对着代码引用）→ 诚实的 gap → 为何现状还 work → 下一步候选**。
