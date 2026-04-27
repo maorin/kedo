@@ -79,6 +79,26 @@ Scoring guide per dimension:
 """
 
 
+REVIEWER_STUCK_BUILD_SYSTEM_PROMPT = """You are an **independent senior engineer** acting
+as advisor on a 2-agent system. The other agent (Producer) is **stuck on a build that
+keeps failing the same way**. You are NOT scoring its work — you are giving it directions.
+
+Your goals, in order:
+1. **Diagnose** the actual root cause from the build errors and the working-tree state
+   (don't just paraphrase the stderr — say *what's wrong structurally*).
+2. **Tell the Producer what to STOP doing.** It has been retrying; if it's been changing
+   the same files in circles, name them.
+3. **Tell it the next concrete action.** Be specific: a file:line edit, a single shell
+   command, a rollback (`git checkout -- <path>`), or escalate (call `pause_for_human`).
+4. If it keeps drifting (e.g. introducing new build systems, rewriting profile commands,
+   renaming targets), call that out explicitly and tell it to revert.
+
+Be terse. Output 4–8 lines, no bullet headers, no JSON. Address the Producer in 2nd
+person ("You should…", "Stop changing X…"). Do NOT pretend things are fine — if the
+build is broken because of structural damage from earlier turns, say so.
+"""
+
+
 @dataclass
 class ReviewResult:
     """Reviewer 单次判决结果 — Producer 据此决定继续或重做"""
@@ -184,6 +204,24 @@ class Reviewer:
                 history_note
                 + ("\n\n" + effective_parent if effective_parent else "")
             )
+        # 方案 C：charter 存在时拼入。Reviewer 看 diff 评分时照 charter 来检查
+        if project_path:
+            try:
+                from core.project_charter import Charter
+                charter = Charter.load(project_path)
+                if charter is not None:
+                    charter_block = (
+                        charter.summarize_for_prompt()
+                        + "\n\nWhen the diff violates this charter, name the violation as "
+                        "`charter:<field>` in `requirements_missed` and keep the score below "
+                        "the approve threshold."
+                    )
+                    effective_parent = (
+                        charter_block
+                        + ("\n\n" + effective_parent if effective_parent else "")
+                    )
+            except Exception as e:
+                logger.debug(f"Reviewer.review: charter inject skipped: {e}")
 
         try:
             report = await self._inner.evaluate(
@@ -230,6 +268,97 @@ class Reviewer:
             f"stage={stage} score={score:.1f} approve={approve}"
         )
         return result
+
+    # ----------------------------------------------------------
+    # 卡死 build 时的指令性反馈（不打分，纯文本建议）
+    # ----------------------------------------------------------
+
+    async def advise_on_stuck_build(
+        self,
+        task_description: str,
+        build_command: str,
+        recent_errors: list[str],
+        working_tree_summary: str = "",
+        recent_actions: list[str] = None,
+        project_path: str = "",
+    ) -> str:
+        """Producer 的 build 工具连续失败 N 次后调用，让 Reviewer 给一段指令性反馈。
+
+        与 review() 不同，这里不打分、不写历史、不走 evaluator —— 直接调独立 LLM 拿
+        一段建议文本。失败时返回一段降级提示，不抛异常（调用方拿到啥就回灌啥给 Producer）。
+        """
+        recent_actions = recent_actions or []
+        # 最近 3 条错误就够，避免单次 prompt 太大
+        errors_block = "\n\n---\n\n".join(
+            f"[Build attempt {-len(recent_errors) + i + 1}]\n{e[-1200:]}"
+            for i, e in enumerate(recent_errors[-3:])
+        ) or "(no recent errors captured)"
+
+        actions_block = (
+            "\n".join(f"- {a}" for a in recent_actions[-8:])
+            if recent_actions else "(not provided)"
+        )
+
+        user_msg = (
+            f"Producer task:\n{task_description.strip()[:1500]}\n\n"
+            f"Current build command:\n  {build_command or '(unknown)'}\n\n"
+            f"Recent build errors (oldest first):\n{errors_block}\n\n"
+            f"Working tree (relevant build/profile files):\n{working_tree_summary or '(not summarized)'}\n\n"
+            f"Producer's recent actions:\n{actions_block}\n\n"
+            f"Give the Producer a short directive. Diagnose, tell it what to stop, "
+            f"and name the next concrete step."
+        )
+
+        # 方案 C：charter 存在时把摘要拼入 Reviewer system prompt，反馈时引用 charter:<field>
+        system_prompt = REVIEWER_STUCK_BUILD_SYSTEM_PROMPT
+        if project_path:
+            try:
+                from core.project_charter import Charter
+                charter = Charter.load(project_path)
+                if charter is not None:
+                    system_prompt = (
+                        system_prompt
+                        + "\n\n"
+                        + charter.summarize_for_prompt()
+                        + "\n\n**When citing violations, use `charter:<field>` notation "
+                        "(e.g. 'charter:build.forbidden_files', 'charter:artifact.target_name') "
+                        "so the Producer can map your feedback to the contract directly.**"
+                    )
+            except Exception as e:
+                logger.debug(f"Reviewer.advise: charter inject skipped: {e}")
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg},
+        ]
+
+        if not self._llm:
+            return (
+                "[Reviewer disabled] No independent reviewer is configured. "
+                "Suggest you call `pause_for_human` with a summary of what you've tried "
+                "and what the build error says."
+            )
+        try:
+            advice = await self._llm.chat(messages)
+        except Exception as e:
+            logger.warning(f"Reviewer.advise_on_stuck_build failed ({self.provider_name}): {e}")
+            return (
+                f"[Reviewer unavailable: {e}] Cannot get an independent opinion this turn. "
+                f"Recommend you stop iterating, run `pause_for_human` with the latest stderr, "
+                f"and let a human redirect."
+            )
+        text = (advice or "").strip()
+        if not text:
+            return (
+                "[Reviewer returned empty] The independent reviewer had nothing to say. "
+                "Treat this as a signal that the situation is unusual — escalate via "
+                "`pause_for_human` rather than retrying the same approach."
+            )
+        logger.info(
+            f"Reviewer[{self.provider_name}/{self.model_name}] stuck-build advice "
+            f"({len(text)} chars) for task fragment: {task_description[:60]!r}"
+        )
+        return text
 
     # ----------------------------------------------------------
     # 历史累积

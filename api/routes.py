@@ -410,6 +410,60 @@ async def get_iterations(task_id: str):
     }
 
 
+# ============================================================
+# Charter (方案 C — 项目契约) endpoints
+# ============================================================
+
+
+@router.get("/charter")
+async def get_charter():
+    """返回当前项目的 charter（frontmatter + body）。无 charter 时 has_charter=False。"""
+    from core.project_charter import Charter
+    c = Charter.load(_project_path)
+    if c is None:
+        return {
+            "project_path": _project_path,
+            "has_charter": False,
+            "path": str(Charter.path_for(_project_path)),
+        }
+    return {
+        "project_path": _project_path,
+        "has_charter": True,
+        "path": c.file_path,
+        "schema_version": c.schema_version,
+        "mutable": c.mutable,
+        "frozen": c.frozen,
+        "last_changed": c.last_changed,
+        "last_change_reason": c.last_change_reason,
+        "project_kind": c.project_kind,
+        "build": c.build,
+        "artifact": c.artifact,
+        "deploy": c.deploy,
+        "coding_conventions": c.coding_conventions,
+        "forbidden_actions": c.forbidden_actions,
+        "body": c.body_text,
+    }
+
+
+@router.post("/charter/propose-change/{task_id}/decide")
+async def decide_charter_change(task_id: str, req: dict = Body(...)):
+    """对一个 propose_charter_change 提案表决。Body: {action: 'approve'|'reject', human_input?: str}.
+    投递到 propose_charter_change_tool 的独立 queue。"""
+    action = (req.get("action") or "").lower()
+    if action not in ("approve", "reject"):
+        raise HTTPException(status_code=400, detail="action must be 'approve' or 'reject'")
+    payload = {
+        "action": action,
+        "human_input": req.get("human_input") or "",
+    }
+    try:
+        from tools.propose_charter_change_tool import get_charter_queue
+        await get_charter_queue(task_id).put(payload)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"failed to queue decision: {e}")
+    return {"task_id": task_id, "action": action, "message": "Charter change decision submitted"}
+
+
 @router.post("/tasks/{task_id}/discussion/input")
 async def submit_discussion_input(task_id: str, req: DiscussionInputRequest):
     """人工参与讨论：选择方案或追加意见。同时投递到 ReactAgent propose_alternatives queue

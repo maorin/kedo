@@ -111,6 +111,7 @@ class ReactAgent:
         config: dict = None,
         reject_tracker=None,
         role_swap=None,
+        reviewer=None,
     ):
         self.llm = llm_client
         self.tools = tool_registry
@@ -121,6 +122,9 @@ class ReactAgent:
         self._reject_tracker = reject_tracker
         # Producer ↔ Reviewer 角色对换管理器（可为 None）
         self._role_swap = role_swap
+        # 独立审查 Reviewer（方案 C）— 主循环里 build 失败 N 连击时调
+        # advise_on_stuck_build 拿指令性反馈回灌给 Producer。可为 None。
+        self._reviewer = reviewer
 
         # 可配置参数
         self.max_turns: int = self.config.get("max_agent_turns", 50)
@@ -139,6 +143,15 @@ class ReactAgent:
         self._current_task_id: Optional[str] = None
         # 收敛检测历史：每条工具失败追加 (tool_name, error_fingerprint)
         self._failure_fingerprints: list[tuple[str, str]] = []
+        # build 失败连击 → Reviewer 介入：阈值默认 3，介入后 reset 给 Producer 再试一轮
+        self.build_stuck_threshold: int = self.config.get("build_stuck_review_threshold", 3)
+        self._build_failure_count: int = 0
+        self._build_recent_errors: list[str] = []
+        self._build_last_command: str = ""
+        self._reviewer_interventions: int = 0
+        self.max_reviewer_interventions: int = self.config.get(
+            "max_reviewer_build_interventions", 2
+        )
 
         # 兼容旧接口: agent_loop 暴露了 planner._llm 供路由层使用
         # 这里提供一个简单的兼容属性
@@ -492,7 +505,26 @@ class ReactAgent:
                 # 错误计数 + 收敛检测指纹
                 if result.success:
                     consecutive_errors = 0
+                    if tc.name == "build":
+                        # build 通过 → 清掉之前积累的"卡死 build"状态
+                        self._build_failure_count = 0
+                        self._build_recent_errors.clear()
+                        self._reviewer_interventions = 0
                 else:
+                    # 方案 C：build 失败连击 → Reviewer 介入给指令性反馈。必须在
+                    # consecutive_errors++ 之前，介入成功就 reset 错误计数让 Producer
+                    # 拿建议有空间继续。
+                    if tc.name == "build":
+                        self._record_build_failure(result)
+                        intervened = await self._maybe_invoke_reviewer_for_build(
+                            task_id=task_id,
+                            messages=messages,
+                            project_path=project_path,
+                        )
+                        if intervened:
+                            consecutive_errors = 0
+                            # 跳过本次的 fingerprint 累积 + 早停 / 收敛检测
+                            continue
                     consecutive_errors += 1
                     # Fix 4: 空 error 用 [empty] 占位，让 convergence 能识别"反复返空"
                     fp = self._error_fingerprint(result.error or "") or "[empty]"
@@ -940,10 +972,22 @@ IMPORTANT: You MUST output properly closed ```tool_call``` blocks to act. Do NOT
         if ctx_parts:
             context_str = "## Project Context\n\n" + "\n".join(ctx_parts)
 
-        return SYSTEM_PROMPT_TEMPLATE.format(
+        prompt = SYSTEM_PROMPT_TEMPLATE.format(
             model_name=model_name,
             project_context=context_str,
         )
+
+        # 方案 C：charter 存在时把摘要拼入 system prompt（Producer 视角）
+        project_path = project_context.get("project_path")
+        if project_path:
+            try:
+                from core.project_charter import Charter
+                charter = Charter.load(project_path)
+                if charter is not None:
+                    prompt = prompt + "\n\n" + charter.summarize_for_prompt()
+            except Exception as e:
+                logger.debug(f"ReactAgent: charter load skipped: {e}")
+        return prompt
 
     async def _gather_prior_task_context(self, current_task_id: str, project_path: str) -> str:
         """
@@ -1156,6 +1200,162 @@ IMPORTANT: You MUST output properly closed ```tool_call``` blocks to act. Do NOT
             if fp == last_fp or SequenceMatcher(None, fp, last_fp).ratio() >= 0.85:
                 similar += 1
         return similar >= self.convergence_threshold
+
+    # ----------------------------------------------------------
+    # 方案 C：build 卡死时 Reviewer 介入
+    # ----------------------------------------------------------
+
+    def _record_build_failure(self, result) -> None:
+        """累积 build 失败状态供 Reviewer 介入时查看。"""
+        self._build_failure_count += 1
+        cmd = ""
+        if isinstance(getattr(result, "data", None), dict):
+            cmd = str(result.data.get("command", "") or "")
+        if cmd:
+            self._build_last_command = cmd
+        err = result.error or result.output or ""
+        if err:
+            self._build_recent_errors.append(err)
+            if len(self._build_recent_errors) > 5:
+                self._build_recent_errors = self._build_recent_errors[-5:]
+
+    async def _maybe_invoke_reviewer_for_build(
+        self,
+        task_id: str,
+        messages: list[dict],
+        project_path: str,
+    ) -> bool:
+        """build 失败 ≥ build_stuck_threshold 时调 Reviewer，把指令性反馈回灌到 messages。
+        返回 True 表示介入了（调用方应 reset consecutive_errors 让 Producer 拿建议再试）。
+        介入次数有上限，超过则不再介入，把空间让给收敛检测自然 escalate。"""
+        if self._reviewer is None or not getattr(self._reviewer, "is_active", False):
+            return False
+        if self._build_failure_count < self.build_stuck_threshold:
+            return False
+        if self._reviewer_interventions >= self.max_reviewer_interventions:
+            logger.info(
+                f"Reviewer build-advice cap reached ({self._reviewer_interventions}); "
+                f"letting convergence detector escalate instead."
+            )
+            return False
+
+        # 提取任务描述（messages[1] 通常是首条 user）
+        task_desc = ""
+        for m in messages[:4]:
+            if m.get("role") == "user":
+                c = m.get("content")
+                if isinstance(c, str) and c.strip():
+                    task_desc = c.strip()
+                    break
+
+        # 提取 Producer 最近 8 个 tool_call 摘要
+        recent_actions: list[str] = []
+        for m in messages[-30:]:
+            if m.get("role") != "assistant":
+                continue
+            for tc in (m.get("tool_calls") or []):
+                fn = (tc.get("function") or {}).get("name") or tc.get("name") or "?"
+                args = (tc.get("function") or {}).get("arguments") or tc.get("arguments") or ""
+                if isinstance(args, dict):
+                    args = str(args)
+                recent_actions.append(f"{fn} {str(args)[:120]}")
+        recent_actions = recent_actions[-8:]
+
+        wt_summary = self._build_working_tree_summary(project_path)
+
+        try:
+            advice = await self._reviewer.advise_on_stuck_build(
+                task_description=task_desc or "(task description not found in messages)",
+                build_command=self._build_last_command,
+                recent_errors=list(self._build_recent_errors),
+                working_tree_summary=wt_summary,
+                recent_actions=recent_actions,
+                project_path=project_path,
+            )
+        except Exception as e:
+            logger.warning(f"Reviewer.advise_on_stuck_build raised unexpectedly: {e}")
+            return False
+
+        # 用 user 角色回灌：function-calling 模式下 mid-conversation 的 system msg
+        # 模型不一定尊重，user 角色最稳
+        feedback_block = (
+            f"[Independent Reviewer feedback — build has failed "
+            f"{self._build_failure_count} times in a row]\n\n"
+            f"{advice}\n\n"
+            f"(This is from a separate model acting as reviewer. Treat it as a directive, "
+            f"not a suggestion. If it tells you to revert or escalate, do that next.)"
+        )
+        messages.append({"role": "user", "content": feedback_block})
+
+        self._reviewer_interventions += 1
+        prev_count = self._build_failure_count
+        # 介入后 reset 计数，给 Producer 一轮空间执行建议
+        self._build_failure_count = 0
+
+        await self._emit(
+            task_id, EventType.STEP_COMPLETED,
+            step="reviewer_build_advice",
+            intervention=self._reviewer_interventions,
+            failures_before_advice=prev_count,
+            advice_preview=advice[:200],
+        )
+        logger.info(
+            f"Reviewer intervened for stuck build "
+            f"(intervention #{self._reviewer_interventions}, after {prev_count} failures)"
+        )
+        return True
+
+    def _build_working_tree_summary(self, project_path: str) -> str:
+        """枚举项目根的 build/profile 文件，给 Reviewer 一份 working tree 简报。"""
+        from pathlib import Path
+        try:
+            root = Path(project_path)
+            if not root.is_dir():
+                return f"(project_path {project_path} not a directory)"
+        except Exception as e:
+            return f"(cannot inspect project_path: {e})"
+
+        watched = [
+            "CMakeLists.txt", "Makefile", "GNUmakefile", "makefile",
+            "package.json", "Cargo.toml", "build.gradle", "pyproject.toml",
+            "setup.py", "configure", "configure.ac",
+            "npdm.json",
+        ]
+        present: list[str] = []
+        for n in watched:
+            try:
+                if (root / n).exists():
+                    present.append(n)
+            except Exception:
+                continue
+        # build 输出目录
+        for d in ("build", "out", "dist"):
+            try:
+                if (root / d).is_dir():
+                    present.append(f"{d}/ (dir)")
+            except Exception:
+                continue
+
+        # profile.build / deploy.command（直接读 .kedo/project_profile.json，避免依赖 mgr）
+        profile_block = ""
+        try:
+            import json as _json
+            pf_path = root / ".kedo" / "project_profile.json"
+            if pf_path.exists():
+                pf = _json.loads(pf_path.read_text(encoding="utf-8", errors="replace"))
+                build_cmd = (pf.get("build") or {}).get("command", "") or "(empty)"
+                deploy_cmd = (pf.get("deploy") or {}).get("command", "") or "(none)"
+                hv = pf.get("human_verified", False)
+                profile_block = (
+                    f"\nprofile.build.command: {build_cmd!r}\n"
+                    f"profile.deploy.command: {deploy_cmd!r}\n"
+                    f"profile.human_verified: {hv}"
+                )
+        except Exception as e:
+            profile_block = f"\n(profile read failed: {e})"
+
+        files_block = ", ".join(present) if present else "(no recognized build files at root)"
+        return f"Project root: {project_path}\nBuild-related files at root: {files_block}{profile_block}"
 
     @staticmethod
     def _truncate(text: str, max_chars: int) -> str:

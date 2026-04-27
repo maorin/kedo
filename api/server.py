@@ -32,6 +32,7 @@ from tools.auto_fix_tool import AutoFixTool
 from tools.evaluate_tool import EvaluateTool
 from tools.commit_candidate_tool import CommitCandidateTool
 from tools.propose_alternatives_tool import ProposeAlternativesTool
+from tools.propose_charter_change_tool import ProposeCharterChangeTool
 from tools.file_tool import FileReadTool, FileSearchTool, FileWriteTool
 from tools.git_tool import GitTool
 from tools.respond_tool import RespondTool
@@ -150,6 +151,12 @@ def create_app(config: dict = None) -> FastAPI:
         timeout_s=config.get("propose_alternatives_timeout_s",
                              config.get("discussion_timeout_s", 600)),
     ))
+    # 方案 C：charter 变更提案工具（frozen charter 的合法变更通道）
+    tool_registry.register(ProposeCharterChangeTool(
+        state_manager=state_manager,
+        event_bus=state_manager.event_bus,
+        timeout_s=config.get("propose_charter_change_timeout_s", 1800),
+    ))
     # commit_candidate 需要 version_manager — 必须在 version_manager 创建后再注册（下面）
 
     # Version Manager (候选版本管理)
@@ -188,6 +195,7 @@ def create_app(config: dict = None) -> FastAPI:
         config=config,
         reject_tracker=reject_tracker,
         role_swap=role_swap,
+        reviewer=reviewer,
     )
 
     # role_swap 需要 react_agent + reviewer 都创建好后才能 bind

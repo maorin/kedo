@@ -1,0 +1,79 @@
+---
+schema_version: 1
+mutable: false
+last_changed: 2026-04-26
+last_change_reason: "Initial charter — frozen after switchvideo 6075f8ec drift incident"
+project_kind: switch_homebrew
+
+build:
+  system: cmake
+  must_have_files:
+    - CMakeLists.txt
+  forbidden_files:
+    - Makefile
+    - GNUmakefile
+    - makefile
+    - configure
+    - configure.ac
+    - Cargo.toml
+    - setup.py
+    - package.json
+  command: "cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/Switch.cmake && cmake --build build --parallel"
+
+artifact:
+  target_name: switchvideo
+  output_path: build/switchvideo.nro
+
+deploy:
+  command: "$DEVKITPRO/tools/bin/nxlink -a $SWITCH_IP build/switchvideo.nro"
+
+coding_conventions:
+  - "libnx 输入用 PadState API (padInitializeDefault / padUpdate / padGetButtonsDown), 不要用旧 hidScanInput / hidKeysDown"
+  - "SDL2 头文件用 <SDL2/SDL.h>, 不是 <SDL.h>"
+  - "网络初始化前必须 socketInitializeDefault()"
+  - "DEVKITPRO 工具链 only — 不允许引入 host gcc / clang 编译"
+  - "字体通过 romfs 打包 (LiberationSans-Regular.ttf), 路径 /fonts/...ttf"
+  - "音频 SDL_OpenAudioDevice + SDL_QueueAudio, AUDIO_S16SYS, 预缓冲 1.5s"
+
+forbidden_actions:
+  - "introducing a 2nd build system (e.g. hand-written Makefile when CMake already exists)"
+  - "renaming CMake target without updating artifact.target_name + deploy.command in the same change"
+  - "removing -DCMAKE_TOOLCHAIN_FILE from build command (would degrade to host gcc)"
+  - "rewriting an entire build/profile/CMakeLists file when a targeted edit suffices"
+  - "writing API keys / secrets to source files"
+---
+
+# Project Charter — switchvideo
+
+This is a Nintendo Switch homebrew application that streams videos from an NFS share
+(served by a companion `video_server.py` running on the LAN). It uses **CMake** with
+the devkitPro Switch toolchain as the **single, authoritative build system**.
+
+## Why this charter exists
+
+On 2026-04-25 task `6075f8ec`, while attempting to fix Switch error code 2168-0002,
+the agent introduced a hand-written devkitPro `switch_rules` Makefile *alongside* the
+existing CMakeLists.txt, renamed the CMake target, and rewrote `profile.build.command`
+to point at the Makefile path — without removing the CMake setup. The project ended
+up with two conflicting build systems, the Reviewer never got a chance to gate the
+damage (it only gates `commit_candidate`, and the build never reached green), and the
+task hit `max_turns` 95% before being killed. This charter freezes the contract that
+was implicitly violated.
+
+## Hard rules (machine-enforced via ProfileGuard)
+
+- The project uses **CMake**, not Makefile / Cargo / npm / setuptools. Period.
+- The CMake target is **`switchvideo`**. Any rename must propose a charter change.
+- `deploy.command` references `build/switchvideo.nro`. Renaming target without
+  updating deploy.command in the same approved patch is a violation.
+
+## Soft rules (Reviewer cites these)
+
+See `coding_conventions` and `forbidden_actions` above. Reviewer should cite
+violations as `charter:coding_conventions[index]` or `charter:forbidden_actions[index]`.
+
+## How to change this charter
+
+The charter is `mutable: false`. The agent must call the `propose_charter_change`
+tool with the field path and a clear reason; the user approves/rejects on the
+dashboard. Direct edits to this file by the agent are blocked by ProfileGuard.
