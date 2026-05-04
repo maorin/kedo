@@ -1,8 +1,17 @@
 # nxdumptool 安装与使用指南
 
+> ⏸ **状态：搁置中（2026-05-05）**  
+> nxdumptool 的核心用途是 **dump firmware（NCA）给模拟器加载**。当前公开生态没有可 build 的 headless Switch emulator（详见 [p1-emulator-setup-guide.md](p1-emulator-setup-guide.md) 死局说明），所以本文描述的 firmware dump 流程**也跟着搁置**。  
+>
+> ★ 真机崩溃定位**不需要本工具** — 直接走 [switch-coredump-guide.md](switch-coredump-guide.md) 即可（Atmosphere 自带 creport 写到 `<SD>/atmosphere/crash_reports/`，PC 端 `addr2line` 解就行，零依赖）。  
+>
+> 本文继续保留：等社区出活的 headless Switch emulator 时直接启用，不用从头再调研。
+
+---
+
 > **目的**：从你自己的 Switch dump firmware（NCA 文件）和验证 prod.keys。  
 > **场景前提**：硬破 + Atmosphere CFW + hbmenu 可用。  
-> **关联**：[p1-emulator-setup-guide.md](p1-emulator-setup-guide.md) — 模拟器装机流程（已搁置）；本文是底层 dump 工具，独立有用。
+> **关联**：[p1-emulator-setup-guide.md](p1-emulator-setup-guide.md) — 模拟器装机流程（已搁置）；本文是该流程的前置 dump 步骤。
 
 ---
 
