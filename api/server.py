@@ -36,7 +36,10 @@ from tools.propose_charter_change_tool import ProposeCharterChangeTool
 from tools.file_tool import FileReadTool, FileSearchTool, FileWriteTool
 from tools.git_tool import GitTool
 from tools.respond_tool import RespondTool
+from tools.emulator_test import EmulatorTestTool
+from tools.host_test import HostTestTool
 from tools.shell_executor import ShellExecutorTool
+from tools.static_check import StaticCheckTool
 from tools.test_runner import TestRunnerTool
 
 logger = logging.getLogger(__name__)
@@ -108,6 +111,10 @@ def create_app(config: dict = None) -> FastAPI:
     tool_registry.register(FileSearchTool())
     tool_registry.register(RespondTool())
     tool_registry.register(BuildTool(profile_manager=profile_manager, llm_client=llm_client))
+    tool_registry.register(StaticCheckTool(profile_manager=profile_manager))
+    tool_registry.register(HostTestTool(profile_manager=profile_manager, llm_client=llm_client))
+    emulator_tool = EmulatorTestTool(profile_manager=profile_manager, llm_client=llm_client)
+    tool_registry.register(emulator_tool)
 
     # Planner & Evaluator
     planner = Planner(llm_client, memory, config=config)
@@ -177,13 +184,14 @@ def create_app(config: dict = None) -> FastAPI:
         enabled=config.get("enable_swap_on_reject", False) and reviewer is not None,
     )
 
-    # commit_candidate 工具（依赖 version_manager + 可选 reviewer pre-commit gate + reject_tracker + role_swap）
+    # commit_candidate 工具（依赖 version_manager + 可选 reviewer pre-commit gate + reject_tracker + role_swap + emulator gate）
     tool_registry.register(CommitCandidateTool(
         version_manager=version_manager,
         reviewer=reviewer,
         pre_commit_gate=config.get("reviewer_pre_commit_gate", True),
         reject_tracker=reject_tracker,
         role_swap=role_swap,
+        emulator_tool=emulator_tool,  # T3 — profile.emulator.enabled 控制是否实际跑
     ))
 
     # ReactAgent (LLM 驱动的 ReAct Agent — P3 后唯一主路径)

@@ -31,6 +31,7 @@ class CommitCandidateTool(BaseTool):
         pre_commit_gate: bool = True,
         reject_tracker=None,
         role_swap=None,
+        emulator_tool=None,
     ):
         self._vm = version_manager
         self._reviewer = reviewer          # 方案 C：独立 Reviewer Agent（可为 None）
@@ -40,6 +41,9 @@ class CommitCandidateTool(BaseTool):
         # Producer ↔ Reviewer 角色对换管理器（可为 None），到阈值时优先 swap，
         # swap 后还失败再走 reject_tracker 的 respond 屏蔽路径
         self._role_swap = role_swap
+        # T3 真模拟器 gate（可为 None）— Reviewer 通过后跑一次，failure
+        # 由 profile.emulator.required 决定是否阻塞 commit
+        self._emulator_tool = emulator_tool
 
     @property
     def name(self) -> str:
@@ -284,8 +288,48 @@ class CommitCandidateTool(BaseTool):
             restore_msg = ""
             if self._role_swap is not None and self._role_swap.is_swapped(task_id):
                 restore_msg = self._role_swap.restore(task_id)
+        else:
+            # reviewer 未激活路径下保持 restore_msg 已定义，避免 NameError
+            restore_msg = ""
 
-        # --- Reviewer 通过（或未激活） → 实际创建候选版本 ---
+        # --- T3 (虚拟测试 Phase C): emulator gate ---
+        # 设计：放在 Reviewer 之后，避免 Reviewer 已经会拒绝时还浪费 emulator 启动时间。
+        # 这里 emulator_tool.execute() 内部按 profile.emulator.enabled 决定是否实际跑，
+        # 没启用就秒返回；启用且 binary 不存在时按 required 决定 fail/skip。
+        emulator_meta: dict = {}
+        if self._emulator_tool is not None:
+            try:
+                em_res = await self._emulator_tool.execute(project_path=project_path)
+            except Exception as e:
+                logger.warning(f"emulator pre-commit gate exception: {e}")
+                em_res = None
+
+            if em_res is not None:
+                emulator_meta = {
+                    "emulator_skipped": bool(em_res.data.get("skipped")),
+                    "emulator_required": bool(em_res.data.get("required")),
+                    "emulator_returncode": em_res.data.get("returncode"),
+                    "emulator_crashes": em_res.data.get("crash_hits") or [],
+                    "emulator_command": em_res.data.get("command"),
+                }
+                # 不通过且为 required → 阻塞 commit
+                if (not em_res.success) and em_res.data.get("required"):
+                    return ToolResult(
+                        success=False,
+                        error=(
+                            f"emulator gate REJECTED: {em_res.error or 'see output'}. "
+                            "Iterate the code to fix the crash before retrying commit_candidate."
+                        ),
+                        output=em_res.output,
+                        data={
+                            **reviewer_meta,
+                            **emulator_meta,
+                            "approved": False,
+                            "blocked_by": "emulator",
+                        },
+                    )
+
+        # --- Reviewer + emulator 都通过（或未激活） → 实际创建候选版本 ---
         try:
             # 方案 C 后：ai_confidence 优先用 reviewer 的独立打分；没有 reviewer 时用 Producer 自评
             if reviewer_meta.get("reviewer_score") is not None:
@@ -332,6 +376,7 @@ class CommitCandidateTool(BaseTool):
                 "version_number": version_number,
                 "title": title,
                 **reviewer_meta,
+                **emulator_meta,
                 "role_swap_restored": bool(restore_msg),
             },
         )

@@ -131,6 +131,30 @@ CRITICAL RULES:
    include_dirs=["/opt/devkitpro/portlibs/switch/include"].
    Use $ENV_VAR syntax for toolchain roots (e.g. "$DEVKITPRO/portlibs/switch/lib").
 
+8. **Virtual test layers** (T1/T2/T3 — give kedo a fast feedback loop):
+
+   8a. `strict_warnings` (T1, START CONSERVATIVE):
+       Compile-time strictness flags injected via CFLAGS/CXXFLAGS/RUSTFLAGS.
+       For C/C++: cflags=["-Wall","-Wextra","-Wundef","-Wmissing-prototypes"]
+                  cxxflags=["-Wall","-Wextra","-Wundef"]
+                  Do NOT include "-Werror" by default — many platform SDKs trip
+                  legacy warnings; let the user opt in.
+       For Rust: rustflags=["-W","unused"]; do NOT include "-D warnings" by default.
+       Set enabled=true unless the project type is unknown.
+
+   8b. `host_test` (T2, OPTIONAL):
+       For cross-compiled projects (Switch, embedded ARM, etc.) where the build
+       artifact cannot run on host, you MAY propose a host-side test harness that
+       compiles a subset of the source against mock platform headers + ASAN/UBSAN.
+       If you cannot describe a concrete mock_dir / build_command, set enabled=false
+       (default). Do NOT invent paths.
+
+   8c. `emulator` (T3, OPTIONAL):
+       For projects targeting a platform with a usable emulator (Switch→Ryujinx,
+       embedded→QEMU, Android→AVD), describe how to launch the emulator headless
+       and what console patterns indicate success/crash. If no emulator is set up,
+       set enabled=false (default).
+
 OUTPUT STRICT JSON (no markdown, no commentary), exactly this shape:
 {
   "type": "<concise project type, e.g. switch_homebrew, android_native, cpp_host, rust_embedded>",
@@ -155,6 +179,30 @@ OUTPUT STRICT JSON (no markdown, no commentary), exactly this shape:
   "platform_hints": {
     "lib_dirs": ["<absolute paths to directories containing .a/.so/.dylib files for the target platform>"],
     "include_dirs": ["<absolute paths to directories containing header files for the target platform>"]
+  },
+  "strict_warnings": {
+    "enabled": <true|false>,
+    "cflags": ["-Wall", "-Wextra", "..."],
+    "cxxflags": ["-Wall", "-Wextra", "..."],
+    "rustflags": ["..."],
+    "extra_env": {}
+  },
+  "host_test": {
+    "enabled": <true|false>,
+    "mock_dir": "<relative path or null>",
+    "build_command": "<command or null>",
+    "run_command": "<command or null>",
+    "expected_exit_code": 0,
+    "timeout_s": 30,
+    "auto_run_after_build": true
+  },
+  "emulator": {
+    "enabled": <true|false>,
+    "command_template": "<command with {artifact} placeholder, or null>",
+    "timeout_s": 90,
+    "success_patterns": [],
+    "crash_patterns": [],
+    "required": false
   },
   "notes": "<anything else humans should know about building/testing this project>"
 }
@@ -209,6 +257,56 @@ class ProjectProfile(dict):
     @property
     def platform_hints(self) -> dict:
         return self.get("platform_hints") or {}
+
+    @property
+    def strict_warnings(self) -> dict:
+        """
+        T1 编译期严格化配置（kedo 虚拟测试三层方案 Phase A）。
+        格式：
+          {
+            "enabled": bool,
+            "cflags": ["-Wall", "-Wextra", ...],
+            "cxxflags": [...],
+            "rustflags": [...],
+            "extra_env": {"VAR": "value"}
+          }
+        BuildTool 会把这些 flags 通过 CFLAGS/CXXFLAGS/RUSTFLAGS 等环境变量注入构建命令，
+        不修改 build.command 本身。
+        """
+        return self.get("strict_warnings") or {}
+
+    @property
+    def host_test(self) -> dict:
+        """
+        T2 宿主机 mock + ASAN 配置（kedo 虚拟测试三层方案 Phase B）。
+        格式：
+          {
+            "enabled": bool,
+            "mock_dir": "tests/host_mock",   # 包含 mock 桩 + 测试入口
+            "build_command": "gcc -fsanitize=address ...",
+            "run_command": "./host_test",
+            "expected_exit_code": 0,
+            "timeout_s": 30,
+            "auto_run_after_build": True      # build 成功后是否自动调
+          }
+        """
+        return self.get("host_test") or {}
+
+    @property
+    def emulator(self) -> dict:
+        """
+        T3 真模拟器配置（kedo 虚拟测试三层方案 Phase C）。
+        格式：
+          {
+            "enabled": bool,
+            "command_template": "xvfb-run -a ryujinx --headless {artifact}",
+            "timeout_s": 90,
+            "success_patterns": ["main loop entered"],
+            "crash_patterns": ["svcBreak", "Result code 0x[0-9a-f]+"],
+            "required": False                 # 失败时是否阻塞 commit_candidate
+          }
+        """
+        return self.get("emulator") or {}
 
 
 class ProjectProfileManager:

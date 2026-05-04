@@ -510,6 +510,13 @@ class ReactAgent:
                         self._build_failure_count = 0
                         self._build_recent_errors.clear()
                         self._reviewer_interventions = 0
+                        # T2 (虚拟测试 Phase B): build 通过后自动跑一次 host_test
+                        # 仅当 profile.host_test.enabled=true && auto_run_after_build=true
+                        await self._maybe_auto_run_host_test(
+                            task_id=task_id,
+                            messages=messages,
+                            project_path=project_path,
+                        )
                 else:
                     # 方案 C：build 失败连击 → Reviewer 介入给指令性反馈。必须在
                     # consecutive_errors++ 之前，介入成功就 reset 错误计数让 Producer
@@ -1304,6 +1311,66 @@ IMPORTANT: You MUST output properly closed ```tool_call``` blocks to act. Do NOT
             f"(intervention #{self._reviewer_interventions}, after {prev_count} failures)"
         )
         return True
+
+    async def _maybe_auto_run_host_test(
+        self,
+        task_id: str,
+        messages: list[dict],
+        project_path: str,
+    ) -> None:
+        """T2 (虚拟测试 Phase B) — build 通过后自动跑 host_test。
+
+        触发条件：profile.host_test.enabled 且 auto_run_after_build。
+        结果以 user 角色追加到 messages，让 LLM 能看到（function calling 模式下
+        system message 不一定被尊重）。失败不阻塞主循环，让 Producer 自己决定
+        如何处理。
+        """
+        host_tool = self.tools.get("host_test")
+        if host_tool is None:
+            return
+
+        from pathlib import Path
+        import json as _json
+        try:
+            pf_path = Path(project_path) / ".kedo" / "project_profile.json"
+            if not pf_path.exists():
+                return
+            profile = _json.loads(pf_path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            return
+
+        host_cfg = profile.get("host_test") or {}
+        if not host_cfg.get("enabled"):
+            return
+        if not host_cfg.get("auto_run_after_build", True):
+            return
+
+        try:
+            await self._emit(
+                task_id, EventType.STEP_STARTED,
+                step="host_test_auto",
+                summary="T2: running host mock + ASAN after build",
+            )
+            ht_result = await host_tool.execute(project_path=project_path)
+        except Exception as e:
+            logger.warning(f"host_test auto-run failed: {e}")
+            return
+
+        # 结果回灌 — user 角色更稳定（kimi-code 的 system 注入有时会被忽略）
+        marker = "T2 host_test (auto):" if ht_result.success else "T2 host_test (auto) FAILED:"
+        body = ht_result.output if ht_result.success else (ht_result.error or "(no error message)")
+        body = body[-3000:]
+        messages.append({
+            "role": "user",
+            "content": f"[{marker}]\n{body}",
+        })
+        await self._emit(
+            task_id,
+            EventType.STEP_COMPLETED if ht_result.success else EventType.STEP_FAILED,
+            step="host_test_auto",
+            output=(body[:300] if ht_result.success else None),
+            error=(body[:300] if not ht_result.success else None),
+        )
 
     def _build_working_tree_summary(self, project_path: str) -> str:
         """枚举项目根的 build/profile 文件，给 Reviewer 一份 working tree 简报。"""

@@ -1,8 +1,19 @@
 # 虚拟环境测试策略 — 让 kedo 自闭环
 
-> **状态**：2026-04-25 设计待落地。当前 kedo 在 build 通过后只能依赖人工部署到真机/真设备测试，
-> 反馈环路 30 分钟到几小时，LLM 拿不到真实运行时反馈无法自动修复基本问题。
-> 本文档定义"虚拟环境测试"分层策略，让 kedo 能在 commit 候选版本前自动捕获 80% 的运行时 bug。
+> **状态**：2026-05-04 三层全部 kedo-侧落地（A/B/C）。仍需用户侧准备：
+> - T1 strict_warnings：**默认空**，由 LLM 在生成 profile 时填或人工补
+> - T2 host_test：mock_libnx 样板已提供（`tools/mocks/libnx/`），具体项目要写自己的 host_main.c
+> - T3 emulator：Ryubing 二进制 + Switch firmware 必须用户在目标机器手动准备（见末尾"Ryubing 安装步骤"）
+>
+> 落地代码：
+> - `tools/build_tool.py` — strict_warnings 注入 + warning surface
+> - `tools/static_check.py` — 新工具（clang-tidy/pyright/cppcheck/eslint wrapper）
+> - `tools/host_test.py` — 新工具，T2 host mock + ASAN/UBSAN，build 成功后自动调
+> - `tools/emulator_test.py` — 新工具，T3 emulator wrapper，commit_candidate gate
+> - `tools/mocks/libnx/` — Switch homebrew 的 host mock 桩样板
+> - `core/project_profile.py` — profile 加 `strict_warnings` / `host_test` / `emulator` 字段
+> - `core/react_agent.py` — build 成功后自动调 host_test 回灌结果
+> - `tools/commit_candidate_tool.py` — Reviewer 通过后再过 emulator gate
 
 ## 为什么需要
 
@@ -192,3 +203,60 @@ kill $EMULATOR_PID
 ## 一句话总结
 
 > 自动化测试的 ROI 不在"测得多真"，而在"反馈多快"。T1 + T2 占 80% 价值，T3 只是最后一道客观闸。**先把 mock 层建起来，模拟器之后再说**。
+
+## Ryubing 安装步骤（T3 启用前的用户准备）
+
+> kedo 不能也不该自动做这步：firmware 必须用户从自己 Switch dump，不能通过网络获取。
+
+```bash
+# 1. 装 .NET 8 + xvfb
+sudo apt install -y dotnet-sdk-8.0 xvfb
+
+# 2. 拉源码 + build（约 10 分钟）
+git clone https://github.com/Ryubing/Ryujinx ~/Ryubing
+cd ~/Ryubing
+dotnet build -c Release -p:ExtraDefineConstants=DISABLE_UPDATER
+
+# 3. 准备 Switch firmware（必须自己 Switch dump）
+#    a. 在自己 Switch 上跑 Lockpick_RCM 拿到 prod.keys + title.keys
+#    b. 在自己 Switch 上 dump firmware/*.nca
+#    c. 把这些文件放到 ~/.config/Ryujinx/ 对应目录
+#    详见 https://ryujinx.org/quickstart
+
+# 4. 验证可启动一个 nro
+xvfb-run -a -s "-screen 0 1280x720x24" \
+  ~/Ryubing/src/Ryujinx.Headless.SDL2/bin/Release/Ryujinx.Headless.SDL2 \
+  --memory-manager-mode HostMappedUnsafe /path/to/test.nro 2>&1 | head -50
+```
+
+### 然后在 profile.emulator 里启用
+
+```json
+{
+  "emulator": {
+    "enabled": true,
+    "command_template": "xvfb-run -a -s '-screen 0 1280x720x24' /home/user/Ryubing/src/Ryujinx.Headless.SDL2/bin/Release/Ryujinx.Headless.SDL2 --memory-manager-mode HostMappedUnsafe {artifact}",
+    "timeout_s": 60,
+    "success_patterns": ["consoleInit complete", "main loop entered"],
+    "crash_patterns": ["svcBreak", "Result code 0x[0-9a-f]+", "panic", "fatal exception"],
+    "required": false
+  }
+}
+```
+
+`required=false`：emulator 失败只 warning，不阻塞 commit_candidate（开发期推荐）；
+`required=true`：emulator 失败 reject candidate，必须迭代修复（接近发布时启用）。
+
+## 当前落地状态对照
+
+| Tier | kedo 侧 | 用户侧 |
+|---|---|---|
+| **T1** | `BuildTool` 注入 strict_warnings + surface warning 行；`static_check` 工具可用 | profile 里手填 `strict_warnings.cflags`（或让 LLM 生成 profile 时自填） |
+| **T2** | `host_test` 工具 + ReactAgent build 成功自动调 + `mocks/libnx/` 样板 | 写项目自己的 `tests/host_mock/host_main.c` 驱动业务代码 |
+| **T3** | `emulator_test` 工具 + `commit_candidate` gate | 在 192.168.1.8 装 Ryubing + dump firmware + 在 profile.emulator 填 command_template |
+
+## 后续切片（实战暴露后再做）
+
+- T1：profile 自动补强（首次 build 失败如果是 warning-as-error 类，Reviewer 建议加 `-Werror`）
+- T2：mocks 扩充（按平台一份）— 当前只有 libnx，后续按需要加 freertos/zephyr/jni 等
+- T3：emulator 截图比对（可选，用于检测 GPU/UI 真渲染回归）
