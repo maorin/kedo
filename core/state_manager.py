@@ -90,6 +90,13 @@ class StateManager:
         # 活跃讨论：propose_alternatives 工具阻塞等 user input 时的 pending proposals
         # key: task_id, value: {"summary": str, "proposals": list[dict], "started_at": isoformat}
         self._discussions: dict[str, dict[str, Any]] = {}
+        # 取消机制：
+        #   _task_handles: ReactAgent.start_task / resume_from_checkpoint 起的 asyncio.Task
+        #     存这里，用户按"停止"时先标 _cancel_flags 给主循环优雅退出空间，
+        #     超时未退再 .cancel() 强杀
+        #   _cancel_flags: 已请求取消的 task_id 集合，ReactAgent 主循环每 turn 起始检查
+        self._task_handles: dict[str, asyncio.Task] = {}
+        self._cancel_flags: set[str] = set()
 
         # 启动时从磁盘加载历史任务索引
         self._load_task_index()
@@ -191,6 +198,77 @@ class StateManager:
         """Agent Loop 中调用 — 如果被暂停则阻塞等待"""
         if task_id in self._pause_events:
             await self._pause_events[task_id].wait()
+
+    # ----------------------------------------------------------
+    # 取消（用户主动停止）
+    # ----------------------------------------------------------
+
+    def register_task_handle(self, task_id: str, handle: asyncio.Task) -> None:
+        """ReactAgent 起 asyncio.Task 后注册 handle，让 cancel_task 能强杀。"""
+        self._task_handles[task_id] = handle
+        # 任务完成后自动清理 handle，避免堆积
+        handle.add_done_callback(lambda _t: self._task_handles.pop(task_id, None))
+
+    def is_cancelled(self, task_id: str) -> bool:
+        """ReactAgent 主循环每 turn 起始调，命中即优雅退出。"""
+        return task_id in self._cancel_flags
+
+    async def cancel_task(self, task_id: str, reason: str = "Cancelled by user") -> dict:
+        """
+        请求停止任务：
+          1. 标 cancel_flag → 主循环 turn 起始处会优雅退出
+          2. 解除 pause_event → 卡在 wait_if_paused 的 task 立即唤醒后看到 flag 退出
+          3. 异步等 5s，still alive 就 task.cancel() 强杀（asyncio.CancelledError）
+          4. 状态置 FAILED + current_step=reason
+        返回 {handled: bool, force_cancelled: bool}
+        """
+        if task_id not in self._tasks:
+            return {"handled": False, "reason": "task_not_found"}
+
+        # 已是终态就别折腾
+        cur_status = self._tasks[task_id].get("status")
+        if cur_status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+            return {"handled": False, "reason": f"already_{cur_status.value if hasattr(cur_status, 'value') else cur_status}"}
+
+        self._cancel_flags.add(task_id)
+        # 唤醒 paused 任务，让它走一圈看到 cancel_flag 退出
+        if task_id in self._pause_events:
+            self._pause_events[task_id].set()
+        await self.update_status(
+            task_id, TaskStatus.FAILED,
+            current_step=reason,
+        )
+        await self.event_bus.publish(AgentEvent(
+            event_type=EventType.STEP_FAILED,
+            task_id=task_id,
+            data={"step": "cancelled", "error": reason},
+        ))
+        self._append_log(task_id, f"Cancellation requested: {reason}")
+
+        # 给主循环 5s 自己退；不退就 .cancel()
+        force_cancelled = False
+        handle = self._task_handles.get(task_id)
+        if handle is not None and not handle.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(handle), timeout=5.0)
+            except asyncio.TimeoutError:
+                handle.cancel()
+                force_cancelled = True
+                self._append_log(task_id, "Force-cancelled (handle.cancel() after 5s timeout)")
+            except asyncio.CancelledError:
+                # handle 自己抛取消，OK
+                pass
+            except Exception:
+                # 主循环抛了别的异常，无关取消，照样视为已停
+                pass
+
+        # 留 cancel_flag 在集合里直到 task handle done callback 触发清理
+        # 这样即使有重复 cancel_task 调用也安全
+        return {"handled": True, "force_cancelled": force_cancelled}
+
+    def clear_cancel_flag(self, task_id: str) -> None:
+        """resume_from_checkpoint 重启同 task_id 时清旧 flag，避免一上来就退。"""
+        self._cancel_flags.discard(task_id)
 
     # ----------------------------------------------------------
     # 检查点 (Checkpoint)

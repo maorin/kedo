@@ -4166,14 +4166,22 @@
         }
 
         async function stopTask(taskId) {
-            if (!confirm('确定停止此任务？')) return;
+            if (!confirm('确定停止此任务？\n\nAgent 会在下一个 turn 起始处优雅退出；如果卡死，5 秒后会被强制取消。')) return;
             try {
-                const r = await fetch(`${API_BASE}/tasks/${taskId}/pause`, { method: 'POST' });
+                const r = await fetch(`${API_BASE}/tasks/${taskId}/stop`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reason: 'Cancelled by user (Dashboard)' }),
+                });
                 if (r.ok) {
-                    const task = appState.tasks.find(t => t.id === taskId);
-                    if (task) task.status = 'stopped';
-                    renderTaskList();
-                    addLog('任务停止', `任务 ${taskId} 已停止`, 'error');
+                    const data = await r.json().catch(() => ({}));
+                    const forceMsg = data.force_cancelled ? '（强制取消）' : '';
+                    addLog('任务停止', `任务 ${taskId} 已停止 ${forceMsg}`, data.force_cancelled ? 'warning' : 'error');
+                    // 不在前端伪造状态 — 让 WebSocket 推回真实的 FAILED + getTasks() 拉一次也能刷
+                    setTimeout(getTasks, 500);
+                } else {
+                    const errBody = await r.json().catch(() => ({}));
+                    addLog('错误', '停止失败: HTTP ' + r.status + ' ' + (errBody.detail || ''), 'error');
                 }
             } catch (e) { addLog('错误', '停止失败: ' + e, 'error'); }
         }

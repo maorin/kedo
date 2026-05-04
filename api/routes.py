@@ -256,6 +256,26 @@ async def resume_task(task_id: str):
     )
 
 
+@router.post("/tasks/{task_id}/stop")
+async def stop_task(task_id: str, req: dict = Body(default={})):
+    """请求停止任务（用户主动）。
+
+    流程：标 cancel_flag → 主循环下个 turn 起始优雅退出；超时 5s 仍活就强杀。
+    返回 {handled, force_cancelled, status}。
+    """
+    if task_id not in _state_manager._tasks:
+        raise HTTPException(404, f"Task {task_id} not found")
+    reason = (req or {}).get("reason") or "Cancelled by user"
+    result = await _state_manager.cancel_task(task_id, reason=reason)
+    return {
+        "task_id": task_id,
+        "status": TaskStatus.FAILED.value,
+        "handled": result.get("handled", False),
+        "force_cancelled": result.get("force_cancelled", False),
+        "reason": reason,
+    }
+
+
 @router.post("/tasks/{task_id}/resume-checkpoint", response_model=ResumeCheckpointResponse)
 async def resume_from_checkpoint(task_id: str, req: ResumeCheckpointRequest = ResumeCheckpointRequest()):
     """从检查点恢复任务执行（支持跨会话续接）"""

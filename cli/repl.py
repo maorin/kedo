@@ -562,6 +562,15 @@ class KedoREPL:
             except EOFError:
                 self._shutdown()
                 break
+            except KeyboardInterrupt:
+                # Ctrl-C: 有活跃 task 就停 task（不退 REPL）；没有就提示一下
+                # ESC 单键不可靠（readline 吞 meta 前缀），Ctrl-C 是 CLI 通用"停止"语义
+                print()  # 换行避免 ^C 顶在 prompt 上
+                if self.current_task_id:
+                    self._cmd_stop()
+                else:
+                    print(f"  {MUTED}（无活跃任务，再按 Ctrl-D 或输入 /exit 退出）{C.RESET}")
+                continue
             # 用户按 enter 后 cursor 可能短暂越过滚动区域，立刻回写底栏
             self._redraw_status_bar()
 
@@ -600,6 +609,8 @@ class KedoREPL:
             "/f": self._cmd_flow,
             "/pause": self._cmd_pause,
             "/resume": self._cmd_resume,
+            "/stop": self._cmd_stop,
+            "/k": self._cmd_stop,
             "/candidates": self._cmd_candidates,
             "/c": self._cmd_candidates,
             "/discuss": self._cmd_discuss,
@@ -639,6 +650,7 @@ class KedoREPL:
             ("/flow, /f", "显示流程图（实时状态）"),
             ("/pause", "暂停当前任务"),
             ("/resume", "恢复暂停的任务"),
+            ("/stop, /k", "停止当前任务（同 Ctrl-C）"),
             ("/continue, /cont", "从检查点续接历史任务"),
             ("/candidates, /c", "列出所有候选版本"),
             ("/discuss, /d", "参与闭环讨论（选择方案）"),
@@ -734,6 +746,25 @@ class KedoREPL:
             return
         self._api_post(f"/tasks/{self.current_task_id}/resume")
         print(f"  {SUCCESS}▶ 任务已恢复{C.RESET}")
+
+    def _cmd_stop(self, _=""):
+        """停止当前任务（用户主动取消）。Ctrl-C 也走这条路径。"""
+        if not self.current_task_id:
+            print(f"  {MUTED}暂无活跃任务{C.RESET}")
+            return
+        tid = self.current_task_id
+        try:
+            resp = self._api_post(f"/tasks/{tid}/stop", {"reason": "Cancelled by user (REPL)"})
+        except Exception as e:
+            print(f"  {ERROR}停止请求失败: {e}{C.RESET}")
+            return
+        if resp and resp.get("force_cancelled"):
+            print(f"  {WARN}⛔ 任务 {tid[:8]} 已强制停止（5s 内未优雅退出）{C.RESET}")
+        elif resp and resp.get("handled"):
+            print(f"  {WARN}⛔ 任务 {tid[:8]} 已停止{C.RESET}")
+        else:
+            reason = (resp or {}).get("reason", "已是终态")
+            print(f"  {MUTED}任务 {tid[:8]} 未停止（{reason}）{C.RESET}")
 
     def _cmd_candidates(self, _=""):
         """查看候选版本"""

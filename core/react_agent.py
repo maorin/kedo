@@ -174,7 +174,9 @@ class ReactAgent:
     ):
         """创建任务并启动 Agent 循环（异步后台运行）"""
         await self.state.create_task(task_id, description, self.config)
-        asyncio.create_task(self._run_safe(task_id, description, project_path))
+        handle = asyncio.create_task(self._run_safe(task_id, description, project_path))
+        # 注册给 StateManager，让 cancel_task 能强杀
+        self.state.register_task_handle(task_id, handle)
 
     async def resume_from_checkpoint(self, task_id: str, additional_context: str = ""):
         """
@@ -218,8 +220,12 @@ class ReactAgent:
         self._failure_fingerprints = []
         self._prose_retry_done = False
 
-        # 异步起 loop
-        asyncio.create_task(self._resume_run_safe(task_id, messages, project_path, description))
+        # resume 重起前清旧 cancel_flag，避免一上来就退
+        self.state.clear_cancel_flag(task_id)
+
+        # 异步起 loop + 注册 handle 给 StateManager
+        handle = asyncio.create_task(self._resume_run_safe(task_id, messages, project_path, description))
+        self.state.register_task_handle(task_id, handle)
         logger.info(
             f"ReactAgent resumed task {task_id}: {len(messages)} messages restored"
             + (f", additional_context={additional_context[:80]}" if additional_context else "")
@@ -229,12 +235,19 @@ class ReactAgent:
         """resume 路径的安全包装，与 _run_safe 对称"""
         try:
             result = await self._loop(task_id, messages, project_path)
+            # 用户主动停止：状态由 cancel_task 已设置 FAILED + Cancelled，这里别覆盖
+            if self.state.is_cancelled(task_id) or result == "Cancelled by user":
+                return
             if result.startswith(("(LLM error", "Stopping:", "Reached maximum")):
                 await self.state.update_status(task_id, TaskStatus.FAILED, current_step=result[:100])
                 await self._emit(task_id, EventType.STEP_FAILED, step="agent_loop_resume", error=result[:200])
             else:
                 await self.state.update_status(task_id, TaskStatus.COMPLETED, progress_percent=100, current_step="Completed")
                 await self._emit(task_id, EventType.STEP_COMPLETED, step="agent_loop_resume", output=result[:200] if result else "")
+        except asyncio.CancelledError:
+            logger.info(f"Resume task {task_id} hard-cancelled (asyncio.CancelledError)")
+            # 状态由 cancel_task 已设置；不再覆盖
+            raise
         except Exception as e:
             logger.error(f"Resume task {task_id} failed: {e}", exc_info=True)
             await self.state.update_status(task_id, TaskStatus.FAILED, current_step=f"Resume error: {str(e)[:100]}")
@@ -245,6 +258,10 @@ class ReactAgent:
         try:
             result = await self.run(task_id, description, project_path)
             logger.info(f"Task {task_id} completed: {result[:100] if result else '(empty)'}...")
+        except asyncio.CancelledError:
+            logger.info(f"Task {task_id} hard-cancelled (asyncio.CancelledError)")
+            # 状态由 cancel_task 已设置；不再覆盖
+            raise
         except Exception as e:
             logger.error(f"Task {task_id} failed with exception: {e}", exc_info=True)
             await self.state.update_status(
@@ -287,6 +304,10 @@ class ReactAgent:
         # 运行 ReAct 循环
         result = await self._loop(task_id, messages, project_path)
 
+        # 用户主动停止：cancel_task 已经设置好状态，别覆盖（也别走 STEP_COMPLETED 路径）
+        if self.state.is_cancelled(task_id) or result == "Cancelled by user":
+            return result
+
         # 判断结果：LLM error / max turns = 失败，其他 = 成功
         if result.startswith("(LLM error") or result.startswith("Stopping:") or result.startswith("Reached maximum"):
             await self.state.update_status(
@@ -324,6 +345,16 @@ class ReactAgent:
         for turn in range(self.max_turns):
             # 检查暂停
             await self.state.wait_if_paused(task_id)
+
+            # 检查取消（pause 唤醒后第一时间看，命中即优雅退出）
+            if self.state.is_cancelled(task_id):
+                logger.info(f"ReactAgent[{task_id}] cancellation flag detected, exiting loop")
+                await self._emit(
+                    task_id, EventType.STEP_FAILED,
+                    step="cancelled",
+                    error="Cancelled by user",
+                )
+                return "Cancelled by user"
 
             # 更新进度
             progress = min(turn / self.max_turns * 100, 95)
