@@ -75,6 +75,16 @@ class Charter:
     deploy: dict = field(default_factory=dict)
     coding_conventions: list = field(default_factory=list)
     forbidden_actions: list = field(default_factory=list)
+    # forbidden_patterns: 结构化代码模式拦截 — coding_conventions 是给 LLM 看的软提示,
+    # 这里是工具硬拦截 (ProfileGuard 在 file_write 时 grep). switchvideo 0ba37bcc audren
+    # 实战暴露: charter 写了"音频用 SDL2"但 LLM 还是用 audrenInitialize(NULL), 只有结构
+    # 化 pattern 才能 enforce. 每条:
+    #   pattern:     Python re 正则
+    #   reason:      给 LLM 看的拒绝理由 (含修复建议最好)
+    #   applies_to:  逗号分隔的文件 glob 列表 (eg "*.c,*.cpp"); 缺省=全文件
+    #   severity:    "block" (拒写, 默认) | "warn" (放行 + log)
+    forbidden_patterns: list = field(default_factory=list)
+    external_services: list = field(default_factory=list)  # P1 预留, 留给后续 deliverable check
 
     body_text: str = ""
     file_path: str = ""           # charter 文件绝对路径
@@ -138,6 +148,8 @@ class Charter:
             deploy=dict(data.get("deploy") or {}),
             coding_conventions=list(data.get("coding_conventions") or []),
             forbidden_actions=list(data.get("forbidden_actions") or []),
+            forbidden_patterns=list(data.get("forbidden_patterns") or []),
+            external_services=list(data.get("external_services") or []),
             body_text=m.group("body") or "",
             file_path=str(p),
             raw_yaml=data,
@@ -164,6 +176,8 @@ class Charter:
             "deploy": self.deploy,
             "coding_conventions": self.coding_conventions,
             "forbidden_actions": self.forbidden_actions,
+            "forbidden_patterns": self.forbidden_patterns,
+            "external_services": self.external_services,
         })
         # 把 None 值剔掉，避免 YAML 输出 null
         merged = {k: v for k, v in merged.items() if v not in (None, "", [], {})}
@@ -257,6 +271,14 @@ class Charter:
                 f"second build system silently."
             )
 
+        # R3: forbidden_patterns 命中 (audren NULL 类硬 enforce)
+        # 顺位放在 R2 之前: 代码模式违规通常更"立刻挂", 越早拒越好
+        for vio in self.check_forbidden_patterns(str(p), new_content or ""):
+            out.append(vio)
+        if out:
+            # 已经命中 forbidden_pattern 不再追加 R2 (一条最关键就够 LLM 看)
+            return out
+
         # R2: CMakeLists target rename without charter.artifact.target_name updated
         if p.name == "CMakeLists.txt" and self.target_name and p.exists():
             try:
@@ -279,6 +301,50 @@ class Charter:
                     f"deploy.command in the same approved change."
                 )
 
+        return out
+
+    def check_forbidden_patterns(self, file_path: str, content: str) -> list[str]:
+        """grep 类规则: charter.forbidden_patterns 命中 → 返回违约描述列表.
+        每条规则可选 applies_to (文件 glob 列表) 限定范围, 不写则全文件;
+        severity="warn" 时只 log 不拦. 默认 severity="block".
+        """
+        if not self.forbidden_patterns or not content:
+            return []
+        from fnmatch import fnmatch
+        fname = Path(file_path).name
+        out: list[str] = []
+        for entry in self.forbidden_patterns:
+            if not isinstance(entry, dict):
+                continue
+            pat = entry.get("pattern")
+            reason = entry.get("reason") or "(no reason given)"
+            severity = (entry.get("severity") or "block").lower()
+            applies_to = entry.get("applies_to") or ""
+            if applies_to:
+                globs = [g.strip() for g in str(applies_to).split(",") if g.strip()]
+                if globs and not any(fnmatch(fname, g) for g in globs):
+                    continue
+            if not pat:
+                continue
+            try:
+                m = re.search(str(pat), content)
+            except re.error as e:
+                logger.warning(f"charter.forbidden_patterns: bad regex {pat!r}: {e}")
+                continue
+            if not m:
+                continue
+            hit_excerpt = m.group(0)[:80]
+            msg = (
+                f"charter:forbidden_patterns — refusing to write {fname}: "
+                f"matched forbidden pattern `{pat}` (excerpt: {hit_excerpt!r}). "
+                f"Reason: {reason} "
+                f"Either remove this pattern from your generated code, or call "
+                f"`propose_charter_change` to amend forbidden_patterns first."
+            )
+            if severity == "warn":
+                logger.warning(f"charter.forbidden_patterns warn: {fname}: {pat} → {hit_excerpt!r}")
+                continue
+            out.append(msg)
         return out
 
     # ----------------------------------------------------------
@@ -317,6 +383,21 @@ class Charter:
             lines.append("- forbidden_actions:")
             for a in self.forbidden_actions[:8]:
                 lines.append(f"    - {a}")
+        if self.forbidden_patterns:
+            lines.append("- forbidden_patterns (ProfileGuard will REJECT file_write on hit):")
+            for fp in self.forbidden_patterns[:6]:
+                if isinstance(fp, dict):
+                    pat = fp.get("pattern", "?")
+                    reason = (fp.get("reason") or "")[:80]
+                    applies = fp.get("applies_to") or "*"
+                    lines.append(f"    - `{pat}` in {applies}: {reason}")
+        if self.external_services:
+            lines.append("- external_services (deliverables required for user to run):")
+            for svc in self.external_services[:6]:
+                if isinstance(svc, dict):
+                    name = svc.get("name", "?")
+                    provider = svc.get("provider", "?")
+                    lines.append(f"    - {name} (provider={provider})")
 
         lines.append("")
         lines.append(

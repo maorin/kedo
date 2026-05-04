@@ -41,6 +41,46 @@ forbidden_actions:
   - "removing -DCMAKE_TOOLCHAIN_FILE from build command (would degrade to host gcc)"
   - "rewriting an entire build/profile/CMakeLists file when a targeted edit suffices"
   - "writing API keys / secrets to source files"
+
+# 结构化代码模式硬拦截 (ProfileGuard 在 file_write 时 grep, 命中拒写).
+# coding_conventions 是给 LLM 看的软提示, 这里是工具层不可绕过的硬约束.
+# 实战暴露过的 bug 模式必须在这里登记, 以防 LLM 忽视 conventions 又踩.
+forbidden_patterns:
+  # ─── audio: 必须用 SDL2, 不准用 libnx audren / audout ───
+  - pattern: 'audrenInitialize\s*\(\s*NULL\s*\)'
+    reason: "audrenInitialize 要求完整 AudioRendererConfig, 传 NULL 必触发 svcBreak 2168-0002 (实测 task 6ad7d5f6). charter 已规定用 SDL_OpenAudioDevice + SDL_QueueAudio."
+    applies_to: "*.c,*.cpp,*.cc"
+    severity: block
+  - pattern: '\baudrenInitialize\b'
+    reason: "charter 禁用 libnx audren, 要求 SDL2 audio (SDL_OpenAudioDevice + SDL_QueueAudio, AUDIO_S16SYS)."
+    applies_to: "*.c,*.cpp,*.cc"
+    severity: block
+  - pattern: '\baudoutInitialize\b'
+    reason: "charter 禁用 libnx audout, 要求 SDL2 audio."
+    applies_to: "*.c,*.cpp,*.cc"
+    severity: block
+  # ─── input: 必须用 PadState, 不准用旧 hid API ───
+  - pattern: '\bhidScanInput\b'
+    reason: "charter 要求 PadState API (padInitializeDefault / padUpdate / padGetButtonsDown), 旧 hidScanInput 已弃用."
+    applies_to: "*.c,*.cpp,*.cc"
+    severity: block
+  - pattern: '\bhidKeysDown\b'
+    reason: "charter 要求 padGetButtonsDown, 不要用旧 hidKeysDown."
+    applies_to: "*.c,*.cpp,*.cc"
+    severity: block
+  # ─── SDL header: 用 <SDL2/SDL.h> 不是 <SDL.h> ───
+  - pattern: '#include\s*<SDL\.h>'
+    reason: "charter 要求 SDL2 头文件用 <SDL2/SDL.h>, devkitPro portlibs 路径下 SDL2 子目录."
+    applies_to: "*.c,*.cpp,*.cc,*.h,*.hpp"
+    severity: block
+
+# Charter 期望的外部依赖 (deliverable). provider=task 表示 task 必须把这个东西写进 changed_files,
+# Reviewer 的 deliverable_completeness 维度会检查实际是否提供; provider=user 表示由用户自己准备.
+external_services:
+  - name: video_server.py
+    provider: task
+    description: "运行在 LAN 主机 (192.168.1.8) 上的 HTTP/转码服务器, switch 端拉视频"
+    expected_path: "scripts/video_server.py"
 ---
 
 # Project Charter — switchvideo

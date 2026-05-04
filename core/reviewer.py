@@ -42,12 +42,29 @@ Score `requirement_match` SOLELY against the Scoped Requirement. Do NOT penalize
 that belong to the Parent Goal but are out of scope for this sub-task. If the Parent Goal
 mentions X but the Scoped Requirement does not, X being absent is NOT a missed requirement.
 
-Evaluate the code changes against the Scoped Requirement across these 4 dimensions:
+Evaluate the code changes against the Scoped Requirement across these 5 dimensions:
 
-1. **requirement_match** (weight 0.35): Does the code fulfill the Scoped Requirement?
-2. **code_quality** (weight 0.25): Clean, readable, well-structured, following best practices?
-3. **test_coverage** (weight 0.20): Adequate tests? Edge cases covered?
-4. **security** (weight 0.20): Vulnerabilities, injection risks, unsafe patterns?
+1. **requirement_match** (weight 0.30): Does the code fulfill the Scoped Requirement?
+2. **code_quality** (weight 0.20): Clean, readable, well-structured, following best practices?
+3. **test_coverage** (weight 0.15): Adequate tests? Edge cases covered?
+4. **security** (weight 0.15): Vulnerabilities, injection risks, unsafe patterns?
+5. **deliverable_completeness** (weight 0.20): **Can the user run the deliverable end-to-end with ONLY what this candidate provides?**
+
+The 5th dimension is critical — it catches scope-handoff abuse where the Producer produces
+client-side code but tells the user "you also need to start a Python HTTP server / database /
+service on your machine first" without providing it. Specifically deduct points for:
+
+- Code references an external service (HTTP server, database, RPC endpoint, file share)
+  but no script / config / Dockerfile / setup instructions is included in changed_files.
+- Commit message / summary contains phrases like "you need to", "start the server",
+  "run python -m ...", "set up X first" — and that X is NOT in changed_files.
+- Charter declares an `external_services` entry with `provider: task` but the corresponding
+  files are not present in changed_files.
+- README / usage section in changed files describes a multi-step setup the user must do
+  manually, with no automation provided (e.g., a docker-compose or a shell script).
+
+Score deliverable_completeness ≤50 if any of the above hits. Score ≥80 only if a fresh user
+can clone + build + run the candidate without any "you-also-need-to" hand-off step.
 
 You will also receive static check results (syntax / lint / dangerous patterns) — factor
 these into your scoring.
@@ -56,6 +73,8 @@ these into your scoring.
 - If the code misses a requirement, say so in `requirements_missed`.
 - If test coverage is 0 and the scoped requirement expects tests, `test_coverage` stays ≤40.
 - If static checks flagged high-severity patterns, `security` stays ≤50 until cleaned.
+- If deliverable handoff is incomplete, list the missing piece in `requirements_missed`
+  prefixed with `[deliverable]`.
 
 Output JSON:
 {
@@ -63,7 +82,8 @@ Output JSON:
     {"name": "requirement_match", "score": <0-100>, "details": "..."},
     {"name": "code_quality", "score": <0-100>, "details": "..."},
     {"name": "test_coverage", "score": <0-100>, "details": "..."},
-    {"name": "security", "score": <0-100>, "details": "..."}
+    {"name": "security", "score": <0-100>, "details": "..."},
+    {"name": "deliverable_completeness", "score": <0-100>, "details": "..."}
   ],
   "requirements_met": ["..."],
   "requirements_missed": ["..."],
@@ -77,6 +97,17 @@ Scoring guide per dimension:
 - 50-69: Acceptable, needs improvement
 - Below 50: Needs significant rework
 """
+
+
+# Reviewer 独立维度配置 — 比 Evaluator 多 deliverable_completeness 这一维, 权重重排.
+# 通过 inner_config["eval_dimensions"] 注入 Evaluator (Evaluator 的 DEFAULT_DIMENSIONS 不动).
+REVIEWER_DIMENSIONS = [
+    {"name": "requirement_match",        "weight": 0.30, "label": "需求匹配"},
+    {"name": "code_quality",             "weight": 0.20, "label": "代码质量"},
+    {"name": "test_coverage",            "weight": 0.15, "label": "测试覆盖"},
+    {"name": "security",                 "weight": 0.15, "label": "安全性"},
+    {"name": "deliverable_completeness", "weight": 0.20, "label": "交付完整性"},
+]
 
 
 REVIEWER_STUCK_BUILD_SYSTEM_PROMPT = """You are an **independent senior engineer** acting
@@ -148,8 +179,13 @@ class Reviewer:
         self._history: list[ReviewResult] = []
         self._max_history = max_history
 
-        # 内部 Evaluator 只承担静态检查 + merge，LLM 走 reviewer 独立 client
-        inner_config = {**self._config, "eval_system_prompt": REVIEWER_SYSTEM_PROMPT}
+        # 内部 Evaluator 只承担静态检查 + merge，LLM 走 reviewer 独立 client.
+        # 注入 REVIEWER_DIMENSIONS 让 Reviewer 比 Evaluator 多 deliverable_completeness 这一维.
+        inner_config = {
+            **self._config,
+            "eval_system_prompt": REVIEWER_SYSTEM_PROMPT,
+            "eval_dimensions": REVIEWER_DIMENSIONS,
+        }
         self._inner = Evaluator(
             llm_client=llm_client,
             memory=memory,
