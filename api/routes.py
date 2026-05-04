@@ -461,6 +461,8 @@ async def get_charter():
         "deploy": c.deploy,
         "coding_conventions": c.coding_conventions,
         "forbidden_actions": c.forbidden_actions,
+        "forbidden_patterns": c.forbidden_patterns,
+        "external_services": c.external_services,
         "body": c.body_text,
     }
 
