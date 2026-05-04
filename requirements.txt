@@ -19,6 +19,9 @@ httpx>=0.25.0
 # Configuration
 pyyaml>=6.0
 
+# REPL UI (v2 — Claude Code 风, prompt_toolkit-based)
+prompt_toolkit>=3.0,<4.0
+
 # System Monitoring
 psutil>=5.9.0
 

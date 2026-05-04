@@ -244,9 +244,23 @@ def _run_repl(config: dict, project_path: str, connect_url: Optional[str] = None
                 f"  \033[90m提示: 想强制内嵌模式可加 --embedded；想换地址用 --connect URL\033[0m"
             )
 
+    # v2 (prompt_toolkit, Claude Code 风) 优先；不可用 / 非 tty / KEDO_LEGACY_REPL 设了
+    # → 回退到 v1 (DECSTBM + readline)
+    repl_cls = None
     try:
+        from cli.repl_pt import KedoREPLv2, use_v2
+        if use_v2():
+            repl_cls = KedoREPLv2
+    except ImportError:
+        # prompt_toolkit 未安装 → 走 v1
+        repl_cls = None
+
+    if repl_cls is None:
         from cli.repl import KedoREPL
-        repl = KedoREPL(
+        repl_cls = KedoREPL
+
+    try:
+        repl = repl_cls(
             config=config,
             project_path=project_path,
             connect_url=effective_connect,
