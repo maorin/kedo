@@ -11,6 +11,19 @@ from tools.base import BaseTool, ToolParameter, ToolResult
 logger = logging.getLogger(__name__)
 
 
+# G0+ (2026-05-04 实战修复): code_generate 修改已有文件时, LLM 偷懒不传
+# existing_content 会导致工具在零上下文下"重新生成全文", LLM 实际只输出修改目标
+# 附近几行 → 文件被覆盖到只剩几行 → build 链锁挂 (switchvideo 0ba37bcc 实测).
+# 大文件不自动注入: 注入后 prompt 太大反而被截, 让 LLM 走 file_write 单次重写或
+# 拆分操作.
+MAX_AUTO_LOAD_CHARS = 80_000
+
+# Shrink 防御: 非空 existing_content 下, 生成结果同时满足 短(<200 字符) + 缩水
+# (>50%) 时, 大概率是 LLM 输出了片段当全文 → 拒写 + 让 LLM 看到 error 重试.
+SHRINK_DEFENSE_MAX_CHARS = 200
+SHRINK_DEFENSE_RATIO = 0.5
+
+
 class CodeGeneratorTool(BaseTool):
     """LLM 驱动的代码生成和修改工具"""
 
@@ -26,7 +39,14 @@ class CodeGeneratorTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Generate or modify code files based on natural language instructions. Can create new files, edit existing ones, or perform batch refactoring."
+        return (
+            "Generate or modify code files based on natural language instructions. "
+            "Can create new files, edit existing ones, or perform batch refactoring. "
+            "When modifying an existing file, the tool AUTOMATICALLY loads the current "
+            "content from disk — you do NOT need to pass `existing_content` yourself; "
+            "just specify `file_path` and `instruction`. For files larger than ~80k "
+            "chars (~2000 lines C), prefer `file_write` for full rewrites."
+        )
 
     @property
     def parameters(self) -> list[ToolParameter]:
@@ -109,17 +129,54 @@ class CodeGeneratorTool(BaseTool):
             #   （switchvideo 任务 b943c9d0 实测踩到）
             context_files = self._auto_inject_header_context(target, context_files)
 
+            # ★ G0+ 自动磁盘兜底（switchvideo 0ba37bcc 实测）：
+            #   LLM 不传 existing_content 修改已有文件 → 工具零上下文重写 → 文件被截
+            #   到几行 → build 挂. 这里在文件存在且 LLM 没传时, 自动从磁盘加载.
+            #   保留 ec_was_passed 标志: 旧的 .md 分段 / cmake_template 路径只在
+            #   "LLM 真没传 + 文件不存在 (即真正初次创建)" 时走.
+            ec_was_passed = bool(existing_content)
+            if not existing_content:
+                try:
+                    candidate = target if target.is_absolute() else (Path.cwd() / target)
+                    if candidate.is_file():
+                        disk_content = candidate.read_text(encoding="utf-8", errors="replace")
+                        if len(disk_content) <= MAX_AUTO_LOAD_CHARS:
+                            existing_content = disk_content
+                            logger.info(
+                                f"code_generate auto-loaded existing_content from disk: "
+                                f"{candidate} ({len(disk_content)} chars)"
+                            )
+                        else:
+                            logger.warning(
+                                f"code_generate file too large for auto-load: {candidate} "
+                                f"({len(disk_content)} > {MAX_AUTO_LOAD_CHARS}). "
+                                f"Falling through to zero-context path. "
+                                f"Recommend: use file_write for full rewrites of large files."
+                            )
+                except (OSError, UnicodeDecodeError) as e:
+                    logger.warning(
+                        f"code_generate auto-load failed: {e}; proceeding without existing_content"
+                    )
+
             is_doc = target.suffix.lower() in (".md", ".txt", ".rst")
 
-            if is_doc and not existing_content:
-                # ★ 文档类文件：分段生成（每个章节一次 LLM 调用）
+            # 注意: 下面用 ec_was_passed 而不是 existing_content, 是为了"修改已有
+            # .md 走单次生成"和"创建新 .md 走分段生成"的语义切换 (P0 修复设计意图).
+            if is_doc and not ec_was_passed and not existing_content:
+                # ★ 文档类文件初次创建：分段生成（每个章节一次 LLM 调用）
                 generated_code = await self._generate_doc_by_sections(
                     instruction, file_path, context_files
                 )
             else:
                 # ★ G5: CMakeLists.txt 且有平台模板 → 注入模板作为起点
+                #   (只在初次创建时, ec_was_passed=False 且 existing_content 也空)
                 effective_instruction = instruction
-                if cmake_template and target.name == "CMakeLists.txt" and not existing_content:
+                if (
+                    cmake_template
+                    and target.name == "CMakeLists.txt"
+                    and not ec_was_passed
+                    and not existing_content
+                ):
                     effective_instruction = (
                         f"{instruction}\n\n"
                         f"USE THIS VERIFIED TEMPLATE as your starting point. "
@@ -141,6 +198,35 @@ class CodeGeneratorTool(BaseTool):
             generated_code = await self._validate_and_retry(
                 generated_code, instruction, file_path, existing_content, context_files, target
             )
+
+            # ★ G0+ Shrink 防御: 修改场景下, 新内容又短又缩水 → 大概率 LLM 只输出
+            #   片段当全文. 拒写 + 让 LLM 看到 error 重试或换 file_write.
+            if (
+                existing_content
+                and len(generated_code) < SHRINK_DEFENSE_MAX_CHARS
+                and len(generated_code) < len(existing_content) * SHRINK_DEFENSE_RATIO
+            ):
+                shrink_msg = (
+                    f"code_generate REJECTED: suspicious shrink. "
+                    f"existing_content={len(existing_content)} chars → generated only "
+                    f"{len(generated_code)} chars (<{SHRINK_DEFENSE_MAX_CHARS} and "
+                    f"<{int(SHRINK_DEFENSE_RATIO*100)}% of existing). "
+                    f"Most likely you output only the changed snippet instead of the "
+                    f"complete file. Retry: output the FULL file content (every line, "
+                    f"unchanged or modified), or use `file_write` if you have the entire "
+                    f"new content ready."
+                )
+                logger.warning(shrink_msg)
+                return ToolResult(
+                    success=False,
+                    error=shrink_msg,
+                    data={
+                        "file_path": file_path,
+                        "existing_chars": len(existing_content),
+                        "generated_chars": len(generated_code),
+                        "rejected_reason": "shrink_defense",
+                    },
+                )
 
             # 写入文件
             if not target.is_absolute():
@@ -167,6 +253,7 @@ class CodeGeneratorTool(BaseTool):
                     "diff": diff,
                     "content": generated_code,
                     "lines": len(generated_code.splitlines()),
+                    "existing_content_autoloaded": (existing_content and not ec_was_passed),
                 },
             )
         except Exception as e:
