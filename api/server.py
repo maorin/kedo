@@ -33,6 +33,7 @@ from tools.evaluate_tool import EvaluateTool
 from tools.commit_candidate_tool import CommitCandidateTool
 from tools.propose_alternatives_tool import ProposeAlternativesTool
 from tools.propose_charter_change_tool import ProposeCharterChangeTool
+from tools.fetch_crash_report_tool import FetchCrashReportTool
 from tools.file_tool import FileReadTool, FileSearchTool, FileWriteTool
 from tools.git_tool import GitTool
 from tools.respond_tool import RespondTool
@@ -163,6 +164,13 @@ def create_app(config: dict = None) -> FastAPI:
         state_manager=state_manager,
         event_bus=state_manager.event_bus,
         timeout_s=config.get("propose_charter_change_timeout_s", 1800),
+    ))
+    # 真机 coredump 拉取 + 解析（T3 模拟器搁置后的实用替代）
+    tool_registry.register(FetchCrashReportTool(
+        state_manager=state_manager,
+        event_bus=state_manager.event_bus,
+        profile_manager=profile_manager,
+        timeout_s=config.get("fetch_crash_report_timeout_s", 1800),
     ))
     # commit_candidate 需要 version_manager — 必须在 version_manager 创建后再注册（下面）
 

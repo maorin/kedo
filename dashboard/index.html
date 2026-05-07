@@ -3710,11 +3710,20 @@
                     // ★ 同步在控制台内嵌交互 widget — 用户不用切 tab
                     var dTaskId = message.task_id || appState.currentTaskId;
                     if (dTaskId) {
-                        consoleAppendProposalWidget(
-                            dTaskId,
-                            appState.discussion.summary || '',
-                            data.proposals || []
-                        );
+                        // 按 kind 分流：coredump_fetch 走专用表单，其它走通用方案选择
+                        if (data.kind === 'coredump_fetch' && data.request) {
+                            consoleAppendCoredumpWidget(
+                                dTaskId,
+                                appState.discussion.summary || '',
+                                data.request
+                            );
+                        } else {
+                            consoleAppendProposalWidget(
+                                dTaskId,
+                                appState.discussion.summary || '',
+                                data.proposals || []
+                            );
+                        }
                         // 切到控制台 tab，让用户立刻看到 widget
                         switchTab('console');
                     }
@@ -3766,6 +3775,18 @@
                         data.tool_type || data.tool || '',
                         data.args_summary || data.description || ''
                     );
+                    break;
+                case 'log_message':
+                    if (data.phase === 'coredump_analyzed') {
+                        consoleAppendCoredumpResult(data);
+                        const site = data.crash_site || {};
+                        const loc = site.file
+                            ? (site.function || '?') + ' @ ' + site.file + ':' + (site.line == null ? '?' : site.line)
+                            : '(symbol unresolved)';
+                        addLog('Coredump',
+                               '崩点定位: ' + (data.result_code || '') + ' → ' + loc,
+                               'success');
+                    }
                     break;
             }
         }
@@ -3965,6 +3986,277 @@
             el.appendChild(wrap);
             addCursor();
             scrollConsole();
+        }
+
+        // 真机 coredump 拉取卡片：让用户启动 ftpd-pro + 填连接信息后点"准备好"
+        function consoleAppendCoredumpWidget(taskId, summary, request) {
+            const el = dom.consoleOutput;
+            removeCursor();
+            const exist = el.querySelector(`[data-coredump-widget-task="${taskId}"]`);
+            if (exist) exist.remove();
+
+            const defaults = (request && request.defaults) || {};
+            const reason = (request && request.reason) || '';
+            const hasRemembered = !!(request && request.has_remembered);
+            const localCount = (request && request.local_log_count) || 0;
+
+            const wrap = document.createElement('div');
+            wrap.dataset.coredumpWidgetTask = taskId;
+            wrap.style.cssText = 'border:2px solid #f59e0b;background:rgba(245,158,11,0.06);padding:0.75rem;border-radius:6px;margin:0.6rem 0;font-family:inherit;';
+
+            const header = document.createElement('div');
+            header.style.cssText = 'color:#f59e0b;font-weight:700;font-size:0.85rem;margin-bottom:0.4rem;';
+            header.textContent = '🎮 拉 Switch crash_reports 需要你确认';
+            wrap.appendChild(header);
+
+            if (reason) {
+                const r = document.createElement('div');
+                r.style.cssText = 'color:#c9d1d9;font-size:0.78rem;margin-bottom:0.4rem;line-height:1.4;';
+                const rb = document.createElement('b');
+                rb.textContent = '理由: ';
+                r.appendChild(rb);
+                r.appendChild(document.createTextNode(reason));
+                wrap.appendChild(r);
+            }
+
+            const steps = document.createElement('div');
+            steps.style.cssText = 'color:#a8a8a8;font-size:0.74rem;margin-bottom:0.5rem;line-height:1.5;white-space:pre-line;';
+            const stepsLines = [
+                '准备步骤：',
+                '  1. Switch 上启动 ftpd-pro（已运行可跳过）',
+                '  2. 确认 Switch IP 和路由器连通',
+                hasRemembered
+                    ? '  3. 下面字段已带上次记住的值，确认一下点"准备好"即可'
+                    : '  3. 填好下面字段后点"准备好"',
+            ];
+            if (localCount > 0) {
+                stepsLines.push('  本地已有 ' + localCount + ' 个 .log，本次会增量下载新文件');
+            }
+            steps.textContent = stepsLines.join('\n');
+            wrap.appendChild(steps);
+
+            // 表单
+            function mkRow(labelText, inputEl) {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex;align-items:center;margin-bottom:0.3rem;font-size:0.76rem;';
+                const lbl = document.createElement('label');
+                lbl.textContent = labelText;
+                lbl.style.cssText = 'color:#9ca3af;width:96px;flex-shrink:0;';
+                inputEl.style.cssText = (inputEl.style.cssText || '') +
+                    'flex:1;padding:0.3rem 0.4rem;background:rgba(30,41,59,0.6);border:1px solid rgba(245,158,11,0.25);border-radius:3px;color:#e0e0e0;font-size:0.76rem;font-family:inherit;';
+                row.appendChild(lbl);
+                row.appendChild(inputEl);
+                return row;
+            }
+
+            const ipIn = document.createElement('input');
+            ipIn.type = 'text'; ipIn.placeholder = '192.168.1.100';
+            ipIn.value = defaults.switch_ip || '';
+
+            const portIn = document.createElement('input');
+            portIn.type = 'number'; portIn.value = defaults.ftp_port || 5000;
+
+            const userIn = document.createElement('input');
+            userIn.type = 'text'; userIn.placeholder = '(留空 = anonymous)';
+            userIn.value = defaults.ftp_user || '';
+
+            const passIn = document.createElement('input');
+            passIn.type = 'password'; passIn.placeholder = '(留空)';
+            passIn.value = defaults.ftp_pass || '';
+
+            const pathIn = document.createElement('input');
+            pathIn.type = 'text';
+            pathIn.value = defaults.remote_path || '/atmosphere/crash_reports/';
+
+            wrap.appendChild(mkRow('Switch IP', ipIn));
+            wrap.appendChild(mkRow('FTP 端口', portIn));
+            wrap.appendChild(mkRow('用户名', userIn));
+            wrap.appendChild(mkRow('密码', passIn));
+            wrap.appendChild(mkRow('远程路径', pathIn));
+
+            const rememberWrap = document.createElement('div');
+            rememberWrap.style.cssText = 'margin:0.4rem 0 0.5rem 0;font-size:0.74rem;color:#9ca3af;';
+            const rememberCb = document.createElement('input');
+            rememberCb.type = 'checkbox';
+            rememberCb.checked = !hasRemembered; // 第一次默认勾，已记的默认不再覆盖
+            rememberCb.id = 'cd-remember-' + taskId;
+            rememberCb.style.marginRight = '0.4rem';
+            const rememberLbl = document.createElement('label');
+            rememberLbl.htmlFor = rememberCb.id;
+            rememberLbl.textContent = '记住连接信息（写到 .kedo/device.json）';
+            rememberWrap.appendChild(rememberCb);
+            rememberWrap.appendChild(rememberLbl);
+            wrap.appendChild(rememberWrap);
+
+            const status = document.createElement('div');
+            status.style.cssText = 'font-size:0.72rem;color:#888;min-height:1.1em;margin:0.2rem 0;';
+            wrap.appendChild(status);
+
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;gap:0.5rem;';
+
+            const okBtn = document.createElement('button');
+            okBtn.textContent = '准备好，开始拉取';
+            okBtn.style.cssText = 'flex:1;background:#f59e0b;border:none;color:#1a1a1a;font-weight:600;padding:0.45rem;border-radius:4px;cursor:pointer;font-size:0.78rem;';
+
+            const cancelBtn = document.createElement('button');
+            cancelBtn.textContent = '取消';
+            cancelBtn.style.cssText = 'background:rgba(100,100,100,0.3);border:1px solid rgba(255,255,255,0.15);color:#ddd;padding:0.45rem 0.9rem;border-radius:4px;cursor:pointer;font-size:0.78rem;';
+
+            btnRow.appendChild(okBtn);
+            btnRow.appendChild(cancelBtn);
+            wrap.appendChild(btnRow);
+
+            async function postAck(action) {
+                const body = {
+                    action: action,
+                    switch_ip: ipIn.value.trim(),
+                    ftp_port: parseInt(portIn.value, 10) || 5000,
+                    ftp_user: userIn.value.trim(),
+                    ftp_pass: passIn.value,
+                    remote_path: pathIn.value.trim() || '/atmosphere/crash_reports/',
+                    remember: rememberCb.checked,
+                };
+                if (action === 'ready' && !body.switch_ip) {
+                    status.textContent = '⚠ 请填 Switch IP';
+                    status.style.color = '#ef4444';
+                    return;
+                }
+                okBtn.disabled = true; cancelBtn.disabled = true;
+                okBtn.textContent = action === 'ready' ? '已发送，等待 Agent 拉取...' : '已取消';
+                try {
+                    const resp = await fetch(API_BASE + '/coredump/' + taskId + '/ack', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(body),
+                    });
+                    if (resp.ok) {
+                        // 替换 widget 为状态文本（使用 textContent / DOM 操作避免 XSS）
+                        while (wrap.firstChild) wrap.removeChild(wrap.firstChild);
+                        const ok = document.createElement('div');
+                        ok.style.cssText = (action === 'ready'
+                            ? 'color:#22c55e;font-weight:600;font-size:0.82rem;'
+                            : 'color:#9ca3af;font-weight:600;font-size:0.82rem;');
+                        ok.textContent = action === 'ready'
+                            ? '✓ 已发送 — Agent 正在 ' + body.switch_ip + ':' + body.ftp_port + ' 拉取 crash_reports...'
+                            : '✗ 已取消 — Agent 不会拉 crash_reports';
+                        wrap.appendChild(ok);
+                        wrap.style.borderColor = (action === 'ready'
+                            ? 'rgba(34,197,94,0.4)' : 'rgba(100,100,100,0.4)');
+                        wrap.style.background = (action === 'ready'
+                            ? 'rgba(34,197,94,0.05)' : 'rgba(80,80,80,0.05)');
+                        addLog('Coredump', action === 'ready' ? '已请求拉取' : '已取消拉取',
+                               action === 'ready' ? 'success' : 'info');
+                        appState.discussion = null;
+                        renderDiscussion();
+                    } else {
+                        const err = await resp.json().catch(function() { return {}; });
+                        status.textContent = '提交失败: ' + (err.detail || resp.status);
+                        status.style.color = '#ef4444';
+                        okBtn.disabled = false; cancelBtn.disabled = false;
+                        okBtn.textContent = '准备好，开始拉取';
+                        cancelBtn.textContent = '取消';
+                    }
+                } catch (e) {
+                    status.textContent = '提交异常: ' + e;
+                    status.style.color = '#ef4444';
+                    okBtn.disabled = false; cancelBtn.disabled = false;
+                }
+            }
+            okBtn.addEventListener('click', function() { postAck('ready'); });
+            cancelBtn.addEventListener('click', function() { postAck('cancel'); });
+
+            el.appendChild(wrap);
+            addCursor();
+            scrollConsole();
+        }
+
+        // 渲染 fetch_crash_report 解析完成的结果卡（log_message phase=coredump_analyzed）
+        function consoleAppendCoredumpResult(data) {
+            const el = dom.consoleOutput;
+            removeCursor();
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'border:2px solid #22c55e;background:rgba(34,197,94,0.06);padding:0.7rem;border-radius:6px;margin:0.6rem 0;font-family:inherit;';
+
+            const header = document.createElement('div');
+            header.style.cssText = 'color:#22c55e;font-weight:700;font-size:0.85rem;margin-bottom:0.4rem;';
+            header.textContent = '🩺 Crash Report 已解析';
+            wrap.appendChild(header);
+
+            function row(label, value, mono) {
+                if (value == null || value === '') return;
+                const r = document.createElement('div');
+                r.style.cssText = 'font-size:0.78rem;line-height:1.5;color:#c9d1d9;';
+                const b = document.createElement('span');
+                b.style.cssText = 'color:#9ca3af;display:inline-block;width:90px;';
+                b.textContent = label;
+                const v = document.createElement('span');
+                if (mono) v.style.cssText = 'font-family:Menlo,Monaco,monospace;color:#fbbf24;';
+                v.textContent = String(value);
+                r.appendChild(b);
+                r.appendChild(v);
+                wrap.appendChild(r);
+            }
+
+            row('Result:', data.result_code, true);
+            row('Type:', data.exception_type, false);
+            const site = data.crash_site || {};
+            if (site.file) {
+                const r = document.createElement('div');
+                r.style.cssText = 'font-size:0.8rem;line-height:1.5;color:#c9d1d9;margin-top:0.3rem;';
+                const b = document.createElement('span');
+                b.style.cssText = 'color:#9ca3af;display:inline-block;width:90px;';
+                b.textContent = '崩点:';
+                const fn = document.createElement('code');
+                fn.style.cssText = 'color:#22c55e;font-weight:600;';
+                fn.textContent = site.function || '?';
+                const at = document.createTextNode(' @ ');
+                const loc = document.createElement('code');
+                loc.style.cssText = 'color:#fbbf24;';
+                loc.textContent = (site.file || '?') + ':' + (site.line == null ? '?' : site.line);
+                r.appendChild(b);
+                r.appendChild(fn);
+                r.appendChild(at);
+                r.appendChild(loc);
+                wrap.appendChild(r);
+            }
+            if (data.crash_log) {
+                row('日志:', data.crash_log, true);
+            }
+
+            // 完整 stack 摘要（折叠）
+            if (data.summary) {
+                const det = document.createElement('details');
+                det.style.cssText = 'margin-top:0.4rem;font-size:0.75rem;';
+                const sum = document.createElement('summary');
+                sum.style.cssText = 'cursor:pointer;color:#9ca3af;';
+                sum.textContent = '完整 stack 摘要';
+                det.appendChild(sum);
+                const pre = document.createElement('pre');
+                pre.style.cssText = 'margin:0.3rem 0 0 0;padding:0.5rem;background:rgba(0,0,0,0.3);border-radius:3px;color:#c9d1d9;white-space:pre-wrap;font-size:0.72rem;';
+                pre.textContent = data.summary;
+                det.appendChild(pre);
+                wrap.appendChild(det);
+            }
+
+            el.appendChild(wrap);
+            addCursor();
+            scrollConsole();
+        }
+
+        // dashboard 启动时拉一次 pending coredump 请求，恢复刷新前丢失的 widget
+        async function restorePendingCoredumpWidgets() {
+            try {
+                const resp = await fetch(API_BASE + '/coredump/pending');
+                if (!resp.ok) return;
+                const body = await resp.json();
+                const pending = (body && body.pending) || {};
+                Object.keys(pending).forEach(function(taskId) {
+                    consoleAppendCoredumpWidget(taskId, '', pending[taskId] || {});
+                });
+            } catch (e) {
+                // 静默：旧版 server 没这个端点很正常
+            }
         }
 
         function removeCursor() {
@@ -4998,6 +5290,7 @@
             connectWebSocket();
             getTasks();
             fetchLLMStatus();
+            restorePendingCoredumpWidgets();
             dom.footerStatus.textContent = '待机';
             addLog('系统启动', 'Kedo 仪表板已启动', 'success');
         }

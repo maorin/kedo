@@ -486,6 +486,44 @@ async def decide_charter_change(task_id: str, req: dict = Body(...)):
     return {"task_id": task_id, "action": action, "message": "Charter change decision submitted"}
 
 
+@router.get("/coredump/pending")
+async def coredump_pending():
+    """dashboard 启动时拉当前等待中的 fetch_crash_report 请求。"""
+    from tools.fetch_crash_report_tool import list_pending_requests
+    return {"pending": list_pending_requests()}
+
+
+@router.post("/coredump/{task_id}/ack")
+async def coredump_ack(task_id: str, req: dict = Body(...)):
+    """fetch_crash_report 工具的 dashboard ack。
+    Body:
+      {
+        action: 'ready' | 'cancel',
+        switch_ip?: str, ftp_port?: int, ftp_user?: str, ftp_pass?: str,
+        remote_path?: str, remember?: bool, human_input?: str,
+      }
+    投递到 fetch_crash_report_tool 的独立 queue。"""
+    action = (req.get("action") or "").lower()
+    if action not in ("ready", "cancel"):
+        raise HTTPException(status_code=400, detail="action must be 'ready' or 'cancel'")
+    payload = {
+        "action": action,
+        "switch_ip": (req.get("switch_ip") or "").strip(),
+        "ftp_port": int(req.get("ftp_port") or 5000),
+        "ftp_user": (req.get("ftp_user") or "").strip(),
+        "ftp_pass": req.get("ftp_pass") or "",
+        "remote_path": (req.get("remote_path") or "").strip(),
+        "remember": bool(req.get("remember")),
+        "human_input": req.get("human_input") or "",
+    }
+    try:
+        from tools.fetch_crash_report_tool import get_coredump_queue
+        await get_coredump_queue(task_id).put(payload)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"failed to queue decision: {e}")
+    return {"task_id": task_id, "action": action, "message": "Crash-report fetch decision submitted"}
+
+
 @router.post("/tasks/{task_id}/discussion/input")
 async def submit_discussion_input(task_id: str, req: DiscussionInputRequest):
     """人工参与讨论：选择方案或追加意见。同时投递到 ReactAgent propose_alternatives queue
