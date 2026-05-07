@@ -484,3 +484,66 @@ CANDIDATE_CREATED v1 (with emulator_meta)
 - [ ] 是否要补 case：例如 T2 在 video_player.c 上做 use-after-free 测试（FFmpeg context 释放后访问的真实场景）？
 - [ ] 时间预算可接受吗？要不要砍掉某些 case 先做 MVP 验证？
 - [ ] 第 9 节里风险 1（Makefile + CFLAGS）是不是 blocker？要不要先在 switchvideo 的 Makefile 里确认 CFLAGS 入口可用？
+
+---
+
+## 11. 实战里程碑：switchvideo 基本播放功能跑通（2026-05-07）
+
+> **状态**：✅ 完成 — kedo 端到端跑出，Switch 真机能播放 192.168.1.8 NFS 共享存储里的 .mp4。
+> **价值**：第一个非 hello-world 级别的端到端实战收益，T3 模拟器搁置后的"真机 coredump 抓取"路径首次实战验证。
+
+### 11.1 任务时间线（5/4 → 5/7，12 个 task）
+
+从原始需求到稳定播放，全部 task 用 kedo 跑：
+
+| 时间 | task_id | 描述（节选） | 状态 |
+|---|---|---|---|
+| 5/4 | `6ad7d5f6` | 原始需求："hello world → 连 NFS 192.168.1.8:/NFS 播视频" | ✅ |
+| 5/6 | `35f711ab` | "启动错误，switch 上开了 ftp 192.168.1.145:5000，看一下 log" | ✅ |
+| 5/6 | `a0d7ec26` | "帮我编译成 nro" | ✅ |
+| 5/7 | `ea8fa95f` | "还是启动错误，switch 上开了 ftpd，直接下载 log" | ✅ |
+| 5/7 | `de1083dd` | 用户给本地路径 `01733317250_*.log`，告知"这个文件不对" | ✅ |
+| 5/7 | `b7957f7a` | "你是不是应拿 `01733324689_*.log`"（用户指认正确日志） | ❌ Tool: fetch_crash_report 卡 2% |
+| 5/7 | `93378547` | "写 scripts/video_server.py（charter.external_services 声明了但没实现）：HTTP server 8080 端口" | ✅ |
+| 5/7 | `83ae92dd` | 真视频测试："播放时 GET /...REBD-1025.mp4 HTTP/1.1 206" | ✅ |
+| 5/7 | `4a891b6b` | "NFS 播放器 UI 优化，字都是反的" | ✅ |
+| 5/7 | `79ec885b` | "switch 端播放没反应，python 这块是 206 回的" | ✅ |
+
+最终结果：Switch 真机从 192.168.1.8 上的 HTTP 桥接 server (`scripts/video_server.py`) 拉 `.mp4` 流式播放，UI 正常。
+
+### 11.2 fetch_crash_report 路径首次实战（5/6 → 5/7）
+
+`35f711ab` / `ea8fa95f` 这两次"启动错误，开了 ftpd"是 dashboard 真机 coredump widget 的实战首秀：
+
+**走通的部分**：
+- LLM 看到"启动错误 + Switch 端 ftpd 已开"就主动调 `fetch_crash_report`
+- Dashboard 弹橙色 widget，用户填 IP/端口（实战是 192.168.1.145:5000）+ 勾选记住
+- `/atmosphere/crash_reports/*.log` 拉到本地（文件名形如 `01733317250_010000000000100d.log`）
+- addr2line 解析 → LLM 拿到 `function @ file:line` 直接定位
+
+**实战暴露的坑（task `b7957f7a` 失败）**：
+- 用户主动追问"你是不是应拿 `01733324689_*.log`"。说明 **LLM 选最新 log 的策略错了**：字典序最大不一定是"用户当前关心的那次崩溃"。Switch 多次 crash 留多个 log 时，LLM 可能挑了过期的。
+- 改进方向：(a) 工具不要 silent 选最新——改成列出候选 + 读各 log 头部时间戳/result_code，让 LLM/用户主动挑；(b) 工具默认只下载，让 LLM 下一步显式调 `read_file` 选。
+- 实战里 Switch IP 是 `192.168.1.145`（不是 mock 用的 `192.168.1.100`），路径默认 `/atmosphere/crash_reports/` 和 ftpd-pro 默认导出一致，没遇到连接坑。
+
+### 11.3 关键决策点
+
+1. **HTTP 桥接替 NFS（沿用 4/12 决定）**：libnfs 在 devkitPro Switch portlibs 不可用 → 走 HTTP。这次 server 端 (`scripts/video_server.py`) 是 kedo 自己写的（task `93378547`），含 Range 206 partial content 支持。
+2. **Charter.external_services 提前声明**：charter 里早就声明了 "external_services: scripts/video_server.py"，所以 LLM 在播放报错时知道服务端缺什么，主动写 server 而不是去改 .nro 端。这印证 charter forbidden_patterns + external_services 双向约束 (commit `ed96fe8` / `07e4a13`) 在实战里的价值。
+3. **UI 镜像翻字 (`4a891b6b`)**：framebuffer 直绘方向位错了，kedo 一次改对。说明纯渲染逻辑 LLM 修起来比运行时 bug 容易得多。
+
+### 11.4 对 T1/T2/T3 假设的实战验证
+
+| 假设 | 实战验证 |
+|---|---|
+| **T1 编译期 -Werror 拦低级 bug** | ⚠ 未独立验证 — 实战里 build 失败多是"包/库不存在"或"profile 命令路径错"，不是编译警告级。strict_warnings 仍待专门跑 case T1-A 验证 |
+| **T2 host_test + ASAN 抓内存 bug** | ❌ 未跑 — 实战崩点都需要真机才能复现 |
+| **T3 模拟器路径替代（fetch_crash_report）** | ✅ 落地并实战 — 多次 task 走通 widget→ack→FTP→addr2line 全链路。**坑**：log 选哪份的策略需改进（见 11.2） |
+| **Charter forbidden_patterns + external_services** | ✅ 实战收益明显 — charter 引导 LLM 在播放故障时去写 server 而非改 .nro |
+
+### 11.5 下一轮要补的 case
+
+- [ ] `fetch_crash_report` 多 log 选择策略：列出+读 metadata 后挑，不再 silent 选最新（task `b7957f7a` 暴露）
+- [ ] 跑一次 case T1-A（未声明函数）确认 -Werror 在 switchvideo Makefile 路径下能生效
+- [ ] 真视频播放的"卡顿/206 半截"类 bug 能否用 host_test 模拟 HTTP server 复现 — T2 在 switchvideo 上的潜在落地点
+
