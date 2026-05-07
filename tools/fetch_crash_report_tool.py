@@ -29,6 +29,7 @@ import ftplib
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -36,6 +37,7 @@ from typing import Any, Optional
 from tools.base import BaseTool, ToolParameter, ToolResult
 from core.coredump_parser import (
     parse_log_file,
+    parse_crash_log,
     format_for_llm,
     find_addr2line,
     find_business_frame,
@@ -159,6 +161,109 @@ def _ftp_fetch_logs(
     return downloaded, errors
 
 
+# Atmosphere 文件名前缀长度固定 11 位 epoch（"01733324689_"）
+_FILENAME_EPOCH_RE = re.compile(r"^(\d{10,12})_")
+
+
+def _log_summary(project_path: str, filename: str) -> dict:
+    """读 .kedo/crash_reports/<filename> 的头部，抽够选 log 的 metadata。
+    不调 addr2line（不需要 .elf），失败时字段填 None。"""
+    path = Path(project_path) / ".kedo" / "crash_reports" / filename
+    info: dict[str, Any] = {
+        "filename": filename,
+        "path": str(path),
+        "size_bytes": None,
+        "mtime_iso": None,
+        "epoch_filename": None,
+        "result_code": None,
+        "exception_type": None,
+        "fault_address": None,
+        "process_name": None,
+        "program_id": None,
+        "primary_module": None,
+    }
+    try:
+        st = path.stat()
+        info["size_bytes"] = st.st_size
+        info["mtime_iso"] = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+    except Exception as e:
+        logger.debug(f"stat {filename}: {e}")
+
+    m = _FILENAME_EPOCH_RE.match(filename)
+    if m:
+        try:
+            info["epoch_filename"] = int(m.group(1))
+        except ValueError:
+            pass
+
+    try:
+        # 只读前 64KB，crash log 头部信息远早于这个长度
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            head = f.read(65536)
+        rep = parse_crash_log(head)
+        info["result_code"] = rep.result_code
+        info["exception_type"] = rep.exception_type
+        info["fault_address"] = rep.fault_address
+        info["process_name"] = rep.process_name
+        info["program_id"] = rep.program_id
+        info["primary_module"] = rep.primary_module
+    except Exception as e:
+        logger.debug(f"summary parse {filename}: {e}")
+
+    return info
+
+
+def _narrow_candidates(
+    project_path: str, filenames: set[str], log_hint: str = ""
+) -> list[dict]:
+    """对每个 filename 跑 _log_summary，按 epoch 倒序（最新在前）。
+    log_hint 非空时只保留 filename 含子串者（不区分大小写）。"""
+    summaries = [_log_summary(project_path, fn) for fn in filenames]
+    if log_hint:
+        h = log_hint.lower()
+        summaries = [s for s in summaries if h in s["filename"].lower()]
+    # 排序：epoch_filename DESC（None 当作最小）
+    summaries.sort(
+        key=lambda s: (s.get("epoch_filename") or 0),
+        reverse=True,
+    )
+    return summaries
+
+
+def _format_candidates_for_llm(candidates: list[dict], log_hint: str = "") -> str:
+    """把候选列表渲染成给 LLM 看的多行文本。"""
+    out = []
+    out.append(
+        "NEXT STEP REQUIRED: pick a candidate and call fetch_crash_report again with "
+        "select_log=<filename> to actually analyze it. The list below is metadata only."
+    )
+    if log_hint:
+        out.append(f"(narrowed by log_hint='{log_hint}')")
+    out.append("")
+    out.append(f"Found {len(candidates)} candidate crash log(s), most recent first:")
+    out.append("")
+    for i, c in enumerate(candidates, 1):
+        size_kb = (c.get("size_bytes") or 0) / 1024.0
+        result = c.get("result_code") or "?"
+        etype = c.get("exception_type") or "?"
+        module = c.get("primary_module") or "?"
+        out.append(
+            f"  [{i}] {c['filename']}"
+        )
+        out.append(
+            f"      Result: {result}   Type: {etype}   Module: {module}"
+        )
+        out.append(
+            f"      {size_kb:.1f} KB,  fetched(local) {c.get('mtime_iso') or '?'}"
+        )
+        out.append("")
+    out.append(
+        "If you don't know which one is relevant, ask the user. "
+        "When you do, call: fetch_crash_report(select_log=\"<exact filename>\")"
+    )
+    return "\n".join(out)
+
+
 def _guess_elf_path(project_path: str, profile: Optional[dict] = None) -> Optional[str]:
     """从 profile.artifact / build/<target>.elf 推 .elf 路径。"""
     if profile:
@@ -207,10 +312,16 @@ class FetchCrashReportTool(BaseTool):
             "with addr2line to function/file:line. Use this when build passed but "
             "the .nro crashes on real hardware (e.g. screen shows 2168-XXXX, app "
             "exits silently, or you suspect runtime svcBreak / Data Abort). "
-            "BLOCKS until the user starts ftpd-pro on Switch and confirms on the "
-            "dashboard. Returns the most recent crash's structured stack: "
-            "{result_code, exception_type, fault_address, crash_site, frames}. "
-            "Use the data to locate the offending source line and propose a fix."
+            "BLOCKS dashboard until the user starts ftpd-pro on Switch and confirms. "
+            "\n"
+            "Selection behavior when multiple logs exist:\n"
+            "  - 0 or 1 candidate -> auto-analyzes (returns full crash_site + frames)\n"
+            "  - 2+ candidates -> returns a CANDIDATE LIST (metadata only, no symbols).\n"
+            "    You MUST then call fetch_crash_report again with select_log=<filename> "
+            "    to actually analyze the chosen one. Ask the user if you don't know "
+            "    which crash they care about.\n"
+            "Use log_hint=<substring> if the user mentioned a specific filename or "
+            "epoch prefix; the tool narrows candidates by that substring."
         )
 
     @property
@@ -229,6 +340,24 @@ class FetchCrashReportTool(BaseTool):
                 "already has logs. Default false (use cached if any).",
                 required=False,
                 default=False,
+            ),
+            ToolParameter(
+                "log_hint", "string",
+                "Optional filename substring (case-insensitive). Narrows the candidate "
+                "set when multiple logs exist. Use the user's exact wording, e.g. if "
+                "they say 'the 01733324689 one', pass log_hint='01733324689'. Empty = "
+                "no filter.",
+                required=False,
+                default="",
+            ),
+            ToolParameter(
+                "select_log", "string",
+                "Exact filename to analyze (no path). Bypasses ALL discovery — neither "
+                "FTP fetch nor candidate listing. Use this on follow-up call after the "
+                "tool returned a candidate list. The file must already exist locally; "
+                "if not, set force_refetch=true on the first call.",
+                required=False,
+                default="",
             ),
             ToolParameter(
                 "task_id", "string",
@@ -250,6 +379,8 @@ class FetchCrashReportTool(BaseTool):
         self,
         reason: str = "",
         force_refetch: bool = False,
+        log_hint: str = "",
+        select_log: str = "",
         task_id: str = "",
         project_path: str = "",
     ) -> ToolResult:
@@ -259,11 +390,50 @@ class FetchCrashReportTool(BaseTool):
             return ToolResult(success=False, error="project_path required (auto-injection failed)")
 
         local_dir = Path(project_path) / ".kedo" / "crash_reports"
+
+        # 路径 0：select_log 显式指定 — 跳过所有 discovery，直接分析这一份
+        if select_log:
+            target_path = local_dir / select_log
+            if not target_path.is_file():
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"select_log='{select_log}' not found locally at {target_path}. "
+                        f"Either the filename is wrong, or the log was never downloaded. "
+                        f"To re-fetch from Switch first, drop select_log and pass "
+                        f"force_refetch=true."
+                    ),
+                )
+            return await self._analyze_local(
+                project_path, task_id,
+                latest_filename=select_log, source="explicit_select",
+            )
+
         s0 = _local_logs(project_path)
 
-        # Fast path：force_refetch=False 且本地已有 .log → 直接解最新那个，不弹卡片
+        # Fast path：force_refetch=False 且本地已有 .log
         if not force_refetch and s0:
-            return await self._analyze_local(project_path, task_id, source="cached")
+            cands = _narrow_candidates(project_path, s0, log_hint)
+            if len(cands) == 1:
+                return await self._analyze_local(
+                    project_path, task_id,
+                    latest_filename=cands[0]["filename"], source="cached",
+                )
+            if len(cands) >= 2:
+                return await self._present_candidates(
+                    task_id, project_path, cands, source="cached", log_hint=log_hint,
+                    extra_data={"cached_total": len(s0)},
+                )
+            # cands == 0：log_hint 在 cache 里没匹中
+            if log_hint:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"log_hint='{log_hint}' did not match any of {len(s0)} cached "
+                        f"log(s). Either drop the hint, refine it, or pass "
+                        f"force_refetch=true to re-download from Switch."
+                    ),
+                )
 
         # 否则走 dashboard ack + ftp 拉取
         defaults = _load_device_defaults(project_path)
@@ -355,9 +525,9 @@ class FetchCrashReportTool(BaseTool):
                 logger.warning(f"save device.json failed: {e}")
 
         s1 = _local_logs(project_path)
-        new_logs = sorted(s1 - s0, reverse=True)  # 字典序最大 = 最新（epoch 单调递增）
+        new_set = s1 - s0
 
-        if not new_logs:
+        if not new_set:
             return ToolResult(
                 success=False,
                 error=(
@@ -370,15 +540,90 @@ class FetchCrashReportTool(BaseTool):
                 data={"downloaded": downloaded, "new_count": 0},
             )
 
-        latest = new_logs[0]
-        return await self._analyze_local(
-            project_path, task_id, latest_filename=latest, source="fetched",
-            extra_data={"downloaded": downloaded, "new_logs": new_logs, "errors": errs},
+        # 应用 log_hint 收窄候选
+        cands = _narrow_candidates(project_path, new_set, log_hint)
+
+        if not cands:
+            # hint 把所有新增过滤光了 — 列全部新增让 LLM/用户挑（避免错失）
+            cands = _narrow_candidates(project_path, new_set, log_hint="")
+            return await self._present_candidates(
+                task_id, project_path, cands, source="fetched",
+                log_hint=log_hint,
+                extra_data={
+                    "downloaded": downloaded, "new_logs": sorted(new_set, reverse=True),
+                    "errors": errs, "hint_matched_zero": True,
+                },
+            )
+
+        if len(cands) == 1:
+            return await self._analyze_local(
+                project_path, task_id,
+                latest_filename=cands[0]["filename"], source="fetched",
+                extra_data={
+                    "downloaded": downloaded,
+                    "new_logs": sorted(new_set, reverse=True),
+                    "errors": errs,
+                },
+            )
+
+        # ≥2 个新 log（可能已被 hint 缩到 ≥2）— 列候选让 LLM 挑
+        return await self._present_candidates(
+            task_id, project_path, cands, source="fetched", log_hint=log_hint,
+            extra_data={
+                "downloaded": downloaded,
+                "new_logs": sorted(new_set, reverse=True),
+                "errors": errs,
+            },
         )
 
     # ------------------------------------------------------------------
     # 内部
     # ------------------------------------------------------------------
+
+    async def _present_candidates(
+        self,
+        task_id: str,
+        project_path: str,
+        candidates: list[dict],
+        source: str,
+        log_hint: str = "",
+        extra_data: Optional[dict] = None,
+    ) -> ToolResult:
+        """≥2 个候选时返回结构化列表，让 LLM 在下一轮用 select_log 回调。
+        emit dashboard log_message phase=coredump_candidates 让用户看到。"""
+        formatted = _format_candidates_for_llm(candidates, log_hint=log_hint)
+
+        if self._event_bus:
+            try:
+                from api.schemas import AgentEvent, EventType
+                await self._event_bus.publish(AgentEvent(
+                    event_type=EventType.LOG_MESSAGE,
+                    task_id=task_id,
+                    timestamp=datetime.now(timezone.utc),
+                    data={
+                        "phase": "coredump_candidates",
+                        "candidates": candidates,
+                        "log_hint": log_hint,
+                        "source": source,
+                    },
+                ))
+            except Exception as e:
+                logger.debug(f"emit coredump_candidates failed: {e}")
+
+        data = {
+            "source": source,
+            "needs_select": True,
+            "candidates": candidates,
+            "log_hint": log_hint,
+        }
+        if extra_data:
+            data.update(extra_data)
+
+        return ToolResult(
+            success=True,  # 这是正常交互而非失败 — LLM 应该看到 output 然后回调
+            output=formatted,
+            data=data,
+        )
 
     async def _analyze_local(
         self,

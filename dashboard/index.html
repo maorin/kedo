@@ -3786,6 +3786,12 @@
                         addLog('Coredump',
                                '崩点定位: ' + (data.result_code || '') + ' → ' + loc,
                                'success');
+                    } else if (data.phase === 'coredump_candidates') {
+                        consoleAppendCoredumpCandidates(data);
+                        const n = (data.candidates || []).length;
+                        addLog('Coredump',
+                               '多 log 候选 ' + n + ' 个，等 LLM 用 select_log 回调',
+                               'info');
                     }
                     break;
             }
@@ -4238,6 +4244,65 @@
                 det.appendChild(pre);
                 wrap.appendChild(det);
             }
+
+            el.appendChild(wrap);
+            addCursor();
+            scrollConsole();
+        }
+
+        // 渲染 fetch_crash_report 多候选列表（log_message phase=coredump_candidates）
+        // 只展示，不交互 — LLM 应在下一轮自主用 select_log 回调
+        function consoleAppendCoredumpCandidates(data) {
+            const el = dom.consoleOutput;
+            removeCursor();
+            const cands = data.candidates || [];
+            const hint = data.log_hint || '';
+
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'border:2px solid #60a5fa;background:rgba(96,165,250,0.06);padding:0.7rem;border-radius:6px;margin:0.6rem 0;font-family:inherit;';
+
+            const header = document.createElement('div');
+            header.style.cssText = 'color:#60a5fa;font-weight:700;font-size:0.85rem;margin-bottom:0.3rem;';
+            header.textContent = '🗂 多个 crash log，等 LLM 选 (' + cands.length + ' 个候选' +
+                                 (hint ? '，hint=' + hint : '') + ')';
+            wrap.appendChild(header);
+
+            const note = document.createElement('div');
+            note.style.cssText = 'color:#9ca3af;font-size:0.74rem;margin-bottom:0.5rem;line-height:1.4;';
+            note.textContent = 'LLM 接下来会用 select_log=<filename> 回调本工具来真正分析。如果 LLM 选错了，请直接对它说"用第 N 个"或文件名片段。';
+            wrap.appendChild(note);
+
+            cands.forEach(function(c, i) {
+                const row = document.createElement('div');
+                row.style.cssText = 'border-left:2px solid rgba(96,165,250,0.4);padding:0.35rem 0.55rem;margin:0.35rem 0;background:rgba(0,0,0,0.18);font-size:0.74rem;line-height:1.5;';
+
+                const line1 = document.createElement('div');
+                const idx = document.createElement('span');
+                idx.style.cssText = 'color:#60a5fa;font-weight:600;margin-right:0.4rem;';
+                idx.textContent = '[' + (i + 1) + ']';
+                const fn = document.createElement('code');
+                fn.style.cssText = 'color:#fbbf24;';
+                fn.textContent = c.filename || '?';
+                line1.appendChild(idx);
+                line1.appendChild(fn);
+                row.appendChild(line1);
+
+                const line2 = document.createElement('div');
+                line2.style.cssText = 'color:#c9d1d9;margin-top:0.15rem;';
+                const result = c.result_code || '?';
+                const etype = c.exception_type || '?';
+                const module = c.primary_module || '?';
+                line2.textContent = 'Result: ' + result + '   Type: ' + etype + '   Module: ' + module;
+                row.appendChild(line2);
+
+                const line3 = document.createElement('div');
+                line3.style.cssText = 'color:#9ca3af;margin-top:0.15rem;font-size:0.72rem;';
+                const sizeKb = c.size_bytes ? (c.size_bytes / 1024).toFixed(1) + ' KB' : '?';
+                line3.textContent = sizeKb + ',  fetched ' + (c.mtime_iso || '?');
+                row.appendChild(line3);
+
+                wrap.appendChild(row);
+            });
 
             el.appendChild(wrap);
             addCursor();
