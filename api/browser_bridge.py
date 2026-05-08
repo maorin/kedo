@@ -19,6 +19,9 @@ from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 logger = logging.getLogger(__name__)
+# Bridge events (handshake, session lifecycle) are at INFO level; surface them
+# even when the root logger is at WARNING (default for `kedo server`).
+logger.setLevel(logging.INFO)
 
 SUPPORTED_PROTOCOLS = ["1.0", "1.1"]
 PROTOCOL_VERSION = SUPPORTED_PROTOCOLS[-1]  # latest, retained for backward-compat reads
@@ -267,12 +270,14 @@ class BrowserBridge:
 
     def status(self) -> dict[str, Any]:
         return {
-            "protocol_version": PROTOCOL_VERSION,
+            "supported_protocols": SUPPORTED_PROTOCOLS,
+            "protocol_version": PROTOCOL_VERSION,  # latest server-supported (kept for back-compat)
             "connected_sessions": [
                 {
                     "session_id": s.session_id,
                     "role": s.role,
                     "client_version": s.client_version,
+                    "negotiated_protocol": s.negotiated_protocol,
                     "idle_seconds": round(time.monotonic() - s.last_heartbeat, 1),
                 }
                 for s in self._sessions.values()
