@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <title>kedo · Context Inbox</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --border: #d0d0d0;
+        --bg-row-hover: rgba(120, 120, 120, 0.08);
+        --accent: #2962ff;
+        --danger: #c82333;
+        --muted: #888;
+      }
+      body {
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 0 auto;
+        padding: 16px 24px;
+        max-width: 980px;
+      }
+      header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        margin-bottom: 16px;
+      }
+      header h1 { font-size: 20px; margin: 0; }
+      header .meta { color: var(--muted); font-size: 12px; }
+      .toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+      button, input, textarea {
+        font: inherit;
+        padding: 6px 10px;
+        border-radius: 4px;
+        border: 1px solid var(--border);
+        background: transparent;
+        color: inherit;
+      }
+      button { cursor: pointer; }
+      button.primary { background: var(--accent); color: white; border-color: var(--accent); }
+      button.danger  { background: var(--danger); color: white; border-color: var(--danger); }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .empty {
+        color: var(--muted);
+        padding: 24px;
+        text-align: center;
+        border: 1px dashed var(--border);
+        border-radius: 6px;
+      }
+      .item {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 10px 12px;
+        margin-bottom: 8px;
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        gap: 12px;
+        align-items: start;
+      }
+      .item:hover { background: var(--bg-row-hover); }
+      .item .body { min-width: 0; }
+      .item .title { font-weight: 600; }
+      .item .url { color: var(--muted); font-size: 12px; word-break: break-all; }
+      .item .url a { color: inherit; }
+      .item .preview {
+        margin-top: 4px;
+        font-size: 12px;
+        color: var(--muted);
+        max-height: 3em;
+        overflow: hidden;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+      }
+      .item .actions { display: flex; gap: 6px; }
+      .item.used .badge {
+        margin-left: 8px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      dialog {
+        max-width: 720px;
+        width: 90vw;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0;
+      }
+      dialog form { padding: 16px 20px; max-height: 80vh; overflow: auto; }
+      dialog h2 { margin: 0 0 12px; font-size: 16px; }
+      dialog textarea { width: 100%; box-sizing: border-box; min-height: 240px; }
+      dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+      .status-bar {
+        position: fixed;
+        bottom: 12px;
+        right: 12px;
+        font-size: 12px;
+        background: var(--accent);
+        color: white;
+        padding: 6px 10px;
+        border-radius: 4px;
+        opacity: 0;
+        transition: opacity 0.2s;
+        pointer-events: none;
+      }
+      .status-bar.show { opacity: 1; }
+      .status-bar.error { background: var(--danger); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Context Inbox</h1>
+      <div class="meta">
+        <span id="bridgeStatus">…</span> ·
+        <a href="/dashboard">← Dashboard</a>
+      </div>
+    </header>
+
+    <div class="toolbar">
+      <button id="refreshBtn">Refresh</button>
+      <button id="selectAllBtn">Select all</button>
+      <button id="clearSelBtn">Clear selection</button>
+      <button id="startTaskBtn" class="primary" disabled>Start task with selected (0)</button>
+    </div>
+
+    <div id="list"></div>
+
+    <div class="status-bar" id="statusBar"></div>
+
+    <dialog id="taskDialog">
+      <form method="dialog">
+        <h2>Start new task with attached context</h2>
+        <p style="color: var(--muted); font-size: 12px;">
+          Description below will be sent to <code>POST /api/tasks</code>.
+          Selected inbox items will be appended as a "Reference" block in the
+          task description and marked as used.
+        </p>
+        <label>Project path
+          <input id="projectPath" type="text" value="." />
+        </label>
+        <label style="display: block; margin-top: 8px;">Description
+          <textarea id="taskDescription"
+                    placeholder="What do you want kedo to do with these references?"></textarea>
+        </label>
+        <div class="row">
+          <button value="cancel">Cancel</button>
+          <button id="submitTaskBtn" class="primary" value="default">Create task</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script>
+      const API = "/api";
+      let items = [];
+      const selected = new Set();
+
+      const $ = (id) => document.getElementById(id);
+      const list = $("list");
+      const startTaskBtn = $("startTaskBtn");
+      const statusBar = $("statusBar");
+      const taskDialog = $("taskDialog");
+      const taskDescription = $("taskDescription");
+      const projectPath = $("projectPath");
+      const bridgeStatusEl = $("bridgeStatus");
+
+      function flash(msg, isError = false) {
+        statusBar.textContent = msg;
+        statusBar.className = "status-bar show" + (isError ? " error" : "");
+        setTimeout(() => statusBar.classList.remove("show"), 2200);
+      }
+
+      function el(tag, props = {}, ...children) {
+        const e = document.createElement(tag);
+        for (const [k, v] of Object.entries(props)) {
+          if (v === undefined || v === null || v === false) continue;
+          if (k === "class") e.className = v;
+          else if (k === "dataset") Object.assign(e.dataset, v);
+          else if (k === "text") e.textContent = v;
+          else if (k === "checked") e.checked = !!v;
+          else if (k === "onClick") e.addEventListener("click", v);
+          else if (k === "onChange") e.addEventListener("change", v);
+          else e.setAttribute(k, v);
+        }
+        for (const c of children) {
+          if (c == null || c === false) continue;
+          e.append(c);
+        }
+        return e;
+      }
+
+      function clearChildren(node) {
+        while (node.firstChild) node.removeChild(node.firstChild);
+      }
+
+      async function refresh() {
+        try {
+          const r = await fetch(`${API}/context-inbox`);
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          items = await r.json();
+          render();
+        } catch (e) {
+          clearChildren(list);
+          list.append(el("div", { class: "empty", text: `Failed to load: ${String(e)}` }));
+        }
+      }
+
+      async function refreshBridgeStatus() {
+        try {
+          const r = await fetch(`${API}/browser-bridge/status`);
+          const d = await r.json();
+          const n = (d.connected_sessions || []).length;
+          bridgeStatusEl.textContent =
+            n > 0 ? `🟢 ${n} bridge session${n > 1 ? "s" : ""} connected`
+                  : "⚪ no bridge connected";
+        } catch {
+          bridgeStatusEl.textContent = "⚪ status unavailable";
+        }
+      }
+
+      function render() {
+        clearChildren(list);
+        if (items.length === 0) {
+          list.append(el("div", {
+            class: "empty",
+            text: 'Inbox is empty. Use the kedo-browser-bridge popup → "Send to kedo" on any page.',
+          }));
+          updateStartBtn();
+          return;
+        }
+        items.forEach((it) => list.append(buildItem(it)));
+        updateStartBtn();
+      }
+
+      function buildItem(it) {
+        const used = (it.used_in_tasks || []).length > 0;
+        const checkbox = el("input", {
+          type: "checkbox",
+          dataset: { id: it.id },
+          checked: selected.has(it.id),
+          onChange: (ev) => {
+            if (ev.target.checked) selected.add(it.id);
+            else selected.delete(it.id);
+            updateStartBtn();
+          },
+        });
+
+        const titleNode = el("div", { class: "title", text: it.title || "(untitled)" });
+        if (used) titleNode.append(el("span", { class: "badge", text: " · used in task" }));
+
+        const urlNode = it.url
+          ? el("div", { class: "url" },
+              el("a", { href: it.url, target: "_blank", rel: "noreferrer", text: it.url }))
+          : null;
+
+        const previewText = it.content_preview || it.excerpt || "";
+        const previewNode = previewText
+          ? el("div", { class: "preview", text: previewText })
+          : null;
+
+        const metaParts = [`received ${it.received_at || ""}`];
+        if (it.user_note) metaParts.push(`note: "${it.user_note}"`);
+        const metaNode = el("div", { class: "url", text: metaParts.join(" · ") });
+
+        const deleteBtn = el("button", {
+          class: "danger",
+          text: "Delete",
+          onClick: async (ev) => {
+            ev.preventDefault();
+            if (!confirm("Delete this inbox item?")) return;
+            const r = await fetch(`${API}/context-inbox/${it.id}`, { method: "DELETE" });
+            if (r.ok) {
+              selected.delete(it.id);
+              flash("Deleted");
+              await refresh();
+            } else {
+              flash("Delete failed", true);
+            }
+          },
+        });
+
+        return el("div",
+          { class: "item" + (used ? " used" : "") },
+          checkbox,
+          el("div", { class: "body" }, titleNode, urlNode, previewNode, metaNode),
+          el("div", { class: "actions" }, deleteBtn),
+        );
+      }
+
+      function updateStartBtn() {
+        startTaskBtn.disabled = selected.size === 0;
+        startTaskBtn.textContent = `Start task with selected (${selected.size})`;
+      }
+
+      $("refreshBtn").addEventListener("click", refresh);
+      $("selectAllBtn").addEventListener("click", () => {
+        items.forEach((it) => selected.add(it.id));
+        render();
+      });
+      $("clearSelBtn").addEventListener("click", () => {
+        selected.clear();
+        render();
+      });
+      startTaskBtn.addEventListener("click", () => {
+        if (selected.size === 0) return;
+        taskDescription.value = "";
+        taskDialog.showModal();
+      });
+
+      $("submitTaskBtn").addEventListener("click", async (ev) => {
+        ev.preventDefault();
+        const description = taskDescription.value.trim();
+        if (!description) {
+          flash("Description required", true);
+          return;
+        }
+        const body = {
+          description,
+          project_path: projectPath.value.trim() || ".",
+          inbox_item_ids: Array.from(selected),
+        };
+        try {
+          const r = await fetch(`${API}/tasks`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+          const data = await r.json();
+          flash(`Task ${data.task_id} created`);
+          selected.clear();
+          taskDialog.close();
+          await refresh();
+          setTimeout(() => (window.location.href = "/dashboard"), 600);
+        } catch (e) {
+          flash(`Failed: ${e.message}`, true);
+        }
+      });
+
+      function connectWS() {
+        const proto = location.protocol === "https:" ? "wss:" : "ws:";
+        const ws = new WebSocket(`${proto}//${location.host}/api/ws`);
+        ws.onmessage = (ev) => {
+          try {
+            const m = JSON.parse(ev.data);
+            if (m && m.type === "inbox_event") refresh();
+          } catch {}
+        };
+        ws.onclose = () => setTimeout(connectWS, 3000);
+      }
+
+      refresh();
+      refreshBridgeStatus();
+      setInterval(refreshBridgeStatus, 5000);
+      connectWS();
+    </script>
+  </body>
+</html>

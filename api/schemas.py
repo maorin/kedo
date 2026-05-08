@@ -323,6 +323,8 @@ class CreateTaskRequest(BaseModel):
     description: str
     project_path: str = "."
     config: dict[str, Any] = Field(default_factory=dict)
+    inbox_item_ids: list[str] = Field(default_factory=list)
+    """Browser-bridge ContextInbox item ids to attach as reference context."""
 
 
 class CreateTaskResponse(BaseModel):

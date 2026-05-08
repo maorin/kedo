@@ -31,6 +31,9 @@ from api.schemas import (
     TaskStatusResponse,
 )
 from api.websocket import ws_manager
+from api.context_inbox import ContextInbox, InboxItem
+from api.browser_bridge import BrowserBridge
+from dataclasses import asdict as _dc_asdict
 
 router = APIRouter()
 
@@ -45,6 +48,8 @@ _reviewer = None         # 方案 C 独立审查 Agent，/llm/status 需要展�
 _role_swap = None        # 角色对换管理器，/llm/status 反映 swap 状态
 _create_llm_client = None  # create_llm_client 函数引用，避免循环导入
 _project_path: str = "."   # 项目根目录，用于文档浏览
+_browser_bridge: Optional[BrowserBridge] = None
+_context_inbox: Optional[ContextInbox] = None
 
 
 def set_dependencies(
@@ -58,9 +63,12 @@ def set_dependencies(
     evaluator=None,
     reviewer=None,
     role_swap=None,
+    browser_bridge: Optional[BrowserBridge] = None,
+    context_inbox: Optional[ContextInbox] = None,
 ):
     global _agent_loop, _react_agent, _state_manager, _version_manager
     global _planner, _evaluator, _reviewer, _role_swap, _create_llm_client, _project_path
+    global _browser_bridge, _context_inbox
     _agent_loop = agent_loop
     _react_agent = react_agent
     _state_manager = state_manager
@@ -71,6 +79,8 @@ def set_dependencies(
     _role_swap = role_swap
     _create_llm_client = create_llm_client_fn
     _project_path = project_path
+    _browser_bridge = browser_bridge
+    _context_inbox = context_inbox
 
 
 # ============================================================
@@ -86,11 +96,36 @@ async def create_task(req: CreateTaskRequest):
     if project_path == ".":
         project_path = _project_path
 
+    description = req.description
+    inbox_item_ids = req.inbox_item_ids or []
+    if inbox_item_ids and _context_inbox is not None:
+        items: list[InboxItem] = []
+        for iid in inbox_item_ids:
+            it = await _context_inbox.get(iid)
+            if it is not None:
+                items.append(it)
+        if items:
+            blocks: list[str] = []
+            for it in items:
+                head = f"## Reference: {it.title or it.url or it.id}"
+                if it.url:
+                    head += f"\nSource: {it.url}"
+                body = (it.content or "")[:5000]
+                block = f"{head}\n\n{body}"
+                if it.user_note:
+                    block += f"\n\nUser note: {it.user_note}"
+                blocks.append(block)
+            description = (
+                f"{description}\n\n---\n# Attached context from inbox\n\n"
+                + "\n\n---\n\n".join(blocks)
+            )
+            await _context_inbox.attach_to_task([it.id for it in items], task_id)
+
     # 优先使用 ReactAgent，回退到旧 AgentLoop
     agent = _react_agent or _agent_loop
     await agent.start_task(
         task_id=task_id,
-        description=req.description,
+        description=description,
         project_path=project_path,
     )
     return CreateTaskResponse(
@@ -2499,6 +2534,59 @@ def _collect_test_endpoints() -> list:
 # ============================================================
 # WebSocket 端点
 # ============================================================
+
+@router.websocket("/ws/browser")
+async def browser_ws_endpoint(websocket: WebSocket, token: Optional[str] = None):
+    """kedo-browser-bridge 插件的 WebSocket 端点。"""
+    if _browser_bridge is None:
+        await websocket.close(code=1011, reason="bridge_not_ready")
+        return
+    await _browser_bridge.handle_ws(websocket, token)
+
+
+@router.get("/context-inbox")
+async def list_inbox_items(limit: int = 100):
+    """List Context Inbox items (latest first)."""
+    if _context_inbox is None:
+        raise HTTPException(503, "context inbox not initialized")
+    items = await _context_inbox.list(limit=limit)
+    return [_inbox_item_summary(it) for it in items]
+
+
+@router.get("/context-inbox/{item_id}")
+async def get_inbox_item(item_id: str):
+    if _context_inbox is None:
+        raise HTTPException(503, "context inbox not initialized")
+    it = await _context_inbox.get(item_id)
+    if it is None:
+        raise HTTPException(404, f"inbox item {item_id} not found")
+    return _dc_asdict(it)
+
+
+@router.delete("/context-inbox/{item_id}")
+async def delete_inbox_item(item_id: str):
+    if _context_inbox is None:
+        raise HTTPException(503, "context inbox not initialized")
+    ok = await _context_inbox.delete(item_id)
+    if not ok:
+        raise HTTPException(404, f"inbox item {item_id} not found")
+    return {"ok": True}
+
+
+@router.get("/browser-bridge/status")
+async def browser_bridge_status():
+    if _browser_bridge is None:
+        return {"connected_sessions": [], "protocol_version": None}
+    return _browser_bridge.status()
+
+
+def _inbox_item_summary(it: InboxItem) -> dict:
+    """Drop full content from list response; keep a 500-char preview."""
+    d = _dc_asdict(it)
+    content = d.pop("content", "") or ""
+    d["content_preview"] = content[:500]
+    return d
+
 
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, task_id: Optional[str] = None):

@@ -13,6 +13,8 @@ from fastapi.staticfiles import StaticFiles
 
 from api.routes import router, set_dependencies
 from api.websocket import ws_manager
+from api.browser_bridge import BrowserBridge, get_or_create_browser_token
+from api.context_inbox import ContextInbox
 # P3-M3: AgentLoop 已退役，导入移到 _legacy；当前 server 不再使用
 # from core.agent_loop import AgentLoop  # noqa
 from core.evaluator import Evaluator
@@ -225,6 +227,26 @@ def create_app(config: dict = None) -> FastAPI:
     # 注册 WebSocket 事件处理
     state_manager.event_bus.subscribe("*", ws_manager.handle_event)
 
+    # Browser Bridge — Chrome 插件 WS 网关 + Context Inbox
+    # 设计文档: docs/deep-dives/browser-bridge-design.md
+    inbox_dir = config.get("inbox_dir")
+    context_inbox = ContextInbox(base_dir=inbox_dir)
+    browser_token = get_or_create_browser_token()
+
+    async def _on_inbox_event(evt: dict):
+        await ws_manager.broadcast({"type": "inbox_event", "data": evt})
+
+    browser_bridge = BrowserBridge(
+        token=browser_token,
+        inbox=context_inbox,
+        on_inbox_event=_on_inbox_event,
+    )
+    logger.info(
+        "Browser Bridge ready: token=~/.config/kedo/browser_token, "
+        "endpoint=/api/ws/browser, inbox=%s",
+        context_inbox.base_dir,
+    )
+
     # 注入依赖到路由（含 create_llm_client 引用，避免循环导入）
     # P3-M3: agent_loop=None 表示退役；planner/evaluator/version_manager 单独传入
     # 让 routes 不再通过 _agent_loop.X 访问这些组件
@@ -239,6 +261,8 @@ def create_app(config: dict = None) -> FastAPI:
         evaluator=evaluator,
         reviewer=reviewer,
         role_swap=role_swap,
+        browser_bridge=browser_bridge,
+        context_inbox=context_inbox,
     )
 
     # 注册路由 — 必须在 StaticFiles 之前
