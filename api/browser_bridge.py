@@ -20,10 +20,29 @@ from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 logger = logging.getLogger(__name__)
 
-PROTOCOL_VERSION = "1.0"
-SERVER_CAPABILITIES = ["context_inbox", "permission_v1"]
+SUPPORTED_PROTOCOLS = ["1.0", "1.1"]
+PROTOCOL_VERSION = SUPPORTED_PROTOCOLS[-1]  # latest, retained for backward-compat reads
+SERVER_CAPABILITIES = ["context_inbox", "permission_v1", "command_v1"]
 HELLO_TIMEOUT_S = 5.0
 TOKEN_PATH = Path.home() / ".config" / "kedo" / "browser_token"
+
+
+def _negotiate_protocol(client_versions: list[str]) -> Optional[str]:
+    """Pick the highest version supported by both ends."""
+    common = set(SUPPORTED_PROTOCOLS) & set(client_versions or [])
+    if not common:
+        return None
+    return max(common, key=lambda v: tuple(int(x) for x in v.split(".")))
+
+
+async def _safe_close(ws: WebSocket, code: int = 1000, reason: str = "") -> None:
+    """Close ws if not already disconnected; swallow ASGI 'already closed' errors."""
+    if ws.client_state == WebSocketState.DISCONNECTED:
+        return
+    try:
+        await ws.close(code=code, reason=reason)
+    except Exception:
+        pass
 
 
 def get_or_create_browser_token() -> str:
@@ -52,6 +71,7 @@ class BrowserSession:
     last_heartbeat: float = field(default_factory=time.monotonic)
     client_version: str = ""
     protocol_versions: list[str] = field(default_factory=list)
+    negotiated_protocol: str = "1.0"
 
 
 class BrowserBridge:
@@ -73,7 +93,7 @@ class BrowserBridge:
         # Token may arrive in the query string (preferred) or in the hello frame.
         # Reject early if neither matches; the hello frame will revalidate.
         if query_token is not None and query_token != self._token:
-            await ws.close(code=4001, reason="bad_token")
+            await _safe_close(ws, code=4001, reason="bad_token")
             logger.warning("browser_bridge: rejected ws (query token mismatch)")
             return
 
@@ -92,33 +112,40 @@ class BrowserBridge:
             if session is not None:
                 self._sessions.pop(session.session_id, None)
                 logger.info(f"browser_bridge: session {session.session_id} closed")
-            if ws.client_state != WebSocketState.DISCONNECTED:
-                try:
-                    await ws.close()
-                except Exception:
-                    pass
+            await _safe_close(ws)
 
     async def _handshake(self, ws: WebSocket) -> Optional[BrowserSession]:
         try:
             hello = await asyncio.wait_for(ws.receive_json(), timeout=HELLO_TIMEOUT_S)
-        except (asyncio.TimeoutError, Exception) as exc:
+        except (asyncio.TimeoutError, WebSocketDisconnect) as exc:
             logger.warning(f"browser_bridge: no hello frame ({exc})")
-            await ws.close(code=4002, reason="no_hello")
+            await _safe_close(ws, code=4002, reason="no_hello")
+            return None
+        except Exception as exc:
+            logger.warning(f"browser_bridge: hello receive failed ({exc})")
+            await _safe_close(ws, code=4002, reason="no_hello")
             return None
 
         if hello.get("type") != "hello":
-            await ws.close(code=4002, reason="protocol_violation")
+            await _safe_close(ws, code=4002, reason="protocol_violation")
             return None
 
         protocol_versions = hello.get("protocol_versions") or []
-        if PROTOCOL_VERSION not in protocol_versions:
-            await ws.send_json({"type": "hello_nack", "reason": "version_mismatch"})
-            await ws.close(code=4002, reason="version_mismatch")
+        negotiated = _negotiate_protocol(protocol_versions)
+        if negotiated is None:
+            try:
+                await ws.send_json({"type": "hello_nack", "reason": "version_mismatch"})
+            except Exception:
+                pass
+            await _safe_close(ws, code=4002, reason="version_mismatch")
             return None
 
         if hello.get("token") != self._token:
-            await ws.send_json({"type": "hello_nack", "reason": "bad_token"})
-            await ws.close(code=4001, reason="bad_token")
+            try:
+                await ws.send_json({"type": "hello_nack", "reason": "bad_token"})
+            except Exception:
+                pass
+            await _safe_close(ws, code=4001, reason="bad_token")
             return None
 
         role_hint = hello.get("role_hint", "user")
@@ -131,19 +158,21 @@ class BrowserBridge:
             ws=ws,
             client_version=hello.get("client_version", ""),
             protocol_versions=protocol_versions,
+            negotiated_protocol=negotiated,
         )
         self._sessions[session_id] = session
 
         await ws.send_json({
             "type": "hello_ack",
             "session_id": session_id,
-            "negotiated_protocol": PROTOCOL_VERSION,
+            "negotiated_protocol": negotiated,
             "role": role,
             "server_capabilities": SERVER_CAPABILITIES,
         })
         logger.info(
             f"browser_bridge: session {session_id} role={role} "
-            f"client={hello.get('client')} v{hello.get('client_version')}"
+            f"client={hello.get('client')} v{hello.get('client_version')} "
+            f"protocol={negotiated}"
         )
         return session
 

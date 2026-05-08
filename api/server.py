@@ -247,6 +247,26 @@ def create_app(config: dict = None) -> FastAPI:
         context_inbox.base_dir,
     )
 
+    # Browser tools (M2 — read-only + navigate). Registered after browser_bridge
+    # exists so each tool gets a live reference.
+    from tools.browser_tools import (
+        BrowserExtractTool,
+        BrowserListTabsTool,
+        BrowserNavigateTool,
+        BrowserQueryTool,
+        BrowserScreenshotTool,
+        BrowserWaitForTool,
+    )
+    for _cls in (
+        BrowserListTabsTool,
+        BrowserNavigateTool,
+        BrowserScreenshotTool,
+        BrowserExtractTool,
+        BrowserQueryTool,
+        BrowserWaitForTool,
+    ):
+        tool_registry.register(_cls(browser_bridge))
+
     # 注入依赖到路由（含 create_llm_client 引用，避免循环导入）
     # P3-M3: agent_loop=None 表示退役；planner/evaluator/version_manager 单独传入
     # 让 routes 不再通过 _agent_loop.X 访问这些组件
