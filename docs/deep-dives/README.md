@@ -23,4 +23,10 @@
 | 🧭 自主 Agent 与 LLM Workflow 的 Hybrid 化 — 从光谱两端到分层混合，4 种典型结合方式对比，kedo 当前位置(②)的固有 limit，推荐演进 ③ Plan-as-Contract → ④ Hierarchical Agent | [agent-workflow-hybrid.md](agent-workflow-hybrid.md) |
 | 🌐 Browser Bridge — 浏览器插件 + 后端 Bridge 让 ReactAgent 操作浏览器、接收用户喂网页（上下文盒子）、用独立 profile 查资料；MV3 + WebSocket + Tier 权限模型 + M1-M5 路线 | [browser-bridge-design.md](browser-bridge-design.md) |
 
+## 横向对照
+
+| 主题 | 文档 |
+|---|---|
+| 🪞 ReactAgent vs Claude Code Harness — 9 维对比 + 自主性 / 工具开放性 / 上下文管理 / 权限 / 持久化 / 多 agent 拓扑差异；kedo 能借鉴 harness 什么、harness 不能解决什么、最终演化方向 | [react-agent-vs-harness.md](react-agent-vs-harness.md) |
+
 > 欢迎增补。新问题模板：**问题本身 → 实际做了什么（对着代码引用）→ 诚实的 gap → 为何现状还 work → 下一步候选**。
