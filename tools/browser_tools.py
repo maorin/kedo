@@ -90,7 +90,7 @@ class _BrowserToolBase(BaseTool):
         # everything else: query the bridge for current active tab URL
         tab_id = kwargs.get("tab_id")
         params: dict = {}
-        if tab_id is not None:
+        if isinstance(tab_id, int) and tab_id > 0:
             params["tab_id"] = tab_id
         try:
             resp = await self._bridge.send_command(
@@ -128,7 +128,7 @@ class BrowserGetActiveTabTool(_BrowserToolBase):
 
     async def execute(self, tab_id: Optional[int] = None, **_) -> ToolResult:
         params: dict = {}
-        if tab_id is not None:
+        if isinstance(tab_id, int) and tab_id > 0:
             params["tab_id"] = tab_id
         return await self._send("get_active_tab", params, timeout=5)
 
@@ -205,7 +205,7 @@ class BrowserNavigateTool(_BrowserToolBase):
         **_,
     ) -> ToolResult:
         params: dict = {"url": url, "new_tab": bool(new_tab)}
-        if tab_id is not None:
+        if isinstance(tab_id, int) and tab_id > 0:
             params["tab_id"] = tab_id
         all_kwargs = {"url": url, "tab_id": tab_id, "new_tab": new_tab}
         return await self._send_with_permission(
@@ -423,7 +423,7 @@ class BrowserScreenshotTool(_BrowserToolBase):
 
     async def execute(self, tab_id: Optional[int] = None, **_) -> ToolResult:
         params: dict = {}
-        if tab_id is not None:
+        if isinstance(tab_id, int) and tab_id > 0:
             params["tab_id"] = tab_id
         return await self._send("screenshot", params, timeout=15.0)
 
@@ -456,7 +456,7 @@ class BrowserExtractTool(_BrowserToolBase):
 
     async def execute(self, tab_id: Optional[int] = None, **_) -> ToolResult:
         params: dict = {}
-        if tab_id is not None:
+        if isinstance(tab_id, int) and tab_id > 0:
             params["tab_id"] = tab_id
         return await self._send("extract", params)
 
