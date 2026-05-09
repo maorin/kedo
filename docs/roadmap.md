@@ -1,6 +1,6 @@
 # kedo Roadmap
 
-> **状态**：滚动更新的工作文档，不是承诺。最后更新 **2026-05-09**。
+> **状态**：滚动更新的工作文档，不是承诺。最后更新 **2026-05-09**（M3 + 双 Agent 实战完成，进 M3.5）。
 >
 > 本文是"现在做什么、下一步做什么、为什么"的清单。架构层面的"为什么"详见 `deep-dives/`，里程碑实现细节看对应 design 文档与 commit。
 >
@@ -18,10 +18,11 @@
 - LLM 多提供商热切换（Kimi / Anthropic / DeepSeek / OpenAI / Ollama / mock）
 
 **下一周期**重点（按优先级）：
-1. Browser Bridge **M3**（Agent 写控制 + Tier-2 权限）— 🔄 后端 + 插件代码已完成，待用户实战验证
-2. Browser Bridge **M4**（隔离 profile + `browser_research` 高层工具）
-3. 主 dashboard 整合 Inbox 工作流（避免独立 URL）
-4. 探索 **kedo 作为 skill** 暴露（让 Claude Code / Cursor 远程调用）
+1. ✅ Browser Bridge **M3** + 双 Agent 实战通了（2026-05-09）
+2. ⏳ Browser Bridge **M3.5**（测试用例自动执行）— 用 ReactAgent prompt 驱动跑 14 模块 TC，验证可行性后决定要不要做专用工具
+3. ⏳ Browser Bridge **M4**（隔离 profile + `browser_research` 高层工具）
+4. 主 dashboard 整合 Inbox 工作流（避免独立 URL）
+5. 探索 **kedo 作为 skill** 暴露（让 Claude Code / Cursor 远程调用）
 
 ---
 
@@ -31,7 +32,7 @@
 |---|---|---|---|
 | 主 Agent Loop | ReactAgent 单轨 ✅ | Hierarchical Agent (③→④) | `deep-dives/agent-workflow-hybrid.md` |
 | 多 Agent 协同 | Reviewer 二审 ✅ | Sub-agent as Tool / Orchestrator-Worker | `deep-dives/multi-agent-architecture.md` |
-| Browser Bridge | M1+M2+M3 代码 ✅ | M3 实战验证 → M4 隔离 profile | `deep-dives/browser-bridge-design.md` |
+| Browser Bridge | M1+M2+M3 + 双 Agent 实战 ✅ | M3.5 测试执行 → M4 隔离 profile | `deep-dives/browser-bridge-design.md` |
 | Virtual Test | T1/T2 ✅、T3→真机 coredump ✅ | 提取 charter 测试用例自动化 | `virtual-test-strategy.md` |
 | Charter 治理 | propose_charter_change 工具 ✅ | charter diff UI、版本回退 | (待写 deep-dive) |
 | 上下文管理 | memory + react_agent 收敛检测 ✅ | long-horizon 摘要器 | `deep-dives/context-management.md`、`long-horizon-memory.md` |
@@ -60,7 +61,7 @@
 - Selector 三元定位（CSS + text + aria_label）
 - 实战验证：1.8 上 ReactAgent 调 list_tabs 列出用户浏览器 tab
 
-### M3 — Agent 写控制 + Tier-2 权限（🔄 代码完成 2026-05-09，待实战验证）
+### M3 — Agent 写控制 + Tier-2 权限（✅ 完成 2026-05-09，含双 Agent 二审）
 
 **已交付：**
 - 5 个新工具：`browser_click` / `browser_type` / `browser_submit` / `browser_scroll` + 辅助 `browser_get_active_tab`
@@ -72,10 +73,37 @@
 - 协议升 1.2，向后兼容 1.0/1.1
 - 插件 v0.3.0
 
-**待做：**
-- 实战测试：让 ReactAgent 在真实页面上 click/type 走全流程
-- 边界 case：plugin 没连时的 fallback、permission 弹窗 timeout (120s) 行为
-- 可能的 UX 调整：弹窗位置、多请求堆叠
+**实战验证（2026-05-09 在 10.168.2.4）：**
+- ✅ 浏览器写控制全链路：navigate www.google.com → 弹窗 → Trust this domain → screenshot 出图 → audit log
+- ✅ 双 Agent 二审：commit_candidate → DeepSeek (deepseek-v4-pro) score=91.5 / 92.0 / 96.2 多次通过
+- ✅ 自动生成 14 模块测试用例文档（76KB）
+- ✅ 期间修了 4 个 bug：tab_id=0 / openai 必需 dep / api_key leak / logger INFO（commits `7dedae4` `78711ad` `2619e5e` `ee84d3e`）
+
+### M3.5 — 测试用例自动执行（⏳ 进行中 2026-05-09）
+
+**用例：** 把 M3 写出的测试用例 markdown 让 ReactAgent **自动执行** —— 不只生成文档而是真跑测试。
+
+**已具备能力：** browser_navigate / click / type / query / screenshot / wait_for + Reviewer 二审。
+
+**实战发现的限制：**
+- 撞 M3 密码字段硬规则 → TC-LOGIN-* 类用例本质上不能自动跑（设计如此），**需跳过**或走 M5 credentials vault
+- 收敛检测误伤探索类任务（同 selector 反复 ELEMENT_NOT_FOUND 触发 stop）—— 见 `deep-dives/tool-fragility.md` 后续
+- doc-only 任务里 commit_candidate 跳过 → Reviewer 不参与质量把关
+- LLM "走捷径"倾向：浏览少 + 经验补内容多，框架对、细节虚
+
+**短期补的能力（无重大架构改动，可现做）：**
+- 测试用例 markdown 解析器（TC-XX-NNN 步骤数组化）
+- 断言机制（"预期结果"自动验证）
+- per-case pass/fail 报告 + 失败截图
+- 一个 case 失败不影响下一个的 isolation 机制
+
+**两条路：**
+- **路径 A**：纯 ReactAgent prompt 驱动（task 描述里说"按 TC 一条条跑"）。最快验证，不写代码。
+- **路径 B**：加专用 `run_test_cases(md_file, tc_id)` 工具。300 行 Python，1-2 天，更稳。
+
+**当前进度：** 路径 A 在试，task `08079a68` plan_development 已生成 6 子任务，正在读 14 个 md。
+
+**估时：** 路径 A 验证 1-2 天；如果走路径 B 加 2-3 天
 
 ### M4 — 隔离 profile + `browser_research`（⏳）
 
@@ -146,7 +174,9 @@
 ## 时间线 (近 30 天估计)
 
 ```
-Week 1-2:   Browser Bridge M3 (写控制 + Tier-2 权限)
+✅ Done (2026-05-08~09):  M1 (通道) + M2 (只读) + M3 (写+权限+双Agent) + 14 模块测试文档自动生成
+Week 1:     Browser Bridge M3.5 (测试执行) — 路径 A (ReactAgent prompt) 验证 → 必要时路径 B 加 run_test_cases 工具
+Week 2:     Browser Bridge M3 (写控制 + Tier-2 权限) [legacy entry, ignore]
 Week 3:     Browser Bridge M4 (隔离 profile + browser_research)
 Week 4:     主 dashboard 整合 Inbox + 收尾打磨
             或：进入 Skill 暴露 PoC
