@@ -1,6 +1,6 @@
 # kedo Roadmap
 
-> **状态**：滚动更新的工作文档，不是承诺。最后更新 **2026-05-08**。
+> **状态**：滚动更新的工作文档，不是承诺。最后更新 **2026-05-09**。
 >
 > 本文是"现在做什么、下一步做什么、为什么"的清单。架构层面的"为什么"详见 `deep-dives/`，里程碑实现细节看对应 design 文档与 commit。
 >
@@ -18,7 +18,7 @@
 - LLM 多提供商热切换（Kimi / Anthropic / DeepSeek / OpenAI / Ollama / mock）
 
 **下一周期**重点（按优先级）：
-1. Browser Bridge **M3**（Agent 写控制 + Tier-2 权限）
+1. Browser Bridge **M3**（Agent 写控制 + Tier-2 权限）— 🔄 后端 + 插件代码已完成，待用户实战验证
 2. Browser Bridge **M4**（隔离 profile + `browser_research` 高层工具）
 3. 主 dashboard 整合 Inbox 工作流（避免独立 URL）
 4. 探索 **kedo 作为 skill** 暴露（让 Claude Code / Cursor 远程调用）
@@ -31,7 +31,7 @@
 |---|---|---|---|
 | 主 Agent Loop | ReactAgent 单轨 ✅ | Hierarchical Agent (③→④) | `deep-dives/agent-workflow-hybrid.md` |
 | 多 Agent 协同 | Reviewer 二审 ✅ | Sub-agent as Tool / Orchestrator-Worker | `deep-dives/multi-agent-architecture.md` |
-| Browser Bridge | M1+M2 ✅ | M3 写控制 + M4 隔离 profile | `deep-dives/browser-bridge-design.md` |
+| Browser Bridge | M1+M2+M3 代码 ✅ | M3 实战验证 → M4 隔离 profile | `deep-dives/browser-bridge-design.md` |
 | Virtual Test | T1/T2 ✅、T3→真机 coredump ✅ | 提取 charter 测试用例自动化 | `virtual-test-strategy.md` |
 | Charter 治理 | propose_charter_change 工具 ✅ | charter diff UI、版本回退 | (待写 deep-dive) |
 | 上下文管理 | memory + react_agent 收敛检测 ✅ | long-horizon 摘要器 | `deep-dives/context-management.md`、`long-horizon-memory.md` |
@@ -60,21 +60,22 @@
 - Selector 三元定位（CSS + text + aria_label）
 - 实战验证：1.8 上 ReactAgent 调 list_tabs 列出用户浏览器 tab
 
-### M3 — Agent 写控制 + Tier-2 权限（⏳ 下一步）
+### M3 — Agent 写控制 + Tier-2 权限（🔄 代码完成 2026-05-09，待实战验证）
 
-**范围：**
-- 新工具：`browser_click`、`browser_type`、`browser_submit`、`browser_scroll`
-- Tier 权限模型落地（Tier 0/1/2/3 详见 design §8）
-- T2 写操作触发 dashboard 弹窗确认（用户可"信任此域名 30 分钟"）
-- 域名白名单文件 `~/.config/kedo/browser_allowlist.txt`
-- 审计日志 `~/.kedo/browser-audit.jsonl`
-- 硬规则：`type=password` / `autocomplete~="cc-"` 永远拒绝（已在 M2 query 层暴露 `is_password_field`，M3 强制执行）
+**已交付：**
+- 5 个新工具：`browser_click` / `browser_type` / `browser_submit` / `browser_scroll` + 辅助 `browser_get_active_tab`
+- Tier 模型 (`core/browser_permissions.py`)：T0 read 自动 / T1 nav 白名单 / T2 write 30min 信任窗口 / T3 高危拒
+- T2 触发 dashboard 弹窗（4 选项：Deny / Allow once / Allow 30min / Trust this domain）
+- 持久化白名单 `~/.config/kedo/browser_permissions.json`（默认含 localhost / 127.0.0.1 / *.devkitpro.org）
+- 审计日志 `~/.kedo/browser-audit.jsonl`（每次决策一行 JSON）
+- 硬规则：协议 (chrome:// / file://) / 密码字段 / 信用卡字段 client-side 强制拒
+- 协议升 1.2，向后兼容 1.0/1.1
+- 插件 v0.3.0
 
-**风险点：**
-- Selector 漂移 → 三元定位 + matched_strategy 反馈给 LLM 学习
-- 静默写操作误用用户登录态（GitHub / Slack） → T2 默认每次确认是底线
-
-**估时：** 5-7 天
+**待做：**
+- 实战测试：让 ReactAgent 在真实页面上 click/type 走全流程
+- 边界 case：plugin 没连时的 fallback、permission 弹窗 timeout (120s) 行为
+- 可能的 UX 调整：弹窗位置、多请求堆叠
 
 ### M4 — 隔离 profile + `browser_research`（⏳）
 

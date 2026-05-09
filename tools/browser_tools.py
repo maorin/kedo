@@ -1,13 +1,17 @@
 """
-Browser tools — M2 read-only Chrome control via Browser Bridge.
+Browser tools — Chrome control via Browser Bridge.
 
-ReactAgent uses these to inspect (and navigate) the user's browser. All
-require an active `kedo-browser-bridge` plugin session; without one, calls
-return `bridge: no_browser_session(role=user)`.
+ReactAgent uses these to inspect, navigate, and (M3) interact with the
+user's browser. All require an active `kedo-browser-bridge` plugin session;
+without one, calls return `bridge: no_browser_session(role=user)`.
+
+Tier model (see core/browser_permissions.py):
+- T0 read     : list_tabs / query / extract / screenshot / wait_for / get_active_tab
+- T1 navigate : navigate / scroll
+- T2 write    : click / type / submit (always require permission check)
 
 Read-only flagged tools (is_read_only=True) may run concurrently in the
-ToolRegistry execution path. browser_navigate is *not* read-only because
-it changes the active tab's URL.
+ToolRegistry execution path. T1/T2 tools are not read-only.
 """
 from __future__ import annotations
 
@@ -20,10 +24,11 @@ logger = logging.getLogger(__name__)
 
 
 class _BrowserToolBase(BaseTool):
-    """Common plumbing — call browser_bridge.send_command()."""
+    """Common plumbing — call browser_bridge.send_command() with optional Tier check."""
 
-    def __init__(self, bridge):
+    def __init__(self, bridge, policy=None):
         self._bridge = bridge
+        self._policy = policy  # core.browser_permissions.BrowserPermissionPolicy or None
 
     @property
     def is_read_only(self) -> bool:
@@ -36,6 +41,7 @@ class _BrowserToolBase(BaseTool):
         prefer_role: str = "user",
         timeout: float = 35.0,
     ) -> ToolResult:
+        """Direct send — for T0 actions that bypass policy."""
         try:
             resp = await self._bridge.send_command(
                 action, params, prefer_role=prefer_role, timeout=timeout
@@ -51,8 +57,83 @@ class _BrowserToolBase(BaseTool):
             error=f"{err.get('code', 'INTERNAL')}: {err.get('message', '')}",
         )
 
+    async def _send_with_permission(
+        self,
+        action: str,
+        params: dict,
+        all_kwargs: dict,
+        prefer_role: str = "user",
+        timeout: float = 35.0,
+        task_id: Optional[str] = None,
+    ) -> ToolResult:
+        """T1/T2 send — first resolve target URL, ask policy, then send if allowed."""
+        if self._policy is None:
+            # No policy configured = M2 fallback, allow all (test mode).
+            return await self._send(action, params, prefer_role=prefer_role, timeout=timeout)
+
+        url = await self._resolve_target_url(all_kwargs)
+        decision = await self._policy.check(
+            action=action, url=url, params=all_kwargs, task_id=task_id,
+        )
+        if not decision.allowed:
+            return ToolResult(
+                success=False,
+                error=f"PERMISSION_DENIED: {decision.kind} ({decision.reason})",
+            )
+        return await self._send(action, params, prefer_role=prefer_role, timeout=timeout)
+
+    async def _resolve_target_url(self, kwargs: dict) -> str:
+        """For navigate, return the destination URL. Otherwise ask the active tab."""
+        # navigate: target URL is in kwargs
+        if "url" in kwargs and kwargs["url"]:
+            return str(kwargs["url"])
+        # everything else: query the bridge for current active tab URL
+        tab_id = kwargs.get("tab_id")
+        params: dict = {}
+        if tab_id is not None:
+            params["tab_id"] = tab_id
+        try:
+            resp = await self._bridge.send_command(
+                "get_active_tab", params, prefer_role="user", timeout=5,
+            )
+            if resp.get("success"):
+                return str((resp.get("data") or {}).get("url") or "")
+        except Exception as exc:
+            logger.warning(f"_resolve_target_url failed: {exc}")
+        return ""
+
     def _summarize(self, data: dict) -> str:
         return ""
+
+
+class BrowserGetActiveTabTool(_BrowserToolBase):
+    @property
+    def name(self) -> str:
+        return "browser_get_active_tab"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Return {tab_id, window_id, url, title, status} of the user's active tab. "
+            "Use to learn the current page before deciding to click / type."
+        )
+
+    @property
+    def parameters(self) -> list[ToolParameter]:
+        return [
+            ToolParameter(name="tab_id", type="integer",
+                          description="Optional tab id; defaults to active tab",
+                          required=False),
+        ]
+
+    async def execute(self, tab_id: Optional[int] = None, **_) -> ToolResult:
+        params: dict = {}
+        if tab_id is not None:
+            params["tab_id"] = tab_id
+        return await self._send("get_active_tab", params, timeout=5)
+
+    def _summarize(self, data: dict) -> str:
+        return f"tab {data.get('tab_id')} — {data.get('title','')} ({data.get('url','')})"
 
 
 class BrowserListTabsTool(_BrowserToolBase):
@@ -126,10 +207,195 @@ class BrowserNavigateTool(_BrowserToolBase):
         params: dict = {"url": url, "new_tab": bool(new_tab)}
         if tab_id is not None:
             params["tab_id"] = tab_id
-        return await self._send("navigate", params, timeout=40.0)
+        all_kwargs = {"url": url, "tab_id": tab_id, "new_tab": new_tab}
+        return await self._send_with_permission(
+            "navigate", params, all_kwargs, timeout=40.0,
+        )
 
     def _summarize(self, data: dict) -> str:
         return f"navigated tab {data.get('tab_id')} → {data.get('url')} ({data.get('title','')})"
+
+
+class BrowserClickTool(_BrowserToolBase):
+    @property
+    def name(self) -> str:
+        return "browser_click"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Click a DOM element on the active tab. Provide ANY of: selector (CSS), "
+            "text_match (substring of element textContent), or aria_label. The plugin "
+            "uses the same triple-strategy as browser_query and clicks the first match. "
+            "This is a Tier-2 (write) action — first-time per domain triggers a dashboard "
+            "permission prompt; subsequent calls within 30 min trust window are auto-allowed. "
+            "Password fields and credit-card inputs are always rejected client-side."
+        )
+
+    @property
+    def parameters(self) -> list[ToolParameter]:
+        return [
+            ToolParameter(name="selector", type="string", description="CSS selector", required=False),
+            ToolParameter(name="text_match", type="string", description="Substring of element text", required=False),
+            ToolParameter(name="aria_label", type="string", description="Exact aria-label match", required=False),
+            ToolParameter(name="tab_id", type="integer", description="Optional tab id", required=False),
+        ]
+
+    @property
+    def is_read_only(self) -> bool:
+        return False
+
+    async def execute(self, **kwargs) -> ToolResult:
+        keep = {"selector", "text_match", "aria_label", "tab_id"}
+        params = {k: v for k, v in kwargs.items() if k in keep and v is not None}
+        if not any(params.get(k) for k in ("selector", "text_match", "aria_label")):
+            return ToolResult(
+                success=False,
+                error="at least one of selector / text_match / aria_label required",
+            )
+        return await self._send_with_permission("click", params, kwargs)
+
+    def _summarize(self, data: dict) -> str:
+        return (
+            f"clicked: strategy={data.get('matched_strategy','?')} "
+            f"text='{(data.get('text') or '')[:60]}' tag={data.get('tag','?')}"
+        )
+
+
+class BrowserTypeTool(_BrowserToolBase):
+    @property
+    def name(self) -> str:
+        return "browser_type"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Type text into a focused or selected input element. Provide selector OR "
+            "aria_label to identify the input. The plugin focuses, clears, and types "
+            "the value (events: input + change). Tier-2 write action — see browser_click "
+            "for permission flow. Password fields (type=password) and credit-card "
+            "autocomplete inputs are HARD-BLOCKED client-side regardless of permission."
+        )
+
+    @property
+    def parameters(self) -> list[ToolParameter]:
+        return [
+            ToolParameter(name="value", type="string", description="Text to type"),
+            ToolParameter(name="selector", type="string", description="CSS selector", required=False),
+            ToolParameter(name="aria_label", type="string", description="Exact aria-label match", required=False),
+            ToolParameter(name="clear_first", type="boolean",
+                          description="Clear input before typing (default true)",
+                          required=False, default=True),
+            ToolParameter(name="press_enter", type="boolean",
+                          description="Press Enter after typing",
+                          required=False, default=False),
+            ToolParameter(name="tab_id", type="integer", description="Optional tab id", required=False),
+        ]
+
+    @property
+    def is_read_only(self) -> bool:
+        return False
+
+    async def execute(self, value: str, **kwargs) -> ToolResult:
+        keep = {"selector", "aria_label", "clear_first", "press_enter", "tab_id"}
+        params: dict = {"value": value}
+        for k in keep:
+            v = kwargs.get(k)
+            if v is not None:
+                params[k] = v
+        if not (params.get("selector") or params.get("aria_label")):
+            return ToolResult(
+                success=False,
+                error="selector or aria_label required",
+            )
+        return await self._send_with_permission(
+            "type", params, {**kwargs, "value": value},
+        )
+
+    def _summarize(self, data: dict) -> str:
+        return f"typed into {data.get('tag','?')} (was_password={data.get('was_password', False)})"
+
+
+class BrowserSubmitTool(_BrowserToolBase):
+    @property
+    def name(self) -> str:
+        return "browser_submit"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Submit a form. Provide selector for the <form> element, or omit to submit "
+            "the form containing the focused element. Equivalent to pressing Enter on "
+            "an input. Tier-2 write action."
+        )
+
+    @property
+    def parameters(self) -> list[ToolParameter]:
+        return [
+            ToolParameter(name="selector", type="string", description="CSS selector for form (optional)", required=False),
+            ToolParameter(name="tab_id", type="integer", description="Optional tab id", required=False),
+        ]
+
+    @property
+    def is_read_only(self) -> bool:
+        return False
+
+    async def execute(self, **kwargs) -> ToolResult:
+        keep = {"selector", "tab_id"}
+        params = {k: v for k, v in kwargs.items() if k in keep and v is not None}
+        return await self._send_with_permission("submit", params, kwargs)
+
+    def _summarize(self, data: dict) -> str:
+        return f"submitted form (action={data.get('form_action','')})"
+
+
+class BrowserScrollTool(_BrowserToolBase):
+    @property
+    def name(self) -> str:
+        return "browser_scroll"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Scroll the active tab. Use direction='up'/'down' for viewport-relative "
+            "scroll, or selector to scroll a specific element into view. Tier-1 "
+            "navigation action — first-time per domain may prompt."
+        )
+
+    @property
+    def parameters(self) -> list[ToolParameter]:
+        return [
+            ToolParameter(name="direction", type="string",
+                          description="'up' / 'down' / 'top' / 'bottom'",
+                          required=False),
+            ToolParameter(name="selector", type="string",
+                          description="CSS selector to scroll into view",
+                          required=False),
+            ToolParameter(name="amount", type="integer",
+                          description="Pixels to scroll (default 600)",
+                          required=False, default=600),
+            ToolParameter(name="tab_id", type="integer", description="Optional tab id", required=False),
+        ]
+
+    @property
+    def is_read_only(self) -> bool:
+        return False
+
+    async def execute(self, **kwargs) -> ToolResult:
+        keep = {"direction", "selector", "amount", "tab_id"}
+        params = {k: v for k, v in kwargs.items() if k in keep and v is not None}
+        if not (params.get("direction") or params.get("selector")):
+            return ToolResult(
+                success=False,
+                error="direction or selector required",
+            )
+        return await self._send_with_permission("scroll", params, kwargs)
+
+    def _summarize(self, data: dict) -> str:
+        return (
+            f"scrolled: direction={data.get('direction','?')} "
+            f"y={data.get('scroll_y','?')}"
+        )
 
 
 class BrowserScreenshotTool(_BrowserToolBase):

@@ -247,25 +247,48 @@ def create_app(config: dict = None) -> FastAPI:
         context_inbox.base_dir,
     )
 
-    # Browser tools (M2 — read-only + navigate). Registered after browser_bridge
-    # exists so each tool gets a live reference.
+    # Browser permission policy (M3) — Tier 0-3 + 30min trust + audit log
+    from core.browser_permissions import BrowserPermissionPolicy
+
+    async def _broadcast_perm_request(payload: dict):
+        await ws_manager.broadcast(payload)
+
+    browser_policy = BrowserPermissionPolicy(
+        broadcast_request=_broadcast_perm_request,
+    )
+    logger.info(
+        "Browser permission policy ready: state=~/.config/kedo/browser_permissions.json "
+        "audit=~/.kedo/browser-audit.jsonl"
+    )
+
+    # Browser tools (M2 read + M3 write). Registered after bridge + policy exist.
     from tools.browser_tools import (
+        BrowserClickTool,
         BrowserExtractTool,
+        BrowserGetActiveTabTool,
         BrowserListTabsTool,
         BrowserNavigateTool,
         BrowserQueryTool,
         BrowserScreenshotTool,
+        BrowserScrollTool,
+        BrowserSubmitTool,
+        BrowserTypeTool,
         BrowserWaitForTool,
     )
     for _cls in (
         BrowserListTabsTool,
+        BrowserGetActiveTabTool,
         BrowserNavigateTool,
         BrowserScreenshotTool,
         BrowserExtractTool,
         BrowserQueryTool,
         BrowserWaitForTool,
+        BrowserScrollTool,
+        BrowserClickTool,
+        BrowserTypeTool,
+        BrowserSubmitTool,
     ):
-        tool_registry.register(_cls(browser_bridge))
+        tool_registry.register(_cls(browser_bridge, policy=browser_policy))
 
     # 注入依赖到路由（含 create_llm_client 引用，避免循环导入）
     # P3-M3: agent_loop=None 表示退役；planner/evaluator/version_manager 单独传入
@@ -283,6 +306,7 @@ def create_app(config: dict = None) -> FastAPI:
         role_swap=role_swap,
         browser_bridge=browser_bridge,
         context_inbox=context_inbox,
+        browser_policy=browser_policy,
     )
 
     # 注册路由 — 必须在 StaticFiles 之前

@@ -1012,6 +1012,40 @@
             DEMO MODE - WebSocket connection unavailable. Running with simulated data.
         </div>
 
+        <div id="permissionBanners"
+             style="position:sticky;top:0;z-index:1000;background:transparent;
+                    display:flex;flex-direction:column;gap:6px;padding:0;"></div>
+        <style>
+          .perm-banner {
+            background: rgba(120, 60, 0, 0.95);
+            color: #fff5e6;
+            border-left: 4px solid #f0ad4e;
+            padding: 10px 14px;
+            font-size: 13px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+          }
+          .perm-banner .perm-msg { flex: 1; min-width: 280px; }
+          .perm-banner .perm-msg code { font-family: monospace; background: rgba(0,0,0,0.3); padding: 1px 5px; border-radius: 3px; }
+          .perm-banner .perm-buttons { display: flex; gap: 6px; flex-wrap: wrap; }
+          .perm-banner button {
+            font-size: 12px;
+            padding: 4px 10px;
+            border-radius: 3px;
+            border: 1px solid rgba(255,255,255,0.4);
+            background: rgba(255,255,255,0.1);
+            color: inherit;
+            cursor: pointer;
+          }
+          .perm-banner button:hover { background: rgba(255,255,255,0.25); }
+          .perm-banner button.deny { background: rgba(200,35,51,0.3); border-color: rgba(200,35,51,0.6); }
+          .perm-banner button.allow-30 { background: rgba(30,126,52,0.3); border-color: rgba(30,126,52,0.6); }
+          .perm-banner button.trust { background: rgba(10,90,180,0.3); border-color: rgba(10,90,180,0.6); }
+        </style>
+
         <header>
             <div class="header-content">
                 <div class="header-left">
@@ -3789,6 +3823,9 @@
                         addLog('Inbox', `新条目: ${data.title || '(no title)'} — ${data.url || ''}`, 'info');
                     }
                     break;
+                case 'browser_permission_request':
+                    showPermissionBanner(data);
+                    break;
                 case 'log_message':
                     if (data.phase === 'coredump_analyzed') {
                         consoleAppendCoredumpResult(data);
@@ -5384,6 +5421,97 @@
             } catch {
                 /* ignore — non-critical UI badge */
             }
+        }
+
+        // ============================================================
+        // M3 — Browser permission request banners
+        // ============================================================
+
+        const _permissionRequests = new Map();
+
+        function showPermissionBanner(req) {
+            if (!req || !req.request_id) return;
+            _permissionRequests.set(req.request_id, req);
+            renderPermissionBanners();
+            addLog('Permission', `Agent 想 ${req.action} → ${req.domain || '(unknown domain)'}`, 'warning');
+        }
+
+        function renderPermissionBanners() {
+            const container = document.getElementById('permissionBanners');
+            if (!container) return;
+            while (container.firstChild) container.removeChild(container.firstChild);
+            for (const [id, req] of _permissionRequests) {
+                container.appendChild(buildPermissionBanner(id, req));
+            }
+        }
+
+        function buildPermissionBanner(id, req) {
+            const div = document.createElement('div');
+            div.className = 'perm-banner';
+
+            const msg = document.createElement('div');
+            msg.className = 'perm-msg';
+            const strong = document.createElement('strong');
+            strong.textContent = '🔐 Agent permission request:';
+            msg.appendChild(strong);
+            msg.appendChild(document.createTextNode(' '));
+            const actionEl = document.createElement('code');
+            actionEl.textContent = req.action || '?';
+            msg.appendChild(actionEl);
+            msg.appendChild(document.createTextNode(' on '));
+            const domainEl = document.createElement('code');
+            domainEl.textContent = req.domain || '(unknown)';
+            msg.appendChild(domainEl);
+            if (req.params_summary && Object.keys(req.params_summary).length) {
+                msg.appendChild(document.createTextNode(' '));
+                const detail = document.createElement('span');
+                detail.style.opacity = '0.85';
+                detail.style.fontSize = '11px';
+                detail.textContent = JSON.stringify(req.params_summary);
+                msg.appendChild(detail);
+            }
+            div.appendChild(msg);
+
+            const btns = document.createElement('div');
+            btns.className = 'perm-buttons';
+            btns.appendChild(_permButton('Deny', 'deny', () => decidePermission(id, 'deny'), 'deny'));
+            btns.appendChild(_permButton('Allow once', '', () => decidePermission(id, 'allow_once')));
+            btns.appendChild(_permButton('Trust 30 min', 'allow-30', () => decidePermission(id, 'allow_30min')));
+            if (req.tier === 1 || req.tier === 2) {
+                btns.appendChild(_permButton('Trust this domain', 'trust', () => decidePermission(id, 'trust_persist')));
+            }
+            div.appendChild(btns);
+            return div;
+        }
+
+        function _permButton(label, klass, onClick, role) {
+            const b = document.createElement('button');
+            if (klass) b.className = klass;
+            b.textContent = label;
+            b.addEventListener('click', onClick);
+            if (role) b.dataset.role = role;
+            return b;
+        }
+
+        async function decidePermission(requestId, decision) {
+            try {
+                const r = await fetch(`${API_BASE}/browser-bridge/permission/${requestId}`, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({ decision }),
+                });
+                if (!r.ok) {
+                    const t = await r.text();
+                    addLog('Permission', `决策失败 ${r.status}: ${t}`, 'error');
+                    return;
+                }
+            } catch (e) {
+                addLog('Permission', `决策网络错误: ${String(e)}`, 'error');
+                return;
+            }
+            _permissionRequests.delete(requestId);
+            renderPermissionBanners();
+            addLog('Permission', `已发送决策: ${decision}`, 'success');
         }
 
         async function fetchLLMStatus() {

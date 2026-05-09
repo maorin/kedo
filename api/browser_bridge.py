@@ -23,9 +23,9 @@ logger = logging.getLogger(__name__)
 # even when the root logger is at WARNING (default for `kedo server`).
 logger.setLevel(logging.INFO)
 
-SUPPORTED_PROTOCOLS = ["1.0", "1.1"]
+SUPPORTED_PROTOCOLS = ["1.0", "1.1", "1.2"]
 PROTOCOL_VERSION = SUPPORTED_PROTOCOLS[-1]  # latest, retained for backward-compat reads
-SERVER_CAPABILITIES = ["context_inbox", "permission_v1", "command_v1"]
+SERVER_CAPABILITIES = ["context_inbox", "permission_v1", "command_v1", "command_v2_write"]
 HELLO_TIMEOUT_S = 5.0
 TOKEN_PATH = Path.home() / ".config" / "kedo" / "browser_token"
 

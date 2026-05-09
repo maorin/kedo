@@ -50,6 +50,7 @@ _create_llm_client = None  # create_llm_client 函数引用，避免循环导入
 _project_path: str = "."   # 项目根目录，用于文档浏览
 _browser_bridge: Optional[BrowserBridge] = None
 _context_inbox: Optional[ContextInbox] = None
+_browser_policy = None  # core.browser_permissions.BrowserPermissionPolicy or None
 
 
 def set_dependencies(
@@ -65,10 +66,11 @@ def set_dependencies(
     role_swap=None,
     browser_bridge: Optional[BrowserBridge] = None,
     context_inbox: Optional[ContextInbox] = None,
+    browser_policy=None,
 ):
     global _agent_loop, _react_agent, _state_manager, _version_manager
     global _planner, _evaluator, _reviewer, _role_swap, _create_llm_client, _project_path
-    global _browser_bridge, _context_inbox
+    global _browser_bridge, _context_inbox, _browser_policy
     _agent_loop = agent_loop
     _react_agent = react_agent
     _state_manager = state_manager
@@ -81,6 +83,7 @@ def set_dependencies(
     _project_path = project_path
     _browser_bridge = browser_bridge
     _context_inbox = context_inbox
+    _browser_policy = browser_policy
 
 
 # ============================================================
@@ -2577,7 +2580,25 @@ async def delete_inbox_item(item_id: str):
 async def browser_bridge_status():
     if _browser_bridge is None:
         return {"connected_sessions": [], "protocol_version": None}
-    return _browser_bridge.status()
+    out = _browser_bridge.status()
+    if _browser_policy is not None:
+        out["permissions"] = _browser_policy.status()
+    return out
+
+
+@router.post("/browser-bridge/permission/{request_id}")
+async def decide_browser_permission(request_id: str, body: dict = Body(...)):
+    """Dashboard posts here when user clicks one of the permission buttons."""
+    if _browser_policy is None:
+        raise HTTPException(503, "browser policy not initialized")
+    decision = (body or {}).get("decision", "deny")
+    valid = {"allow_once", "allow_30min", "trust_persist", "deny"}
+    if decision not in valid:
+        raise HTTPException(400, f"decision must be one of {sorted(valid)}")
+    ok = _browser_policy.resolve(request_id, decision)
+    if not ok:
+        raise HTTPException(404, f"unknown or expired request {request_id}")
+    return {"ok": True, "request_id": request_id, "decision": decision}
 
 
 def _inbox_item_summary(it: InboxItem) -> dict:
