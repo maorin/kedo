@@ -29,6 +29,9 @@ from api.schemas import CodeChange, TestResult
 from core.evaluator import Evaluator
 
 logger = logging.getLogger(__name__)
+# Reviewer 决策（score + approve）是诊断双 Agent 的关键信号，提到 INFO 让默认
+# 启动（root logger=WARNING）也能看见，跟 api.browser_bridge 一致。
+logger.setLevel(logging.INFO)
 
 
 REVIEWER_SYSTEM_PROMPT = """You are an **independent code reviewer** on a 2-agent system.
