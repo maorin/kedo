@@ -14,7 +14,7 @@ pydantic>=2.5.0
 # LLM Clients
 anthropic>=0.39.0
 httpx>=0.25.0
-# openai>=1.6.0       # 可选: OpenAI 支持
+openai>=1.6.0       # 必须：OpenAI / DeepSeek / OpenRouter 等 OpenAI 兼容 provider 都靠它
 
 # Configuration
 pyyaml>=6.0
