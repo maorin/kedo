@@ -1035,7 +1035,125 @@ class KedoREPL:
         else:
             err = result.get("error", "未知错误") if result else "服务无响应"
             print(f"  {ERROR}✗ 切换失败: {err}{C.RESET}")
+            print()
+            return
+
+        # 主 LLM 配好后，可选地配 Reviewer（双 Agent 二审）
         print()
+        try:
+            cfg_rev = input(
+                f"  {ACCENT}是否同时配置 Reviewer (双 Agent 二审，破 self-eval drift)? "
+                f"[y/N]: {C.RESET}"
+            ).strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print(f"\n  {MUTED}已跳过 Reviewer 配置{C.RESET}\n")
+            return
+        if cfg_rev in ("y", "yes"):
+            self._login_reviewer_flow(producer_provider=provider_id)
+        print()
+
+    def _login_reviewer_flow(self, producer_provider: str = ""):
+        """/login 之后追问 Reviewer 配置；写入 config.yaml，重启后生效。"""
+        import getpass
+
+        print()
+        print(banner("配置 Reviewer (建议选与 Producer 不同的厂商)", ACCENT))
+        print()
+
+        # Reviewer 候选清单 — 没有 mock，加 disable 选项
+        rev_providers = [
+            ("1", "anthropic", "Claude (Anthropic)",      "claude-sonnet-4-6", "ANTHROPIC_API_KEY"),
+            ("2", "deepseek",  "DeepSeek v4-pro (推荐)",   "deepseek-v4-pro",   "DEEPSEEK_API_KEY"),
+            ("3", "openai",    "OpenAI GPT-4o",            "gpt-4o",            "OPENAI_API_KEY"),
+            ("4", "kimi-code", "Kimi Code 2.5",            "kimi-k2.5",         "KIMI_API_KEY"),
+            ("5", "kimi",      "Kimi K2.5 (通用)",         "kimi-k2.5",         "KIMI_API_KEY"),
+            ("6", "none",      "禁用 Reviewer",            "-",                  None),
+        ]
+
+        for num, pid, label, mdl, _ in rev_providers:
+            warn_same = ""
+            if producer_provider and pid not in ("none",):
+                # 提示 producer 与 reviewer 同厂商时风险
+                same = (
+                    pid == producer_provider
+                    or (producer_provider in ("kimi", "kimi-code") and pid in ("kimi", "kimi-code"))
+                )
+                if same:
+                    warn_same = f"  {WARN}(与 Producer 同厂商，效果有限){C.RESET}"
+            print(f"  {ACCENT}{C.BOLD}{num}{C.RESET}  {label}  {MUTED}({mdl}){C.RESET}{warn_same}")
+        print()
+
+        try:
+            choice = input(f"  {ACCENT}选择 Reviewer 提供商 [1-6]: {C.RESET}").strip()
+        except (KeyboardInterrupt, EOFError):
+            print(f"\n  {MUTED}已取消 Reviewer 配置{C.RESET}\n")
+            return
+
+        selected = None
+        for num, pid, label, mdl, env_key in rev_providers:
+            if choice == num or choice.lower() == pid:
+                selected = (pid, label, mdl, env_key)
+                break
+        if not selected:
+            print(f"  {ERROR}无效选择，已取消 Reviewer 配置{C.RESET}\n")
+            return
+
+        rev_pid, rev_label, default_model, env_key = selected
+
+        if rev_pid == "none":
+            result = self._api_post("/llm/switch-reviewer", {"provider": "none"})
+            if result and result.get("success"):
+                print(f"  {SUCCESS}✓ {result.get('message', 'Reviewer 已禁用')}{C.RESET}")
+            else:
+                err = result.get("error", "未知错误") if result else "服务无响应"
+                print(f"  {ERROR}✗ {err}{C.RESET}")
+            return
+
+        # API Key 输入：复用 producer 同种逻辑
+        import os
+        existing_key = os.environ.get(env_key, "") if env_key else ""
+        api_key = ""
+        if existing_key:
+            masked = (existing_key[:8] + "..." + existing_key[-4:]) if len(existing_key) > 12 else "***"
+            print(f"  {MUTED}检测到 {env_key}: {masked}{C.RESET}")
+            try:
+                use_existing = input(f"  {ACCENT}使用此 Key 作为 Reviewer Key? [Y/n]: {C.RESET}").strip().lower()
+            except (KeyboardInterrupt, EOFError):
+                print(f"\n  {MUTED}已取消{C.RESET}\n")
+                return
+            if use_existing in ("", "y", "yes"):
+                api_key = existing_key
+        if not api_key:
+            try:
+                api_key = getpass.getpass(f"  {ACCENT}输入 Reviewer API Key: {C.RESET}")
+            except (KeyboardInterrupt, EOFError):
+                print(f"\n  {MUTED}已取消{C.RESET}\n")
+                return
+        if not api_key:
+            print(f"  {ERROR}未输入 API Key，已取消{C.RESET}\n")
+            return
+
+        # 模型可选
+        try:
+            custom_model = input(
+                f"  {ACCENT}Reviewer 模型 (回车默认 {default_model}): {C.RESET}"
+            ).strip()
+        except (KeyboardInterrupt, EOFError):
+            custom_model = ""
+        rev_model = custom_model if custom_model else default_model
+
+        print(f"\n  {BRAND}⟳ 正在保存 Reviewer 配置...{C.RESET}")
+        result = self._api_post("/llm/switch-reviewer", {
+            "provider": rev_pid,
+            "api_key": api_key,
+            "model": rev_model,
+        })
+        if result and result.get("success"):
+            print(f"  {SUCCESS}✓ {result.get('message', '已保存')}{C.RESET}")
+            print(f"  {WARN}⚠ Reviewer 不支持热切换，请重启 kedo (kill server + 重新启动) 生效{C.RESET}")
+        else:
+            err = result.get("error", "未知错误") if result else "服务无响应"
+            print(f"  {ERROR}✗ Reviewer 配置失败: {err}{C.RESET}")
 
     def _cmd_web(self, _=""):
         url = f"{self._scheme}://{self._api_host}:{self.port}"

@@ -713,11 +713,9 @@ async def get_llm_status():
     }
 
 
-def _persist_llm_config(switch_config: dict) -> tuple[bool, str]:
-    """
-    把 LLM 配置合并写入 ~/.config/kedo/config.yaml，下次启动自动恢复。
-    只持久化 LLM 相关字段，其他字段保留不动。文件权限 0600（含 api key）。
-    """
+def _persist_to_config_yaml(updates: dict, allowed_keys: tuple) -> tuple[bool, str]:
+    """通用持久化：把 updates 里匹配 allowed_keys 的非空字段合并写入 ~/.config/kedo/config.yaml。
+    保留其他字段不动。文件权限 0600（含 api key）。"""
     try:
         import yaml  # type: ignore
     except ImportError:
@@ -733,16 +731,10 @@ def _persist_llm_config(switch_config: dict) -> tuple[bool, str]:
         except Exception as e:
             return False, f"读取已有配置失败: {e}"
 
-    # 只合并 LLM 相关字段
-    keys = (
-        "llm_provider", "model",
-        "anthropic_api_key", "kimi_api_key", "kimi_base_url", "openai_api_key",
-        "deepseek_api_key", "deepseek_base_url",
-    )
     changed = False
-    for k in keys:
-        if k in switch_config and switch_config[k]:
-            existing[k] = switch_config[k]
+    for k in allowed_keys:
+        if k in updates and updates[k] not in (None, ""):
+            existing[k] = updates[k]
             changed = True
     if not changed:
         return True, "无需持久化"
@@ -754,6 +746,24 @@ def _persist_llm_config(switch_config: dict) -> tuple[bool, str]:
         return True, str(cfg_path)
     except Exception as e:
         return False, f"写入失败: {e}"
+
+
+def _persist_llm_config(switch_config: dict) -> tuple[bool, str]:
+    """主 LLM 持久化入口（保留为兼容旧调用名）。"""
+    return _persist_to_config_yaml(switch_config, (
+        "llm_provider", "model",
+        "anthropic_api_key", "kimi_api_key", "kimi_base_url", "openai_api_key",
+        "deepseek_api_key", "deepseek_base_url",
+    ))
+
+
+def _persist_reviewer_config(reviewer_config: dict) -> tuple[bool, str]:
+    """Reviewer 持久化：reviewer_provider / reviewer_model / reviewer_api_key /
+    reviewer_base_url / reviewer_min_score。"""
+    return _persist_to_config_yaml(reviewer_config, (
+        "reviewer_provider", "reviewer_model", "reviewer_api_key",
+        "reviewer_base_url", "reviewer_min_score",
+    ))
 
 
 @router.post("/llm/validate")
@@ -796,6 +806,76 @@ async def validate_llm_key(req: dict = Body(...)):
             "error": None if ok else msg,
         }
     return {"success": False, "error": f"暂不支持校验 provider={provider}"}
+
+
+@router.post("/llm/switch-reviewer")
+async def switch_reviewer(req: dict = Body(...)):
+    """
+    配置 Reviewer (二审 Agent) 的独立 LLM 并持久化到 ~/.config/kedo/config.yaml。
+
+    Body: {"provider": "deepseek"|"anthropic"|"kimi"|"kimi-code"|"openai"|"mock"|"none",
+           "api_key": "...", "model": "...", "base_url": "..."}
+
+    persist 之后**必须重启 kedo 才生效** —— Reviewer 实例在 ReactAgent /
+    EvaluateTool / CommitCandidateTool 三处持有引用，热切换不稳定。
+    provider="none" 用于禁用 Reviewer。
+    """
+    provider = (req.get("provider") or "").strip().lower()
+    api_key = (req.get("api_key") or "").strip()
+    model = (req.get("model") or "").strip()
+    base_url = (req.get("base_url") or "").strip()
+
+    if provider in ("", "none", "off", "disabled"):
+        ok, msg = _persist_reviewer_config({"reviewer_provider": "none"})
+        if not ok:
+            return {"success": False, "error": msg}
+        return {
+            "success": True,
+            "provider": "none",
+            "message": f"Reviewer 已禁用，配置写入 {msg}，重启 kedo 后生效",
+        }
+
+    valid = {"anthropic", "claude", "kimi", "kimi-code", "deepseek", "openai", "mock"}
+    if provider not in valid:
+        return {"success": False, "error": f"不支持的 reviewer provider: {provider}"}
+
+    canon = "anthropic" if provider == "claude" else provider
+    needs_key = canon not in ("mock", "ollama")
+
+    if needs_key and not api_key:
+        return {"success": False, "error": f"reviewer_provider={canon} 需要 api_key"}
+
+    # 可选：本地 key 格式校验（不发网络请求，避免 /login 卡顿）
+    if api_key and canon == "anthropic":
+        from api.server import AnthropicClient
+        ok, msg = AnthropicClient.validate_key_format(api_key)
+        if not ok:
+            return {"success": False, "error": f"API Key 格式校验失败: {msg}"}
+    if api_key and canon == "deepseek":
+        from api.server import DeepseekClient
+        ok, msg = DeepseekClient.validate_key_format(api_key)
+        if not ok:
+            return {"success": False, "error": f"API Key 格式校验失败: {msg}"}
+
+    reviewer_config: dict = {"reviewer_provider": canon}
+    if api_key:
+        reviewer_config["reviewer_api_key"] = api_key
+    if model:
+        reviewer_config["reviewer_model"] = model
+    if base_url:
+        reviewer_config["reviewer_base_url"] = base_url
+
+    ok, msg = _persist_reviewer_config(reviewer_config)
+    if not ok:
+        return {"success": False, "error": msg}
+
+    return {
+        "success": True,
+        "provider": canon,
+        "model": model or "(provider 默认)",
+        "message": f"Reviewer 配置已写入 {msg}，重启 kedo 后生效",
+        "needs_restart": True,
+    }
 
 
 @router.post("/llm/swap-roles")
