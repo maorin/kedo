@@ -138,10 +138,39 @@ async def create_task(req: CreateTaskRequest):
     )
 
 
+_SECRET_KEY_PATTERNS = ("api_key", "_token", "_secret", "_password")
+
+
+def _is_secret_key(key: str) -> bool:
+    kl = (key or "").lower()
+    return any(p in kl for p in _SECRET_KEY_PATTERNS)
+
+
+def _mask_secret_value(v):
+    if not isinstance(v, str) or not v:
+        return v
+    if len(v) > 12:
+        return v[:6] + "..." + v[-4:]
+    return "***"
+
+
+def _redact_secrets(d):
+    """Recursively mask secret-looking string fields before HTTP serialization.
+    Used to prevent api_key leakage in /tasks and similar config-exposing endpoints."""
+    if isinstance(d, dict):
+        return {
+            k: (_mask_secret_value(v) if _is_secret_key(k) else _redact_secrets(v))
+            for k, v in d.items()
+        }
+    if isinstance(d, list):
+        return [_redact_secrets(x) for x in d]
+    return d
+
+
 @router.get("/tasks", response_model=list[dict])
 async def list_tasks():
-    """列出所有任务"""
-    return _state_manager.list_tasks()
+    """列出所有任务（含配置；api_key 等 secret 字段已 mask 防 HTTP leak）"""
+    return [_redact_secrets(t) for t in _state_manager.list_tasks()]
 
 
 @router.get("/tasks/resumable")
