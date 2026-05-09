@@ -46,6 +46,9 @@ from tools.static_check import StaticCheckTool
 from tools.test_runner import TestRunnerTool
 
 logger = logging.getLogger(__name__)
+# 启动期 INFO 日志（如 "Reviewer Agent active: provider=..." / Tool registered:）
+# 在 root=WARNING 下默认看不见。统一提到 INFO 方便诊断。
+logger.setLevel(logging.INFO)
 
 
 def create_app(config: dict = None) -> FastAPI:
