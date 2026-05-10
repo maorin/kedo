@@ -1,6 +1,6 @@
 # kedo Roadmap
 
-> **状态**：滚动更新的工作文档，不是承诺。最后更新 **2026-05-09**（M3 + 双 Agent 实战完成，进 M3.5）。
+> **状态**：滚动更新的工作文档，不是承诺。最后更新 **2026-05-10**（M3.5 暂搁置，待办）。
 >
 > 本文是"现在做什么、下一步做什么、为什么"的清单。架构层面的"为什么"详见 `deep-dives/`，里程碑实现细节看对应 design 文档与 commit。
 >
@@ -19,7 +19,7 @@
 
 **下一周期**重点（按优先级）：
 1. ✅ Browser Bridge **M3** + 双 Agent 实战通了（2026-05-09）
-2. ⏳ Browser Bridge **M3.5**（测试用例自动执行）— 用 ReactAgent prompt 驱动跑 14 模块 TC，验证可行性后决定要不要做专用工具
+2. ⏸ Browser Bridge **M3.5**（测试用例自动执行）— 暂搁置，重启时直接做路径 B `run_test_cases` 专用工具
 3. ⏳ Browser Bridge **M4**（隔离 profile + `browser_research` 高层工具）
 4. 主 dashboard 整合 Inbox 工作流（避免独立 URL）
 5. 探索 **kedo 作为 skill** 暴露（让 Claude Code / Cursor 远程调用）
@@ -79,7 +79,7 @@
 - ✅ 自动生成 14 模块测试用例文档（76KB）
 - ✅ 期间修了 4 个 bug：tab_id=0 / openai 必需 dep / api_key leak / logger INFO（commits `7dedae4` `78711ad` `2619e5e` `ee84d3e`）
 
-### M3.5 — 测试用例自动执行（⏳ 进行中 2026-05-09）
+### M3.5 — 测试用例自动执行（⏸ 暂搁置 2026-05-10，待办）
 
 **用例：** 把 M3 写出的测试用例 markdown 让 ReactAgent **自动执行** —— 不只生成文档而是真跑测试。
 
@@ -101,9 +101,21 @@
 - **路径 A**：纯 ReactAgent prompt 驱动（task 描述里说"按 TC 一条条跑"）。最快验证，不写代码。
 - **路径 B**：加专用 `run_test_cases(md_file, tc_id)` 工具。300 行 Python，1-2 天，更稳。
 
-**当前进度：** 路径 A 在试，task `08079a68` plan_development 已生成 6 子任务，正在读 14 个 md。
+**当前进度（2026-05-10 暂搁置）：** 路径 A 试到一半（task `08079a68`）。撞到的具体情况：
+- agent 14 个 md 全读取后 plan_development 出 6 子任务，但具体执行步骤进度慢、context 很快塞满
+- 14 模块 × 平均 5 TC ≈ 70 个 TC，单 task 跑完成本太高
+- 密码硬规则 + 收敛检测误伤 + LLM 走捷径多重叠加，纯 prompt 驱动不稳
 
-**估时：** 路径 A 验证 1-2 天；如果走路径 B 加 2-3 天
+**重启时建议直接走路径 B**：写专用 `run_test_cases(md_file, tc_id="all")` 工具：
+- markdown TC 章节解析 (regex `^## TC-[A-Z]+-\d+`)
+- 步骤 → 浏览器动作映射（点击【X】按钮 → click text_match=X / 输入"Y" → type value=Y）
+- 预期结果 → query 验证 + 截图比对
+- per-case PASS/FAIL + screenshot on fail + 汇总 results.json
+- isolation：一 TC 失败不影响下一个（重置到登录态 dashboard）
+
+工作量 1-2 天，重启时再开。
+
+**估时：** 路径 B 重启时 1-2 天
 
 ### M4 — 隔离 profile + `browser_research`（⏳）
 
@@ -175,7 +187,8 @@
 
 ```
 ✅ Done (2026-05-08~09):  M1 (通道) + M2 (只读) + M3 (写+权限+双Agent) + 14 模块测试文档自动生成
-Week 1:     Browser Bridge M3.5 (测试执行) — 路径 A (ReactAgent prompt) 验证 → 必要时路径 B 加 run_test_cases 工具
+⏸ Parked (2026-05-10):    M3.5 (测试执行) — 路径 A 实战不稳，待重启时走路径 B (run_test_cases 工具)
+Week 1-2:   M4 (隔离 profile + browser_research) 或 主 dashboard 整合 Inbox（看哪个更紧）
 Week 2:     Browser Bridge M3 (写控制 + Tier-2 权限) [legacy entry, ignore]
 Week 3:     Browser Bridge M4 (隔离 profile + browser_research)
 Week 4:     主 dashboard 整合 Inbox + 收尾打磨
