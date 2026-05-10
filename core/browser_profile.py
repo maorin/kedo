@@ -180,6 +180,12 @@ class IsolatedBrowserProfile:
         # the service worker (running with chrome-extension://<id>/ origin) can fetch it.
         self._patch_manifest_for_agent_config()
 
+        # Kill any orphan chrome processes still holding our user-data-dir
+        # (typical after a previous kedo crash or kill -9 not propagating to chrome)
+        # —— if a stale chrome locks PROFILE_DIR, our new chrome silently exits
+        # because the profile is already in use.
+        self._kill_orphan_chrome()
+
         # Fresh user-data-dir each time → forces chrome.runtime.onInstalled to fire,
         # which is one of two SW-wake paths (the other is content_script.cs_loaded).
         # Cookies/cache lost between sessions is fine for research use case.
@@ -231,6 +237,39 @@ class IsolatedBrowserProfile:
             stdin=subprocess.DEVNULL,
             preexec_fn=os.setsid if os.name != "nt" else None,
         )
+
+    def _kill_orphan_chrome(self) -> None:
+        """Find chrome processes using our PROFILE_DIR and kill them.
+
+        Used before spawning a new isolated chrome — chrome locks the
+        user-data-dir and a stale process here causes our new launch to
+        silently exit.
+        """
+        try:
+            # pgrep with literal -f matching of the directory path; no regex meta chars
+            result = subprocess.run(
+                ["pgrep", "-f", f"--user-data-dir={PROFILE_DIR}"],
+                capture_output=True, text=True, timeout=3,
+            )
+            pids = [
+                int(line.strip())
+                for line in result.stdout.splitlines()
+                if line.strip().isdigit()
+            ]
+        except Exception as exc:
+            logger.debug(f"browser_profile: pgrep orphan check failed: {exc}")
+            return
+        if not pids:
+            return
+        logger.info(f"browser_profile: killing {len(pids)} orphan chrome process(es): {pids}")
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                logger.warning(f"browser_profile: kill {pid} failed: {exc}")
+        time.sleep(1.0)  # give chrome a moment to release file locks
 
     def _bootstrap_url(self) -> str:
         """Convert ws://host:port/api/ws/browser → http://host:port/api/browser-bridge/agent-bootstrap"""
