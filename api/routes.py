@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Body, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 
 from api.schemas import (
     CandidateListResponse,
@@ -2683,6 +2684,25 @@ async def delete_inbox_item(item_id: str):
     if not ok:
         raise HTTPException(404, f"inbox item {item_id} not found")
     return {"ok": True}
+
+
+@router.get("/browser-bridge/agent-bootstrap", response_class=HTMLResponse)
+async def browser_bridge_agent_bootstrap():
+    """Tiny page kedo opens in the isolated chrome on launch. Its purpose is
+    to trigger the kedo-browser-bridge content_script injection (matches
+    <all_urls>) which then sends a wake-up message to the extension's
+    service worker. Without this, headless chrome's MV3 SW stays dormant
+    and ws never connects."""
+    return HTMLResponse(
+        "<!doctype html><html><head><title>kedo agent bootstrap</title></head>"
+        "<body style='font-family:system-ui;padding:24px;'>"
+        "<h2>kedo agent profile bootstrap</h2>"
+        "<p>This page exists to wake the kedo-browser-bridge service worker."
+        " You can close this tab.</p>"
+        "<p>If the agent never connects, check kedo logs for "
+        "<code>browser_bridge: session XXX role=agent</code>.</p>"
+        "</body></html>"
+    )
 
 
 @router.get("/browser-bridge/status")

@@ -180,6 +180,11 @@ class IsolatedBrowserProfile:
         # the service worker (running with chrome-extension://<id>/ origin) can fetch it.
         self._patch_manifest_for_agent_config()
 
+        # Fresh user-data-dir each time → forces chrome.runtime.onInstalled to fire,
+        # which is one of two SW-wake paths (the other is content_script.cs_loaded).
+        # Cookies/cache lost between sessions is fine for research use case.
+        if PROFILE_DIR.exists():
+            shutil.rmtree(PROFILE_DIR)
         PROFILE_DIR.parent.mkdir(parents=True, exist_ok=True)
 
         # Headless by default — kedo typically runs as a daemon (no $DISPLAY); a
@@ -193,6 +198,13 @@ class IsolatedBrowserProfile:
             if headed
             else ["--headless=new", "--disable-gpu", "--no-sandbox"]
         )
+        # Open a kedo-served HTTP page on launch, NOT about:blank —— headless
+        # chrome's MV3 service worker won't auto-start without an event. Loading a
+        # real URL triggers content_script injection (matches <all_urls>); the CS
+        # then sends a wake-up message to the SW, which calls ensureClient() and
+        # connects via ws.
+        bootstrap_url = self._bootstrap_url()
+
         cmd = [
             chrome,
             *mode_flags,
@@ -203,7 +215,7 @@ class IsolatedBrowserProfile:
             "--disable-background-timer-throttling",
             "--disable-backgrounding-occluded-windows",
             "--disable-renderer-backgrounding",
-            "about:blank",
+            bootstrap_url,
         ]
         logger.info(
             f"browser_profile: launching chrome (headless={not headed}): "
@@ -219,6 +231,12 @@ class IsolatedBrowserProfile:
             stdin=subprocess.DEVNULL,
             preexec_fn=os.setsid if os.name != "nt" else None,
         )
+
+    def _bootstrap_url(self) -> str:
+        """Convert ws://host:port/api/ws/browser → http://host:port/api/browser-bridge/agent-bootstrap"""
+        base = self._ws_url.replace("ws://", "http://").replace("wss://", "https://")
+        host_part = base.split("/api/", 1)[0]  # http://host:port
+        return f"{host_part}/api/browser-bridge/agent-bootstrap"
 
     def _patch_manifest_for_agent_config(self) -> None:
         """Append kedo-config.json to web_accessible_resources so SW can fetch it."""
