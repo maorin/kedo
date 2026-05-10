@@ -629,37 +629,46 @@ class BrowserResearchTool(_BrowserToolBase):
     ) -> ToolResult:
         if not query or not str(query).strip():
             return ToolResult(success=False, error="query required")
-        if self._profile is None:
-            return ToolResult(
-                success=False,
-                error="agent isolated profile not configured — set KEDO_AGENT_EXT_PATH "
-                      "and ensure kedo-browser-bridge dist exists",
-            )
 
-        try:
-            await self._profile.ensure_running(timeout=20.0)
-        except Exception as exc:
-            return ToolResult(success=False, error=f"agent profile spawn failed: {exc}")
+        # Try isolated agent profile first (M4 design: don't pollute user login state).
+        # Fall back to user session if isolation is unavailable (e.g. Linux Google
+        # Chrome 137+ blocks --load-extension, sudo policy not configured, etc.).
+        # Read-only research doesn't strictly need isolation — domains hit are public
+        # search engines + docs sites; the M3 Tier-1 permission layer (allowlist /
+        # 30min trust window) protects user from agent doing surprising navigations.
+        prefer_role = "user"
+        used_isolation = False
+        if self._profile is not None:
+            try:
+                await self._profile.ensure_running(timeout=15.0)
+                prefer_role = "agent"
+                used_isolation = True
+            except Exception as exc:
+                logger.info(
+                    f"browser_research: isolated agent profile unavailable ({exc}); "
+                    f"falling back to user session (read-only research is OK without "
+                    f"isolation; M3 permission layer still gates non-allowlist domains)"
+                )
 
         max_pages = max(1, min(int(max_pages or 3), 5))
         search_url, result_selector = self._search_url(search_engine, query)
 
         # 1) Navigate to search results
-        nav = await self._send_command("navigate", {"url": search_url}, prefer_role="agent", timeout=30)
+        nav = await self._send_command("navigate", {"url": search_url}, prefer_role=prefer_role, timeout=30)
         if not nav.success:
             return nav
         # Brief wait for results JS to render
         await self._send_command(
             "wait_for",
             {"selector": result_selector, "timeout_ms": 8000},
-            prefer_role="agent", timeout=10,
+            prefer_role=prefer_role, timeout=10,
         )
 
         # 2) Pull result links
         q = await self._send_command(
             "query",
             {"selector": result_selector, "limit": max_pages * 2},
-            prefer_role="agent", timeout=10,
+            prefer_role=prefer_role, timeout=10,
         )
         if not q.success:
             return q
@@ -689,11 +698,11 @@ class BrowserResearchTool(_BrowserToolBase):
         # 3) Navigate + extract each
         pages: list[dict] = []
         for url in links:
-            nav = await self._send_command("navigate", {"url": url}, prefer_role="agent", timeout=30)
+            nav = await self._send_command("navigate", {"url": url}, prefer_role=prefer_role, timeout=30)
             if not nav.success:
                 pages.append({"url": url, "error": nav.error})
                 continue
-            ext = await self._send_command("extract", {}, prefer_role="agent", timeout=10)
+            ext = await self._send_command("extract", {}, prefer_role=prefer_role, timeout=10)
             if ext.success and ext.data:
                 pages.append({
                     "url": url,
@@ -704,12 +713,19 @@ class BrowserResearchTool(_BrowserToolBase):
             else:
                 pages.append({"url": url, "error": ext.error or "extract failed"})
 
-        self._profile.mark_activity()
+        if used_isolation and self._profile is not None:
+            self._profile.mark_activity()
 
         return ToolResult(
             success=True,
-            output=self._summarize_pages(pages, query),
-            data={"query": query, "search_engine": search_engine, "pages": pages},
+            output=self._summarize_pages(pages, query, used_isolation),
+            data={
+                "query": query,
+                "search_engine": search_engine,
+                "session_role": prefer_role,
+                "isolation_used": used_isolation,
+                "pages": pages,
+            },
         )
 
     async def _send_command(
@@ -742,9 +758,10 @@ class BrowserResearchTool(_BrowserToolBase):
         return f"https://duckduckgo.com/?q={quote(query)}", "a.result__a, h2 a"
 
     @staticmethod
-    def _summarize_pages(pages: list[dict], query: str) -> str:
+    def _summarize_pages(pages: list[dict], query: str, isolation_used: bool = False) -> str:
         ok = sum(1 for p in pages if "error" not in p)
-        lines = [f"research[{query!r}]: {ok}/{len(pages)} pages extracted"]
+        mode = "isolated agent profile" if isolation_used else "user browser session"
+        lines = [f"research[{query!r}] via {mode}: {ok}/{len(pages)} pages extracted"]
         for p in pages:
             if "error" in p:
                 lines.append(f" ✗ {p['url']} — {p['error']}")

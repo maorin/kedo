@@ -106,9 +106,19 @@ def _matches_allowlist(domain: str, allowlist: set[str]) -> bool:
 
 
 _DEFAULT_ALLOWLIST = [
+    # 本地服务
     "localhost",
     "127.0.0.1",
+    # 嵌入式开发文档
     "*.devkitpro.org",
+    # browser_research 常用搜索引擎和参考站点 — 预填减少首次研究时反复弹窗
+    "duckduckgo.com",
+    "*.duckduckgo.com",
+    "github.com",
+    "stackoverflow.com",
+    "*.stackoverflow.com",
+    "*.wikipedia.org",
+    "*.mozilla.org",
 ]
 
 

@@ -1,6 +1,6 @@
 # kedo Roadmap
 
-> **状态**：滚动更新的工作文档，不是承诺。最后更新 **2026-05-10**（M3.5 暂搁置，待办）。
+> **状态**：滚动更新的工作文档，不是承诺。最后更新 **2026-05-10**（M4 局部完成，路径 A fallback 实战通过）。
 >
 > 本文是"现在做什么、下一步做什么、为什么"的清单。架构层面的"为什么"详见 `deep-dives/`，里程碑实现细节看对应 design 文档与 commit。
 >
@@ -20,7 +20,7 @@
 **下一周期**重点（按优先级）：
 1. ✅ Browser Bridge **M3** + 双 Agent 实战通了（2026-05-09）
 2. ⏸ Browser Bridge **M3.5**（测试用例自动执行）— 暂搁置，重启时直接做路径 B `run_test_cases` 专用工具
-3. ⏳ Browser Bridge **M4**（隔离 profile + `browser_research` 高层工具）
+3. 🔄 Browser Bridge **M4** 局部完成（基础设施齐 + browser_research 路径 A 实战通了；真隔离 chrome 启动 Linux Google Chrome 阻塞，待真需求来时迁 Playwright）
 4. 主 dashboard 整合 Inbox 工作流（避免独立 URL）
 5. 探索 **kedo 作为 skill** 暴露（让 Claude Code / Cursor 远程调用）
 
@@ -117,18 +117,38 @@
 
 **估时：** 路径 B 重启时 1-2 天
 
-### M4 — 隔离 profile + `browser_research`（⏳）
+### M4 — 隔离 profile + `browser_research`（🔄 局部完成 2026-05-10）
 
-**范围：**
-- `core/browser_profile.py` 启动 headed Chrome 实例（独立 user-data-dir）
-- 同插件 role=agent 模式（启动时通过 EXTENSION_DIR/kedo-config.json 指定）
-- 高层工具 `browser_research(query, max_pages=3)` 内部展开为多步 navigate + extract
-- BrowserBridge 区分 user_session / agent_session，工具 `prefer_role` 自动路由
-- 空闲 30 分钟自动关闭隔离 chrome
+**已交付（基础设施）：**
+- `core/browser_profile.py` `IsolatedBrowserProfile` 完整实现：spawn chrome + 独立 user-data-dir + 写 kedo-config.json + 30min 闲置自动关 + 孤儿 chrome 清理
+- 双 token：`~/.config/kedo/browser_token` (user) + `~/.config/kedo/browser_token_agent` (agent)
+- BrowserBridge `_role_for_token` server-authoritative role 判定
+- 插件 v0.4.1：getConfig 双路径（kedo-config.json fallback chrome.storage.local）+ cs_loaded SW 唤醒
+- 协议升 1.3
+- `browser_research(query, max_pages, search_engine)` 高层工具
+- 默认 allowlist 预填 duckduckgo / github / stackoverflow / wikipedia / mozilla 减少弹窗
 
-**用例：** ReactAgent build 失败 → 自调 `browser_research("libnx audoutInitialize -19")` → 从 stackoverflow / wiki 取 3 篇相关问答 → 改对代码
+**实战遇阻（Linux Google Chrome 137+）：**
+- `--load-extension` 被 Chrome policy 静默忽略（"is not allowed in Google Chrome, ignoring."）
+- `--disable-extensions-except` 配对也被拒
+- 没有任何命令行 flag 能从 Google Chrome 借出 dev mode
+- → 隔离 chrome 启动后插件不加载，agent ws session 永远连不上
 
-**估时：** 5-7 天
+**当前实战路径（路径 A 自动 fallback）：**
+- `BrowserResearchTool` 优先尝试 isolated profile，失败时**自动降级 prefer_role="user"**
+- 走主浏览器 session + M3 Tier-1 权限层（首次访问域名要点 Trust）
+- audit log 全程记录、allowlist 持久化
+- 实测在 192.168.1.162 跑通 `browser_research("libnx audoutInitialize -19 error")`
+
+**真正"隔离 chrome 启动"待解（任一即可）：**
+- 装 Chromium / Brave / Edge 二进制（无 Google policy 限制），改 `_find_chrome_binary` 优先级
+- 装 Chrome enterprise policy（需 sudo 写 `/etc/opt/chrome/policies/managed/*.json`）
+- 迁 Playwright（自带 chromium 无限制，~1 天重构 + 150MB 依赖）
+
+**当前结论：**
+- M4 设计的"isolation"对 read-only research 不是硬需求 → 路径 A 已够用
+- 真正硬需"isolation"的场景（自动化测试 / 专用账号代理）尚未上路线图
+- 那些场景上来时再认真投资 Playwright 或 Brave，**而不是**继续在 Google Chrome 上抠 flag
 
 ### M5 — 跨浏览器 + 录制回放（探索）
 
