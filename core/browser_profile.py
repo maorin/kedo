@@ -204,12 +204,14 @@ class IsolatedBrowserProfile:
             if headed
             else ["--headless=new", "--disable-gpu", "--no-sandbox"]
         )
-        # Chrome 137+ added a policy that silently ignores `--load-extension` in
-        # Google Chrome (not Chromium) outside of dev mode. Without this flag we
-        # see in chrome's stderr:
-        #     "--load-extension is not allowed in Google Chrome, ignoring."
-        # and the kedo-browser-bridge plugin never loads → no agent ws session.
-        mode_flags.append("--disable-features=DisableLoadExtensionCommandLineSwitch")
+        # Chrome 137+ silently ignores `--load-extension` in Google Chrome unless
+        # we also pass `--disable-extensions-except=<path>` — the pair triggers
+        # Chrome's "developer mode" detection (the warning we'd see otherwise:
+        # "--load-extension is not allowed in Google Chrome, ignoring.")
+        # Note: the simpler `--disable-features=DisableLoadExtensionCommandLineSwitch`
+        # I tried first did NOT work — the policy is enforced via dev-mode
+        # detection, not a feature flag.
+        mode_flags.append(f"--disable-extensions-except={EXTENSION_PACK_DIR}")
         # Open a kedo-served HTTP page on launch, NOT about:blank —— headless
         # chrome's MV3 service worker won't auto-start without an event. Loading a
         # real URL triggers content_script injection (matches <all_urls>); the CS
