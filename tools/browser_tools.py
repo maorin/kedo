@@ -560,3 +560,195 @@ class BrowserWaitForTool(_BrowserToolBase):
             f"wait_for: found={data.get('found')} "
             f"elapsed={data.get('elapsed_ms')}ms count={data.get('count')}"
         )
+
+
+class BrowserResearchTool(_BrowserToolBase):
+    """High-level research tool — agent's own isolated chrome (M4).
+
+    Workflow:
+    1. Ensure isolated agent profile is alive (lazy-spawns kedo-launched chrome
+       with --user-data-dir + bundled extension that reports role=agent).
+    2. Search the query on a search engine (DuckDuckGo by default — no captcha,
+       no login wall, friendly to scraping).
+    3. Take top N result links, navigate each, run Readability extraction.
+    4. Return aggregated {title, url, text} list.
+
+    Why this, not a search API: kedo agent often hits build/lib problems where
+    the answer is buried in stackoverflow / GitHub issues / project docs — not
+    indexed cleanly by any single API. A real browser sees the actual page,
+    handles JS-rendered content, follows redirects, etc.
+    """
+
+    def __init__(self, bridge, profile_manager, policy=None):
+        super().__init__(bridge, policy=policy)
+        self._profile = profile_manager  # core.browser_profile.IsolatedBrowserProfile
+
+    @property
+    def name(self) -> str:
+        return "browser_research"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Search the web on the agent's own isolated Chrome profile and return "
+            "extracted text from the top N result pages. Use when build/test fails "
+            "and you need real documentation — not stackoverflow API, not anthropic "
+            "search, but actual page content. Runs in a sandboxed Chrome separate from "
+            "the user's main browser, so cookies/login state are never touched. "
+            "The isolated profile auto-launches on first call and auto-closes after "
+            "30 min idle. Returns a list of {url, title, text, length}."
+        )
+
+    @property
+    def parameters(self) -> list[ToolParameter]:
+        return [
+            ToolParameter(name="query", type="string", description="Search query"),
+            ToolParameter(
+                name="max_pages", type="integer",
+                description="Max result pages to extract (default 3, max 5)",
+                required=False, default=3,
+            ),
+            ToolParameter(
+                name="search_engine", type="string",
+                description="'duckduckgo' (default) / 'google' / 'bing'",
+                required=False, default="duckduckgo",
+            ),
+        ]
+
+    @property
+    def is_read_only(self) -> bool:
+        # Spawning isolated chrome is a side effect, but no user state is mutated.
+        return True
+
+    async def execute(
+        self,
+        query: str,
+        max_pages: int = 3,
+        search_engine: str = "duckduckgo",
+        **_,
+    ) -> ToolResult:
+        if not query or not str(query).strip():
+            return ToolResult(success=False, error="query required")
+        if self._profile is None:
+            return ToolResult(
+                success=False,
+                error="agent isolated profile not configured — set KEDO_AGENT_EXT_PATH "
+                      "and ensure kedo-browser-bridge dist exists",
+            )
+
+        try:
+            await self._profile.ensure_running(timeout=20.0)
+        except Exception as exc:
+            return ToolResult(success=False, error=f"agent profile spawn failed: {exc}")
+
+        max_pages = max(1, min(int(max_pages or 3), 5))
+        search_url, result_selector = self._search_url(search_engine, query)
+
+        # 1) Navigate to search results
+        nav = await self._send_command("navigate", {"url": search_url}, prefer_role="agent", timeout=30)
+        if not nav.success:
+            return nav
+        # Brief wait for results JS to render
+        await self._send_command(
+            "wait_for",
+            {"selector": result_selector, "timeout_ms": 8000},
+            prefer_role="agent", timeout=10,
+        )
+
+        # 2) Pull result links
+        q = await self._send_command(
+            "query",
+            {"selector": result_selector, "limit": max_pages * 2},
+            prefer_role="agent", timeout=10,
+        )
+        if not q.success:
+            return q
+
+        matches = (q.data or {}).get("matches", []) if q.data else []
+        # Filter: must have href, prefer external (not search engine itself)
+        links: list[str] = []
+        seen = set()
+        for m in matches:
+            href = m.get("href")
+            if not href or href in seen:
+                continue
+            if any(domain in href for domain in ("duckduckgo.com", "google.com/search", "bing.com/search")):
+                continue
+            seen.add(href)
+            links.append(href)
+            if len(links) >= max_pages:
+                break
+
+        if not links:
+            return ToolResult(
+                success=False,
+                error=f"no result links found on {search_engine} for query={query!r}",
+                data={"search_url": search_url, "raw_matches": matches[:5]},
+            )
+
+        # 3) Navigate + extract each
+        pages: list[dict] = []
+        for url in links:
+            nav = await self._send_command("navigate", {"url": url}, prefer_role="agent", timeout=30)
+            if not nav.success:
+                pages.append({"url": url, "error": nav.error})
+                continue
+            ext = await self._send_command("extract", {}, prefer_role="agent", timeout=10)
+            if ext.success and ext.data:
+                pages.append({
+                    "url": url,
+                    "title": ext.data.get("title", ""),
+                    "text": (ext.data.get("text_content") or "")[:8000],
+                    "length": ext.data.get("length", 0),
+                })
+            else:
+                pages.append({"url": url, "error": ext.error or "extract failed"})
+
+        self._profile.mark_activity()
+
+        return ToolResult(
+            success=True,
+            output=self._summarize_pages(pages, query),
+            data={"query": query, "search_engine": search_engine, "pages": pages},
+        )
+
+    async def _send_command(
+        self, action: str, params: dict, prefer_role: str = "agent", timeout: float = 30,
+    ):
+        try:
+            resp = await self._bridge.send_command(
+                action, params, prefer_role=prefer_role, timeout=timeout,
+            )
+        except Exception as exc:
+            return ToolResult(success=False, error=f"bridge: {exc}")
+        if resp.get("success"):
+            return ToolResult(success=True, data=resp.get("data") or {})
+        err = resp.get("error") or {}
+        return ToolResult(
+            success=False,
+            error=f"{err.get('code', 'INTERNAL')}: {err.get('message', '')}",
+        )
+
+    @staticmethod
+    def _search_url(engine: str, query: str) -> tuple[str, str]:
+        """Return (search URL, CSS selector that matches result links)."""
+        from urllib.parse import quote
+        e = (engine or "duckduckgo").lower()
+        if e == "google":
+            return f"https://www.google.com/search?q={quote(query)}", "h3 a, .yuRUbf a"
+        if e == "bing":
+            return f"https://www.bing.com/search?q={quote(query)}", "li.b_algo h2 a"
+        # default: duckduckgo
+        return f"https://duckduckgo.com/?q={quote(query)}", "a.result__a, h2 a"
+
+    @staticmethod
+    def _summarize_pages(pages: list[dict], query: str) -> str:
+        ok = sum(1 for p in pages if "error" not in p)
+        lines = [f"research[{query!r}]: {ok}/{len(pages)} pages extracted"]
+        for p in pages:
+            if "error" in p:
+                lines.append(f" ✗ {p['url']} — {p['error']}")
+            else:
+                lines.append(f" ✓ {p.get('title','(no title)')[:60]}  ({p.get('length',0)} chars)")
+                lines.append(f"   {p['url']}")
+        return "\n".join(lines)

@@ -239,15 +239,28 @@ def create_app(config: dict = None) -> FastAPI:
     async def _on_inbox_event(evt: dict):
         await ws_manager.broadcast({"type": "inbox_event", "data": evt})
 
+    # M4: agent token (separate from user token) for isolated profile sessions
+    from core.browser_profile import get_or_create_agent_token, IsolatedBrowserProfile
+    agent_token = get_or_create_agent_token()
+
     browser_bridge = BrowserBridge(
         token=browser_token,
         inbox=context_inbox,
         on_inbox_event=_on_inbox_event,
+        agent_token=agent_token,
     )
     logger.info(
-        "Browser Bridge ready: token=~/.config/kedo/browser_token, "
+        "Browser Bridge ready: user_token=~/.config/kedo/browser_token, "
+        "agent_token=~/.config/kedo/browser_token_agent, "
         "endpoint=/api/ws/browser, inbox=%s",
         context_inbox.base_dir,
+    )
+
+    # M4: isolated browser profile (lazy-spawned by browser_research)
+    isolated_profile = IsolatedBrowserProfile(
+        ws_url=f"ws://localhost:{config.get('port', 8000)}/api/ws/browser",
+        bridge=browser_bridge,
+        idle_minutes=config.get("agent_browser_idle_minutes", 30),
     )
 
     # Browser permission policy (M3) — Tier 0-3 + 30min trust + audit log
@@ -264,7 +277,7 @@ def create_app(config: dict = None) -> FastAPI:
         "audit=~/.kedo/browser-audit.jsonl"
     )
 
-    # Browser tools (M2 read + M3 write). Registered after bridge + policy exist.
+    # Browser tools (M2 read + M3 write + M4 research). Registered after bridge + policy exist.
     from tools.browser_tools import (
         BrowserClickTool,
         BrowserExtractTool,
@@ -272,6 +285,7 @@ def create_app(config: dict = None) -> FastAPI:
         BrowserListTabsTool,
         BrowserNavigateTool,
         BrowserQueryTool,
+        BrowserResearchTool,
         BrowserScreenshotTool,
         BrowserScrollTool,
         BrowserSubmitTool,
@@ -292,6 +306,10 @@ def create_app(config: dict = None) -> FastAPI:
         BrowserSubmitTool,
     ):
         tool_registry.register(_cls(browser_bridge, policy=browser_policy))
+    # M4: high-level research tool needs both bridge + isolated profile manager
+    tool_registry.register(BrowserResearchTool(
+        browser_bridge, profile_manager=isolated_profile, policy=browser_policy,
+    ))
 
     # 注入依赖到路由（含 create_llm_client 引用，避免循环导入）
     # P3-M3: agent_loop=None 表示退役；planner/evaluator/version_manager 单独传入

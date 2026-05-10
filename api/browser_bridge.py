@@ -23,9 +23,9 @@ logger = logging.getLogger(__name__)
 # even when the root logger is at WARNING (default for `kedo server`).
 logger.setLevel(logging.INFO)
 
-SUPPORTED_PROTOCOLS = ["1.0", "1.1", "1.2"]
+SUPPORTED_PROTOCOLS = ["1.0", "1.1", "1.2", "1.3"]
 PROTOCOL_VERSION = SUPPORTED_PROTOCOLS[-1]  # latest, retained for backward-compat reads
-SERVER_CAPABILITIES = ["context_inbox", "permission_v1", "command_v1", "command_v2_write"]
+SERVER_CAPABILITIES = ["context_inbox", "permission_v1", "command_v1", "command_v2_write", "agent_profile"]
 HELLO_TIMEOUT_S = 5.0
 TOKEN_PATH = Path.home() / ".config" / "kedo" / "browser_token"
 
@@ -78,24 +78,40 @@ class BrowserSession:
 
 
 class BrowserBridge:
-    """WebSocket bridge between kedo backend and one or more bridge clients."""
+    """WebSocket bridge between kedo backend and one or more bridge clients.
+
+    M4: supports dual tokens — user token (regular browser_token) and agent token
+    (browser_token_agent). Token presented in hello determines server-authoritative
+    role: user-token → role=user; agent-token → role=agent. role_hint from plugin
+    is informational only; server is source of truth.
+    """
 
     def __init__(
         self,
         token: str,
         inbox,
         on_inbox_event: Optional[Callable[[dict], Awaitable[None]]] = None,
+        agent_token: Optional[str] = None,
     ):
         self._token = token
+        self._agent_token = agent_token  # None = agent role disabled (M3 fallback)
         self._inbox = inbox
         self._on_inbox_event = on_inbox_event
         self._sessions: dict[str, BrowserSession] = {}
         self._pending: dict[str, asyncio.Future] = {}
 
+    def _role_for_token(self, token: Optional[str]) -> Optional[Literal["user", "agent"]]:
+        """Map a presented token to its role; None if no match (rejected)."""
+        if token and token == self._token:
+            return "user"
+        if token and self._agent_token and token == self._agent_token:
+            return "agent"
+        return None
+
     async def handle_ws(self, ws: WebSocket, query_token: Optional[str]) -> None:
         # Token may arrive in the query string (preferred) or in the hello frame.
         # Reject early if neither matches; the hello frame will revalidate.
-        if query_token is not None and query_token != self._token:
+        if query_token is not None and self._role_for_token(query_token) is None:
             await _safe_close(ws, code=4001, reason="bad_token")
             logger.warning("browser_bridge: rejected ws (query token mismatch)")
             return
@@ -143,7 +159,11 @@ class BrowserBridge:
             await _safe_close(ws, code=4002, reason="version_mismatch")
             return None
 
-        if hello.get("token") != self._token:
+        # Server-authoritative role assignment by token (M4):
+        # user token → role=user; agent token → role=agent; otherwise reject.
+        # role_hint is informational; we trust the token.
+        token_role = self._role_for_token(hello.get("token"))
+        if token_role is None:
             try:
                 await ws.send_json({"type": "hello_nack", "reason": "bad_token"})
             except Exception:
@@ -152,7 +172,12 @@ class BrowserBridge:
             return None
 
         role_hint = hello.get("role_hint", "user")
-        role: Literal["user", "agent"] = "agent" if role_hint == "agent" else "user"
+        role: Literal["user", "agent"] = token_role
+        if role_hint != role:
+            logger.info(
+                f"browser_bridge: role_hint='{role_hint}' overridden to '{role}' "
+                f"(token-determined)"
+            )
 
         session_id = uuid.uuid4().hex
         session = BrowserSession(
