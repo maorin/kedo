@@ -182,8 +182,20 @@ class IsolatedBrowserProfile:
 
         PROFILE_DIR.parent.mkdir(parents=True, exist_ok=True)
 
+        # Headless by default — kedo typically runs as a daemon (no $DISPLAY); a
+        # headed window would fail to open and chrome would exit rc=1. Set
+        # KEDO_AGENT_BROWSER_HEADED=1 to opt into headed mode for debugging.
+        # `--headless=new` is the modern headless mode (Chrome 109+) which fully
+        # supports --load-extension; the legacy --headless does not.
+        headed = os.environ.get("KEDO_AGENT_BROWSER_HEADED", "").lower() in ("1", "true", "yes")
+        mode_flags = (
+            []
+            if headed
+            else ["--headless=new", "--disable-gpu", "--no-sandbox"]
+        )
         cmd = [
             chrome,
+            *mode_flags,
             f"--user-data-dir={PROFILE_DIR}",
             f"--load-extension={EXTENSION_PACK_DIR}",
             "--no-first-run",
@@ -193,7 +205,10 @@ class IsolatedBrowserProfile:
             "--disable-renderer-backgrounding",
             "about:blank",
         ]
-        logger.info(f"browser_profile: launching chrome: {' '.join(cmd[:3])} …")
+        logger.info(
+            f"browser_profile: launching chrome (headless={not headed}): "
+            f"{chrome} … --user-data-dir={PROFILE_DIR}"
+        )
 
         # detach into its own process group so a kedo SIGINT doesn't kill chrome
         # (we still cleanup on kedo shutdown via atexit)
