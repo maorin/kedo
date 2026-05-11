@@ -79,7 +79,9 @@
 - ✅ 自动生成 14 模块测试用例文档（76KB）
 - ✅ 期间修了 4 个 bug：tab_id=0 / openai 必需 dep / api_key leak / logger INFO（commits `7dedae4` `78711ad` `2619e5e` `ee84d3e`）
 
-### M3.5 — 测试用例自动执行（⏸ 暂搁置 2026-05-10，待办）
+### M3.5 — 测试用例自动执行（⏸ 暂搁置，设计文档已落地）
+
+**详细设计：** [`deep-dives/m3.5-test-execution-design.md`](deep-dives/m3.5-test-execution-design.md)（2026-05-11 写完）— 5 个设计点 + v1/v2/v3 演化路径 + 4 个待决定点。
 
 **用例：** 把 M3 写出的测试用例 markdown 让 ReactAgent **自动执行** —— 不只生成文档而是真跑测试。
 

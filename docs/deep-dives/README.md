@@ -22,6 +22,7 @@
 | 🛠 从单 Agent 到多 Agent — 4 候选方案对比（Sub-agent as Tool / Orchestrator-Worker / Actor-Critic / Blackboard）+ 蜂群（Swarm）技术专题 + 优缺点矩阵 + 4 Phase 迁移路径 | [multi-agent-architecture.md](multi-agent-architecture.md) |
 | 🧭 自主 Agent 与 LLM Workflow 的 Hybrid 化 — 从光谱两端到分层混合，4 种典型结合方式对比，kedo 当前位置(②)的固有 limit，推荐演进 ③ Plan-as-Contract → ④ Hierarchical Agent | [agent-workflow-hybrid.md](agent-workflow-hybrid.md) |
 | 🌐 Browser Bridge — 浏览器插件 + 后端 Bridge 让 ReactAgent 操作浏览器、接收用户喂网页（上下文盒子）、用独立 profile 查资料；MV3 + WebSocket + Tier 权限模型 + M1-M5 路线 | [browser-bridge-design.md](browser-bridge-design.md) |
+| 🧪 M3.5 测试执行 — 把 M3 生成的 14 模块 70+ TC.md 自动跑起来；5 个设计点（步骤映射 / 断言精度 / case 隔离 / 登录态 / ReactAgent 集成）；推荐 v1 + 演化路径 | [m3.5-test-execution-design.md](m3.5-test-execution-design.md) |
 
 ## 横向对照
 
