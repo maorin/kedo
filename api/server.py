@@ -311,6 +311,16 @@ def create_app(config: dict = None) -> FastAPI:
         browser_bridge, profile_manager=isolated_profile, policy=browser_policy,
     ))
 
+    # M3.5: auto-execute TC.md test cases via bridge (pure Python, regex-based
+    # step mapping, prefers isolated profile with user-session fallback like
+    # browser_research).
+    from tools.run_test_cases import RunTestCasesTool
+    tool_registry.register(RunTestCasesTool(
+        browser_bridge,
+        profile_manager=isolated_profile,
+        event_bus=state_manager.event_bus,
+    ))
+
     # 注入依赖到路由（含 create_llm_client 引用，避免循环导入）
     # P3-M3: agent_loop=None 表示退役；planner/evaluator/version_manager 单独传入
     # 让 routes 不再通过 _agent_loop.X 访问这些组件
