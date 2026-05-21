@@ -784,6 +784,7 @@ def _persist_llm_config(switch_config: dict) -> tuple[bool, str]:
         "llm_provider", "model",
         "anthropic_api_key", "kimi_api_key", "kimi_base_url", "openai_api_key",
         "deepseek_api_key", "deepseek_base_url",
+        "ds4_base_url",
     ))
 
 
@@ -835,6 +836,19 @@ async def validate_llm_key(req: dict = Body(...)):
             "model": client.model,
             "error": None if ok else msg,
         }
+    if provider == "ds4":
+        from api.server import Ds4Client, DEFAULT_DS4_MODEL
+        base_url = (req.get("base_url") or "").strip()
+        client = Ds4Client(model=model or DEFAULT_DS4_MODEL, base_url=base_url)
+        ok, msg = await client.validate()
+        return {
+            "success": ok,
+            "stage": "network",
+            "provider": "ds4",
+            "model": client.model,
+            "base_url": client.base_url,
+            "error": None if ok else msg,
+        }
     return {"success": False, "error": f"暂不支持校验 provider={provider}"}
 
 
@@ -865,12 +879,12 @@ async def switch_reviewer(req: dict = Body(...)):
             "message": f"Reviewer 已禁用，配置写入 {msg}，重启 kedo 后生效",
         }
 
-    valid = {"anthropic", "claude", "kimi", "kimi-code", "deepseek", "openai", "mock"}
+    valid = {"anthropic", "claude", "kimi", "kimi-code", "deepseek", "openai", "ds4", "mock"}
     if provider not in valid:
         return {"success": False, "error": f"不支持的 reviewer provider: {provider}"}
 
     canon = "anthropic" if provider == "claude" else provider
-    needs_key = canon not in ("mock", "ollama")
+    needs_key = canon not in ("mock", "ollama", "ds4")
 
     if needs_key and not api_key:
         return {"success": False, "error": f"reviewer_provider={canon} 需要 api_key"}
@@ -1003,6 +1017,19 @@ async def switch_llm(req: dict = Body(...)):
             ok, msg = await probe.validate()
             if not ok:
                 return {"success": False, "error": f"DeepSeek 连通性校验失败: {msg}"}
+    elif provider == "ds4":
+        # 本地 ds4 (DeepSeek V4 Flash) — 无需 API Key
+        switch_config["llm_provider"] = "ds4"
+        from api.server import DEFAULT_DS4_MODEL, DS4_BASE_URL
+        switch_config["model"] = model or DEFAULT_DS4_MODEL
+        base_url = (req.get("base_url") or "").strip() or DS4_BASE_URL
+        switch_config["ds4_base_url"] = base_url
+        # 实网探活
+        from api.server import Ds4Client
+        probe = Ds4Client(model=switch_config["model"], base_url=base_url)
+        ok, msg = await probe.validate()
+        if not ok:
+            return {"success": False, "error": f"ds4 连通性校验失败: {msg}"}
     elif provider == "mock":
         switch_config["llm_provider"] = "mock"
     else:

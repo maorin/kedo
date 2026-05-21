@@ -492,6 +492,14 @@ def create_llm_client(config: dict):
             base_url=config.get("deepseek_base_url", ""),
         )
 
+    elif provider == "ds4":
+        # 本地 ds4 (DeepSeek V4 Flash) — 无需 API Key
+        config["_mock_fallback"] = False
+        return Ds4Client(
+            model=config.get("model", DEFAULT_DS4_MODEL),
+            base_url=config.get("ds4_base_url", DS4_BASE_URL),
+        )
+
     elif provider == "ollama":
         config["_mock_fallback"] = False
         return OllamaClient(
@@ -587,6 +595,13 @@ def create_reviewer_llm_client(config: dict):
             api_key=api_key,
             model=model or DEFAULT_DEEPSEEK_MODEL,
             base_url=base_url,
+        )
+
+    if provider == "ds4":
+        # ds4 本地推理 — 无需 api_key
+        return Ds4Client(
+            model=model or DEFAULT_DS4_MODEL,
+            base_url=base_url or config.get("ds4_base_url", DS4_BASE_URL),
         )
 
     if provider == "ollama":
@@ -892,6 +907,69 @@ class DeepseekClient(OpenAIClient):
             return True, "ok"
         except Exception as e:
             return False, str(e)
+
+
+DEFAULT_DS4_MODEL = "deepseek-v4-flash"
+DS4_BASE_URL = "http://127.0.0.1:8001/v1"
+
+
+class Ds4Client(OpenAIClient):
+    """
+    本地 ds4 (DwarfStar 4) 推理引擎客户端 — 专为 DeepSeek V4 Flash。
+
+    ds4-server 暴露 OpenAI 兼容 `/v1/chat/completions`（含 tool_calls、stream），
+    所以直接继承 OpenAIClient，把 base_url 指向本机 ds4-server。
+
+    本地推理无需 API Key，但 openai SDK 要求非空字符串，所以这里恒填 "local"。
+
+    项目: https://github.com/antirez/ds4
+    默认端口 8001（避开 kedo dashboard 默认 8000；启 ds4-server 时加 --port 8001）
+    默认模型: deepseek-v4-flash
+    """
+
+    PROVIDER_LABEL = "ds4"
+
+    def __init__(
+        self,
+        api_key: str = "",
+        model: str = DEFAULT_DS4_MODEL,
+        base_url: str = "",
+    ):
+        super().__init__(
+            api_key=api_key or "local",
+            model=model or DEFAULT_DS4_MODEL,
+            base_url=base_url or DS4_BASE_URL,
+        )
+
+    @staticmethod
+    def validate_key_format(api_key: str) -> tuple[bool, str]:
+        return True, ""
+
+    async def validate(self) -> tuple[bool, str]:
+        """通过 GET /v1/models 探测 ds4-server 是否可达。"""
+        import urllib.request
+        import urllib.error
+        import json as _json
+        models_url = self.base_url.rstrip("/") + "/models"
+        try:
+            req = urllib.request.Request(models_url, method="GET")
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+                data = _json.loads(body) if body else {}
+                model_ids = [m.get("id") for m in (data.get("data") or [])]
+                if self.model not in model_ids:
+                    return False, (
+                        f"ds4-server 已响应，但模型 '{self.model}' 不在 /v1/models 列表中: "
+                        f"{model_ids or '空'}"
+                    )
+                return True, "ok"
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as e:
+            return False, (
+                f"无法连接 ds4-server ({self.base_url}): {e}。"
+                f"请先启动 `./ds4-server --port {self.base_url.rsplit(':', 1)[-1].split('/')[0]}`"
+            )
+        except _json.JSONDecodeError as e:
+            return False, f"ds4-server 响应解析失败: {e}"
 
 
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"

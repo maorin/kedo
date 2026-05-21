@@ -929,7 +929,8 @@ class KedoREPL:
             ("2", "kimi-code", "Kimi Code 2.5 (编程专用)", "kimi-k2.5", "KIMI_API_KEY"),
             ("3", "kimi", "Kimi K2.5 (通用)", "kimi-k2.5", "MOONSHOT_API_KEY"),
             ("4", "deepseek", "DeepSeek v4-pro", "deepseek-v4-pro", "DEEPSEEK_API_KEY"),
-            ("5", "mock", "Mock 模式 (无需 Key)", "mock", None),
+            ("5", "ds4", "ds4 本地 (DeepSeek V4 Flash)", "deepseek-v4-flash", None),
+            ("6", "mock", "Mock 模式 (无需 Key)", "mock", None),
         ]
 
         for num, _, label, model, _ in providers:
@@ -937,7 +938,7 @@ class KedoREPL:
         print()
 
         try:
-            choice = input(f"  {ACCENT}选择提供商 [1/2/3/4/5]: {C.RESET}").strip()
+            choice = input(f"  {ACCENT}选择提供商 [1/2/3/4/5/6]: {C.RESET}").strip()
         except (KeyboardInterrupt, EOFError):
             print(f"\n  {MUTED}已取消{C.RESET}\n")
             return
@@ -963,6 +964,43 @@ class KedoREPL:
                 self.config["_mock_fallback"] = False  # 主动选择 mock 不算回退
             else:
                 print(f"  {ERROR}✗ 切换失败: {result.get('error', '未知错误')}{C.RESET}\n")
+            return
+
+        # ds4 本地：无需 api_key，但要问 base_url + 可选 model
+        if provider_id == "ds4":
+            print()
+            print(f"  {MUTED}ds4-server 默认 base_url: http://127.0.0.1:8001/v1{C.RESET}")
+            print(f"  {MUTED}（启动方式: cd /path/to/ds4 && ./ds4-server --port 8001）{C.RESET}")
+            try:
+                base_url_in = input(
+                    f"  {ACCENT}base_url (回车使用默认): {C.RESET}"
+                ).strip()
+                custom_model = input(
+                    f"  {ACCENT}模型 (回车使用默认 {default_model}): {C.RESET}"
+                ).strip()
+            except (KeyboardInterrupt, EOFError):
+                print(f"\n  {MUTED}已取消{C.RESET}\n")
+                return
+            print(f"\n  {BRAND}⟳ 正在切换到 {label}...{C.RESET}")
+            result = self._api_post("/llm/switch", {
+                "provider": "ds4",
+                "model": custom_model or default_model,
+                "base_url": base_url_in,
+            })
+            if result and result.get("success"):
+                print(f"  {SUCCESS}✓ {result.get('message', '切换成功')}{C.RESET}")
+                self._sb["provider"] = result.get("provider", "ds4")
+                self._sb["model"] = result.get("model", default_model)
+                self.config["llm_provider"] = "ds4"
+                self.config["model"] = result.get("model", default_model)
+                self.config["_mock_fallback"] = False
+                self.config.pop("_mock_fallback_reason", None)
+                self.config.pop("_intended_provider", None)
+            else:
+                err = result.get("error", "未知错误") if result else "服务无响应"
+                print(f"  {ERROR}✗ 切换失败: {err}{C.RESET}\n")
+                return
+            print()
             return
 
         # 需要 API Key 的提供商
@@ -1067,7 +1105,8 @@ class KedoREPL:
             ("3", "openai",    "OpenAI GPT-4o",            "gpt-4o",            "OPENAI_API_KEY"),
             ("4", "kimi-code", "Kimi Code 2.5",            "kimi-k2.5",         "KIMI_API_KEY"),
             ("5", "kimi",      "Kimi K2.5 (通用)",         "kimi-k2.5",         "KIMI_API_KEY"),
-            ("6", "none",      "禁用 Reviewer",            "-",                  None),
+            ("6", "ds4",       "ds4 本地 (V4 Flash)",      "deepseek-v4-flash", None),
+            ("7", "none",      "禁用 Reviewer",            "-",                  None),
         ]
 
         for num, pid, label, mdl, _ in rev_providers:
@@ -1084,7 +1123,7 @@ class KedoREPL:
         print()
 
         try:
-            choice = input(f"  {ACCENT}选择 Reviewer 提供商 [1-6]: {C.RESET}").strip()
+            choice = input(f"  {ACCENT}选择 Reviewer 提供商 [1-7]: {C.RESET}").strip()
         except (KeyboardInterrupt, EOFError):
             print(f"\n  {MUTED}已取消 Reviewer 配置{C.RESET}\n")
             return
@@ -1107,6 +1146,33 @@ class KedoREPL:
             else:
                 err = result.get("error", "未知错误") if result else "服务无响应"
                 print(f"  {ERROR}✗ {err}{C.RESET}")
+            return
+
+        # ds4 本地：无 api_key，可选 base_url
+        if rev_pid == "ds4":
+            print()
+            try:
+                base_url_in = input(
+                    f"  {ACCENT}base_url (回车使用 http://127.0.0.1:8001/v1): {C.RESET}"
+                ).strip()
+                custom_model = input(
+                    f"  {ACCENT}Reviewer 模型 (回车默认 {default_model}): {C.RESET}"
+                ).strip()
+            except (KeyboardInterrupt, EOFError):
+                print(f"\n  {MUTED}已取消{C.RESET}\n")
+                return
+            print(f"\n  {BRAND}⟳ 正在保存 Reviewer 配置...{C.RESET}")
+            result = self._api_post("/llm/switch-reviewer", {
+                "provider": "ds4",
+                "model": custom_model or default_model,
+                "base_url": base_url_in,
+            })
+            if result and result.get("success"):
+                print(f"  {SUCCESS}✓ {result.get('message', '已保存')}{C.RESET}")
+                print(f"  {WARN}⚠ Reviewer 不支持热切换，请重启 kedo 生效{C.RESET}")
+            else:
+                err = result.get("error", "未知错误") if result else "服务无响应"
+                print(f"  {ERROR}✗ Reviewer 配置失败: {err}{C.RESET}")
             return
 
         # API Key 输入：复用 producer 同种逻辑

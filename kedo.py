@@ -6,7 +6,7 @@ kedo — AI 开发助手命令行工具
     kedo                        # 在当前目录启动交互式 REPL
     kedo /path/to/project       # 指定项目路径
     kedo --port 9000            # 指定 Dashboard 端口
-    kedo --provider anthropic   # 指定 LLM (anthropic/openai/ollama/mock)
+    kedo --provider anthropic   # 指定 LLM (anthropic/openai/kimi/deepseek/ds4/ollama/mock)
     kedo server                 # 仅启动 Web 服务 (无 REPL)
 
 示例:
@@ -131,7 +131,7 @@ def main():
     )
     parser.add_argument("--port", type=int, default=None, help="Dashboard 端口 (默认: 8000)")
     parser.add_argument("--host", default=None, help="绑定地址 (默认: 127.0.0.1)")
-    parser.add_argument("--provider", default=None, help="LLM 提供商: anthropic/openai/kimi-code/kimi/ollama/mock")
+    parser.add_argument("--provider", default=None, help="LLM 提供商: anthropic/openai/kimi-code/kimi/deepseek/ds4/ollama/mock")
     parser.add_argument("--model", default=None, help="模型名称")
     parser.add_argument("--config", default=None, help="配置文件路径")
     parser.add_argument("--verbose", "-v", action="store_true", help="详细日志")

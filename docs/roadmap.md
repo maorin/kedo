@@ -1,6 +1,6 @@
 # kedo Roadmap
 
-> **状态**：滚动更新的工作文档，不是承诺。最后更新 **2026-05-10**（M4 局部完成，路径 A fallback 实战通过）。
+> **状态**：滚动更新的工作文档，不是承诺。最后更新 **2026-05-21**（本地 ds4 provider 基础落地）。
 >
 > 本文是"现在做什么、下一步做什么、为什么"的清单。架构层面的"为什么"详见 `deep-dives/`，里程碑实现细节看对应 design 文档与 commit。
 >
@@ -21,8 +21,9 @@
 1. ✅ Browser Bridge **M3** + 双 Agent 实战通了（2026-05-09）
 2. ⏸ Browser Bridge **M3.5**（测试用例自动执行）— 暂搁置，重启时直接做路径 B `run_test_cases` 专用工具
 3. 🔄 Browser Bridge **M4** 局部完成（基础设施齐 + browser_research 路径 A 实战通了；真隔离 chrome 启动 Linux Google Chrome 阻塞，待真需求来时迁 Playwright）
-4. 主 dashboard 整合 Inbox 工作流（避免独立 URL）
-5. 探索 **kedo 作为 skill** 暴露（让 Claude Code / Cursor 远程调用）
+4. ✅ 对接本地 **ds4** 推理引擎（DeepSeek V4 Flash）作为新 LLM provider — 基础落地 2026-05-21，待 switchvideo 实战验证长 context
+5. 主 dashboard 整合 Inbox 工作流（避免独立 URL）
+6. 探索 **kedo 作为 skill** 暴露（让 Claude Code / Cursor 远程调用）
 
 ---
 
@@ -38,7 +39,7 @@
 | 上下文管理 | memory + react_agent 收敛检测 ✅ | long-horizon 摘要器 | `deep-dives/context-management.md`、`long-horizon-memory.md` |
 | Self-evaluation | EvaluateTool + Reviewer ✅ | 多维度对照 dimension drift | `deep-dives/self-evaluation.md` |
 | 工具脆弱性 | profile_guard + auto_fix ✅ | tool 调用幂等性 + retry 策略 | `deep-dives/tool-fragility.md` |
-| LLM Provider | Kimi/Claude/DeepSeek/OpenAI ✅ | quirk-mitigation 抽象层 | `llm-providers.md` |
+| LLM Provider | Kimi/Claude/DeepSeek/OpenAI/**ds4** ✅ | switchvideo 实战验证 ds4 长 context + quirk-mitigation 抽象层 | `llm-providers.md` |
 | **Skill 暴露** | 探讨稿 | MCP / output protocol | `deep-dives/kedo-as-skill-and-skill-host.md` |
 
 ---
@@ -170,6 +171,29 @@
 - Inbox 条目和正在跑的 task 关联可视化（哪个 task 用了哪些条目）
 
 **估时：** 2-3 天，可与 M3/M4 并行
+
+---
+
+## 本地 ds4 Provider 对接（✅ 基础落地 2026-05-21）
+
+**项目：** [antirez/ds4](https://github.com/antirez/ds4) — DwarfStar 4，专为 DeepSeek V4 Flash 写的本地推理引擎，本地路径 `/Users/maojj/project/ds4`。
+
+**已交付：**
+- `api/server.py` 加 `Ds4Client(OpenAIClient)`：固定 api_key="local"、默认 base_url `http://127.0.0.1:8001/v1`、默认 model `deepseek-v4-flash`、`validate()` 走 `GET /v1/models` 探活并校验 model id 在列
+- `create_llm_client` + `create_reviewer_llm_client` 两个 factory 加 ds4 分支
+- `/llm/switch` + `/llm/validate` + `_persist_llm_config` + `switch_reviewer` 加 ds4 分支（持久化 `ds4_base_url`，需要重启的还是 reviewer）
+- CLI `/login` 主流程 + reviewer 子流程加 ds4 选项（跳过 API Key 输入，改问 base_url）
+- `kedo --provider` 帮助文本加 ds4
+
+**端到端实测（M3 Max 128GB / ds4-server --port 8001 + 32K context）：**
+- 启动后 `validate()` 通；`chat([{user:'回一个字'}])` → `'ping'`
+- `chat_with_tools` 跑一次 `get_weather('上海')`：拿到 `ToolCallData(name='get_weather', arguments={'city':'上海'})` + `reasoning_content="用户想知道..."`
+- 现有 `OpenAIClient.chat_with_tools` 的 `reasoning_content` 透传逻辑（commit history 中 deepseek-v4-pro 那条）直接复用
+
+**待做：**
+- 在 switchvideo 实战里跑一轮 ReactAgent，看 1M context + 落盘 KV cache（`--kv-disk-dir`）能不能撑长任务
+- 启动 ds4-server 时加 `--ctx 1048576 --kv-disk-dir ~/.cache/ds4-kv` 验证长 context 在 kedo 流程里的实际表现
+- ds4-server 用全局 lockfile（`ds4` 和 `ds4-server` 同名进程互斥），实战里要注意冲突
 
 ---
 
