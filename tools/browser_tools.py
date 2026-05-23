@@ -34,6 +34,10 @@ class _BrowserToolBase(BaseTool):
     def is_read_only(self) -> bool:
         return True
 
+    # Tools whose semantics explicitly target the user's current focus or are
+    # tab-list operations — they MUST NOT receive an injected sticky tab_id.
+    _STICKY_INJECT_SKIP = {"navigate", "list_tabs", "get_active_tab"}
+
     async def _send(
         self,
         action: str,
@@ -42,6 +46,18 @@ class _BrowserToolBase(BaseTool):
         timeout: float = 35.0,
     ) -> ToolResult:
         """Direct send — for T0 actions that bypass policy."""
+        # Sticky-tab injection: when the LLM omits tab_id and the action is
+        # not in the skip list, default to the last tab a navigate landed on
+        # for this role. Lets the user keep watching the dashboard while the
+        # agent operates on its working tab in the background.
+        if (
+            "tab_id" not in params
+            and action not in self._STICKY_INJECT_SKIP
+            and hasattr(self._bridge, "last_navigated_tab")
+        ):
+            sticky = self._bridge.last_navigated_tab.get(prefer_role)
+            if isinstance(sticky, int) and sticky > 0:
+                params = {**params, "tab_id": sticky}
         try:
             resp = await self._bridge.send_command(
                 action, params, prefer_role=prefer_role, timeout=timeout
@@ -50,6 +66,11 @@ class _BrowserToolBase(BaseTool):
             return ToolResult(success=False, error=f"bridge: {exc}")
         if resp.get("success"):
             data = resp.get("data") or {}
+            # Update sticky tab once navigate succeeds.
+            if action == "navigate":
+                new_tab_id = data.get("tab_id")
+                if isinstance(new_tab_id, int) and new_tab_id > 0:
+                    self._bridge.last_navigated_tab[prefer_role] = new_tab_id
             return ToolResult(success=True, output=self._summarize(data), data=data)
         err = resp.get("error") or {}
         return ToolResult(
@@ -172,9 +193,10 @@ class BrowserNavigateTool(_BrowserToolBase):
     @property
     def description(self) -> str:
         return (
-            "Navigate a tab to the given URL and wait for the page to finish loading. "
-            "Use new_tab=true to open in a fresh tab; otherwise updates the active tab "
-            "(or the tab specified by tab_id)."
+            "Navigate to the given URL in a new tab (default) and wait for the page to "
+            "finish loading. Set new_tab=false to replace the current active tab "
+            "(or the tab specified by tab_id) instead — only do this when you explicitly "
+            "want to leave the current page."
         )
 
     @property
@@ -183,13 +205,13 @@ class BrowserNavigateTool(_BrowserToolBase):
             ToolParameter(name="url", type="string", description="Target URL (http/https only)"),
             ToolParameter(
                 name="tab_id", type="integer",
-                description="Optional: tab to navigate (defaults to active tab)",
+                description="Optional: tab to navigate (only used when new_tab=false)",
                 required=False,
             ),
             ToolParameter(
                 name="new_tab", type="boolean",
-                description="Open in a new tab instead of replacing current",
-                required=False, default=False,
+                description="Open in a new tab (default true). Set false to replace current tab.",
+                required=False, default=True,
             ),
         ]
 
@@ -201,7 +223,7 @@ class BrowserNavigateTool(_BrowserToolBase):
         self,
         url: str,
         tab_id: Optional[int] = None,
-        new_tab: bool = False,
+        new_tab: bool = True,
         **_,
     ) -> ToolResult:
         params: dict = {"url": url, "new_tab": bool(new_tab)}
@@ -441,7 +463,10 @@ class BrowserExtractTool(_BrowserToolBase):
     def description(self) -> str:
         return (
             "Extract the readable main content of a page using Mozilla Readability. "
-            "Returns title, text_content (plain text), excerpt, and any user selection."
+            "Returns the page title plus the first 6000 chars of plain text (longer "
+            "pages are truncated). Prefer this over browser_query when you need to "
+            "read the page, not click into a specific element — it's one call, no "
+            "selector guessing."
         )
 
     @property
@@ -463,7 +488,9 @@ class BrowserExtractTool(_BrowserToolBase):
     def _summarize(self, data: dict) -> str:
         title = data.get("title", "") or ""
         text = data.get("text_content", "") or ""
-        return f"{title} — {len(text)} chars"
+        body = text[:6000]
+        truncated = " [truncated]" if len(text) > 6000 else ""
+        return f"{title} — {len(text)} chars{truncated}\n---\n{body}"
 
 
 class BrowserQueryTool(_BrowserToolBase):

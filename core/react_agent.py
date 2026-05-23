@@ -318,7 +318,7 @@ class ReactAgent:
             await self.state.update_status(
                 task_id, TaskStatus.COMPLETED, progress_percent=100, current_step="Completed"
             )
-            await self._emit(task_id, EventType.STEP_COMPLETED, step="agent_loop", output=result[:200] if result else "")
+            await self._emit(task_id, EventType.STEP_COMPLETED, step="agent_loop", output=result[:4000] if result else "")
 
         return result
 
@@ -503,7 +503,7 @@ class ReactAgent:
                     final_msg = tc.arguments.get("message", "")
                     await self._emit(
                         task_id, EventType.LLM_RESPONSE,
-                        phase="respond", summary=final_msg[:200],
+                        phase="respond", summary=final_msg[:4000],
                     )
                     # 推送最终回复内容
                     await self._emit(task_id, EventType.LLM_TOKEN, token=final_msg + "\n", phase="respond")

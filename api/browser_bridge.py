@@ -99,6 +99,11 @@ class BrowserBridge:
         self._on_inbox_event = on_inbox_event
         self._sessions: dict[str, BrowserSession] = {}
         self._pending: dict[str, asyncio.Future] = {}
+        # Sticky tab: the last tab a browser_navigate landed on, per role.
+        # Other browser_* tools default to this tab when LLM omits tab_id,
+        # so the user can keep watching the dashboard without losing agent's
+        # working tab to whatever the user has focused.
+        self.last_navigated_tab: dict[str, int] = {}
 
     def _role_for_token(self, token: Optional[str]) -> Optional[Literal["user", "agent"]]:
         """Map a presented token to its role; None if no match (rejected)."""
