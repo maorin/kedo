@@ -321,6 +321,17 @@ def create_app(config: dict = None) -> FastAPI:
         event_bus=state_manager.event_bus,
     ))
 
+    # /loop 自动循环调度器（M1：模式 A 定时 / 自定步重跑）
+    # 复用 react_agent.start_task（与 POST /api/tasks 同一执行路径）+ state_manager 判完成
+    from core.loop_scheduler import LoopScheduler
+    loop_scheduler = LoopScheduler(
+        react_agent=react_agent,
+        state_manager=state_manager,
+        broadcast=ws_manager.broadcast,
+        storage_dir=config.get("storage_dir", ".kedo/state"),
+        default_project_path=config.get("project_path", "."),
+    )
+
     # 注入依赖到路由（含 create_llm_client 引用，避免循环导入）
     # P3-M3: agent_loop=None 表示退役；planner/evaluator/version_manager 单独传入
     # 让 routes 不再通过 _agent_loop.X 访问这些组件
@@ -338,6 +349,7 @@ def create_app(config: dict = None) -> FastAPI:
         browser_bridge=browser_bridge,
         context_inbox=context_inbox,
         browser_policy=browser_policy,
+        loop_scheduler=loop_scheduler,
     )
 
     # 注册路由 — 必须在 StaticFiles 之前
@@ -380,10 +392,13 @@ def create_app(config: dict = None) -> FastAPI:
     @app.on_event("startup")
     async def startup():
         logger.info("kedo starting up...")
+        # 在 server 事件循环里起循环调度器后台 task
+        await loop_scheduler.start()
 
     @app.on_event("shutdown")
     async def shutdown():
         logger.info("kedo shutting down...")
+        await loop_scheduler.stop()
 
     return app
 

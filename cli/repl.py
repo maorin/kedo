@@ -616,6 +616,7 @@ class KedoREPL:
             "/discuss": self._cmd_discuss,
             "/d": self._cmd_discuss,
             "/history": self._cmd_history,
+            "/loop": self._cmd_loop,
             "/web": self._cmd_web,
             "/w": self._cmd_web,
             "/login": self._cmd_login,
@@ -655,6 +656,7 @@ class KedoREPL:
             ("/candidates, /c", "列出所有候选版本"),
             ("/discuss, /d", "参与闭环讨论（选择方案）"),
             ("/history", "查看迭代历史"),
+            ("/loop", "自动循环：/loop <间隔> <任务> 定时重跑；/loop <任务> 自定步；/loop list|stop <id>"),
             ("/web, /w", "在浏览器中打开 Dashboard"),
             ("/config", "查看当前配置"),
             ("/clear", "清屏"),
@@ -1265,6 +1267,126 @@ class KedoREPL:
         state = "on (完整输出)" if self._verbose else "off (精简截断)"
         self._safe_print(f"  {SUCCESS}/verbose → {state}{C.RESET}")
 
+    # ─── /loop 自动循环 ───────────────────────────────────────
+
+    def _cmd_loop(self, args: str = ""):
+        """
+        /loop                      列出所有循环
+        /loop <间隔> <任务>         定时重跑（间隔如 5m / 30s / 1h30m）
+        /loop <任务>               自定步：上一轮跑完后立即重跑
+        /loop list | status        列出所有循环
+        /loop pause|resume <id>    暂停 / 恢复
+        /loop stop <id>            删除循环
+        """
+        args = (args or "").strip()
+        parts = args.split(maxsplit=1)
+        sub = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        if not args or sub in ("list", "ls", "status"):
+            self._loop_list()
+            return
+        if sub in ("stop", "rm", "del", "delete"):
+            self._loop_delete(rest)
+            return
+        if sub in ("pause", "resume", "toggle"):
+            self._loop_toggle(rest)
+            return
+
+        # 创建：首 token 是时长 → interval 模式；否则整串作为任务 → 自定步
+        interval = self._parse_duration(sub)
+        if interval is not None:
+            if not rest:
+                self._safe_print(f"  {ERROR}用法: /loop <间隔> <任务描述>{C.RESET}  (例: /loop 5m 跑一遍回归测试)")
+                return
+            self._loop_create(rest, interval_seconds=interval, mode="interval")
+        else:
+            self._loop_create(args, interval_seconds=None, mode="continuous")
+
+    @staticmethod
+    def _parse_duration(s: str) -> Optional[int]:
+        """'5m'→300, '30s'→30, '1h30m'→5400；非纯时长返回 None。"""
+        import re
+        s = (s or "").strip().lower()
+        if not s or not re.fullmatch(r"(\d+[smh])+", s):
+            return None
+        total = 0
+        for num, unit in re.findall(r"(\d+)([smh])", s):
+            total += int(num) * {"s": 1, "m": 60, "h": 3600}[unit]
+        return total or None
+
+    @staticmethod
+    def _fmt_dur(seconds: Optional[int]) -> str:
+        if not seconds:
+            return "—"
+        h, rem = divmod(int(seconds), 3600)
+        m, s = divmod(rem, 60)
+        out = "".join(p for p in (f"{h}h" if h else "", f"{m}m" if m else "", f"{s}s" if s else "") if p)
+        return out or "0s"
+
+    def _loop_create(self, spec: str, interval_seconds: Optional[int], mode: str):
+        body = {"spec": spec, "mode": mode, "project_path": self.project_path}
+        if interval_seconds:
+            body["interval_seconds"] = interval_seconds
+        data = self._api_post("/loops", body)
+        if data and data.get("success"):
+            lp = data["loop"]
+            when = f"每 {self._fmt_dur(interval_seconds)} 重跑" if interval_seconds else "上一轮完成后立即重跑（自定步）"
+            self._safe_print(f"  {SUCCESS}✓ 循环已创建{C.RESET} {HIGHLIGHT}{lp['id']}{C.RESET} — {when}")
+            self._safe_print(f"    {MUTED}目标: {spec[:70]}{C.RESET}")
+            self._safe_print(f"    {MUTED}查看: /loop list   停止: /loop stop {lp['id']}{C.RESET}")
+        else:
+            err = (data or {}).get("error", "未知错误")
+            self._safe_print(f"  {ERROR}✗ 创建失败: {err}{C.RESET}")
+
+    def _loop_list(self):
+        loops = self._api_get("/loops")
+        print()
+        if not loops:
+            print(f"  {MUTED}暂无循环。用 /loop <间隔> <任务> 创建，如 /loop 10m 检查构建。{C.RESET}")
+            print()
+            return
+        print(f"  {HIGHLIGHT}{C.BOLD}自动循环{C.RESET}")
+        for lp in loops:
+            status = lp.get("status", "?")
+            color = {"running": SUCCESS, "paused": WARN, "completed": MUTED}.get(status, MUTED)
+            if lp.get("mode") == "interval":
+                cadence = f"每 {self._fmt_dur(lp.get('interval_seconds'))}"
+            else:
+                cadence = "自定步"
+            runs = lp.get("run_count", 0)
+            mr = lp.get("max_runs")
+            runs_s = f"{runs}/{mr}" if mr else str(runs)
+            cur = lp.get("current_task_id")
+            cur_s = f"  {BRAND}▶ 运行中 {cur}{C.RESET}" if cur else ""
+            print(f"  {color}● {lp['id']}{C.RESET} [{color}{status}{C.RESET}] {cadence}  跑了 {runs_s} 次{cur_s}")
+            print(f"      {MUTED}{(lp.get('spec') or '')[:72]}{C.RESET}")
+        print(f"\n  {MUTED}/loop pause|resume <id> 暂停/恢复 · /loop stop <id> 删除{C.RESET}")
+        print()
+
+    def _loop_toggle(self, loop_id: str):
+        if not loop_id:
+            self._safe_print(f"  {ERROR}用法: /loop pause|resume <循环ID>{C.RESET}")
+            return
+        data = self._api_post(f"/loops/{loop_id}/toggle", {})
+        if data and data.get("success"):
+            lp = data["loop"]
+            self._safe_print(f"  {SUCCESS}✓ {loop_id} → {lp.get('status')}{C.RESET}")
+        else:
+            err = (data or {}).get("error", "未找到该循环")
+            self._safe_print(f"  {ERROR}✗ {err}{C.RESET}")
+
+    def _loop_delete(self, loop_id: str):
+        if not loop_id:
+            self._safe_print(f"  {ERROR}用法: /loop stop <循环ID>{C.RESET}")
+            return
+        data = self._api_delete(f"/loops/{loop_id}")
+        if data and data.get("success"):
+            self._safe_print(f"  {SUCCESS}✓ 循环 {loop_id} 已删除{C.RESET}")
+        else:
+            err = (data or {}).get("error", "未找到该循环")
+            self._safe_print(f"  {ERROR}✗ {err}{C.RESET}")
+
     def _cmd_quit(self, _=""):
         self._shutdown()
 
@@ -1549,6 +1671,25 @@ class KedoREPL:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as e:
             # 读取服务端返回的错误详情
+            try:
+                err_body = json.loads(e.read())
+                return {"success": False, "error": f"HTTP {e.code}: {err_body.get('detail', err_body)}"}
+            except Exception:
+                return {"success": False, "error": f"HTTP {e.code}: {e.reason}"}
+        except urllib.error.URLError as e:
+            return {"success": False, "error": f"连接失败: {e.reason}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _api_delete(self, path: str) -> Optional[dict]:
+        try:
+            import urllib.request
+            import urllib.error
+            url = f"{self._scheme}://{self._api_host}:{self.port}/api{path}"
+            req = urllib.request.Request(url, method="DELETE")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
             try:
                 err_body = json.loads(e.read())
                 return {"success": False, "error": f"HTTP {e.code}: {err_body.get('detail', err_body)}"}

@@ -23,7 +23,7 @@
 3. ✅ Browser **三层联动护栏**（2026-05-23 `0e8d335`）— navigate 默认 new_tab + extract 回正文 + sticky tab inject，dashboard 不被抢，实战 turns 23→2
 4. 🔄 Browser Bridge **M4** 局部完成（基础设施齐 + browser_research 路径 A 实战通了；真隔离 chrome 启动 Linux Google Chrome 阻塞，待真需求来时迁 Playwright）
 5. ✅ 对接本地 **ds4** 推理引擎（DeepSeek V4 Flash）作为新 LLM provider — 基础 + 文档落地 2026-05-21（`9beb2f0` `a7eff1c`），待 switchvideo 实战验证长 context
-6. 🆕 **/loop 自动循环**（定时/自定步重跑 + agent 自迭代到目标，两模式，参考 Claude Code `/loop`）— REPL `/loop` + dashboard「⏱️ 循环」面板
+6. 🔄 **/loop 自动循环**（参考 Claude Code `/loop`）— ✅ M1 模式 A（定时/自定步重跑）落地 2026-06-17：REPL `/loop` + `core/loop_scheduler.py` + dashboard「⏱️ 循环」面板；🔄 M2 模式 B（agent 自迭代到目标）进行中
 7. 🆕 **skill 双向**（kedo 消费本地 markdown skill 包 + kedo 暴露为 skill/MCP 供 Claude Code/Cursor 调用，参考 Claude Code）— 含 dashboard「🔧 技能」面板
 8. 主 dashboard 整合 Inbox 工作流（避免独立 URL）
 
@@ -42,7 +42,7 @@
 | Self-evaluation | EvaluateTool + Reviewer ✅ | 多维度对照 dimension drift | `deep-dives/self-evaluation.md` |
 | 工具脆弱性 | profile_guard + auto_fix ✅ | tool 调用幂等性 + retry 策略 | `deep-dives/tool-fragility.md` |
 | LLM Provider | Kimi/Claude/DeepSeek/OpenAI/**ds4** ✅ | switchvideo 实战验证 ds4 长 context + quirk-mitigation 抽象层 | `llm-providers.md` |
-| **/loop 自动循环** | 🆕 规划 | M1 定时重跑+dashboard 面板 → M2 agent 自迭代 | 本文 §`/loop 自动循环` |
+| **/loop 自动循环** | M1 定时重跑+dashboard ✅ | M2 agent 自迭代到目标 | 本文 §`/loop 自动循环` |
 | **Skill（消费）** | 🆕 规划 | 本地 skill 包加载 + ReactAgent 调用 + dashboard 面板 | 本文 §`Skill 双向` |
 | **Skill（暴露）** | 探讨稿 → 规划 | kedo 暴露为 skill/MCP 供 Claude Code/Cursor 调用 | `deep-dives/kedo-as-skill-and-skill-host.md` |
 
@@ -246,9 +246,11 @@
 - **后端**：`api/routes.py` 加 `GET/POST /api/loops`、`POST /api/loops/{id}/toggle`、`DELETE /api/loops/{id}`、`GET /api/loops/{id}/history`（对应 §落地点的 `core/scheduler.py`）
 
 ### 阶段
-- **M1**：模式 A 定时/自定步重跑 + start/stop/list/status（REPL `/loop`）+ dashboard「循环」view 基础（列表/创建/启停）—— 最快出可用
-- **M2**：模式 B agent 自迭代 + 目标达成判定 + Reviewer 联动 + dashboard 运行历史 drawer
-- **估时：** M1 2-3 天（含 UI），M2 2-3 天
+- **M1（✅ 落地 2026-06-17）**：模式 A 定时/自定步重跑 + list/pause/resume/stop（REPL `/loop`）+ dashboard「⏱️ 循环」view（列表/创建/启停/历史）+ `loop_event` WS 实时刷新。
+  - 交付：`core/loop_scheduler.py`（后台 asyncio 巡检 + 每 loop 串行 + 持久化 `.kedo/state/loops.json`）、`api/routes.py` 5 个 `/loops` 端点、`cli/repl.py` `/loop` 命令、`dashboard/index.html` 面板
+  - 注：现 continuous 模式 = 上一轮完成即重跑（最简自定步）；模型驱动的真·自定步留待后续
+- **M2（🔄 进行中）**：模式 B agent 自迭代 + 目标达成判定 + Reviewer 联动 + dashboard 运行历史 drawer
+- **估时：** M1 已完成，M2 2-3 天
 
 ---
 

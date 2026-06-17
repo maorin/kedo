@@ -52,6 +52,7 @@ _project_path: str = "."   # 项目根目录，用于文档浏览
 _browser_bridge: Optional[BrowserBridge] = None
 _context_inbox: Optional[ContextInbox] = None
 _browser_policy = None  # core.browser_permissions.BrowserPermissionPolicy or None
+_loop_scheduler = None  # core.loop_scheduler.LoopScheduler or None（/loop 自动循环）
 
 
 def set_dependencies(
@@ -68,10 +69,11 @@ def set_dependencies(
     browser_bridge: Optional[BrowserBridge] = None,
     context_inbox: Optional[ContextInbox] = None,
     browser_policy=None,
+    loop_scheduler=None,
 ):
     global _agent_loop, _react_agent, _state_manager, _version_manager
     global _planner, _evaluator, _reviewer, _role_swap, _create_llm_client, _project_path
-    global _browser_bridge, _context_inbox, _browser_policy
+    global _browser_bridge, _context_inbox, _browser_policy, _loop_scheduler
     _agent_loop = agent_loop
     _react_agent = react_agent
     _state_manager = state_manager
@@ -85,6 +87,7 @@ def set_dependencies(
     _browser_bridge = browser_bridge
     _context_inbox = context_inbox
     _browser_policy = browser_policy
+    _loop_scheduler = loop_scheduler
 
 
 # ============================================================
@@ -187,6 +190,95 @@ async def get_task(task_id: str):
     if not status:
         raise HTTPException(404, f"Task {task_id} not found")
     return status
+
+
+# ============================================================
+# /loop 自动循环 API（M1：模式 A 定时 / 自定步重跑）
+# 调度逻辑在 core/loop_scheduler.py；这里只做薄封装。
+# ============================================================
+
+
+@router.get("/loops")
+async def list_loops():
+    """列出所有循环及其运行态。"""
+    if _loop_scheduler is None:
+        return []
+    return _loop_scheduler.list_loops()
+
+
+@router.post("/loops")
+async def create_loop(body: dict = Body(...)):
+    """
+    创建循环。body:
+      - spec / description: 要循环执行的任务描述（必填）
+      - interval_seconds: 固定间隔秒数（给了即 interval 模式；不给则 continuous 自定步）
+      - mode: 可选，"interval" | "continuous"（默认按 interval_seconds 推断）
+      - project_path: 可选，默认服务端项目根
+      - max_runs: 可选，跑满即自动停止
+    """
+    if _loop_scheduler is None:
+        raise HTTPException(503, "Loop scheduler 未启用")
+    spec = (body.get("spec") or body.get("description") or "").strip()
+    if not spec:
+        raise HTTPException(400, "spec/description 不能为空")
+    interval_seconds = body.get("interval_seconds")
+    if interval_seconds is not None:
+        try:
+            interval_seconds = int(interval_seconds)
+            if interval_seconds <= 0:
+                interval_seconds = None
+        except (TypeError, ValueError):
+            raise HTTPException(400, "interval_seconds 必须为正整数")
+    mode = body.get("mode") or ("interval" if interval_seconds else "continuous")
+    project_path = body.get("project_path")
+    if project_path in (None, "", "."):
+        project_path = _project_path
+    max_runs = body.get("max_runs")
+    if max_runs is not None:
+        try:
+            max_runs = int(max_runs)
+        except (TypeError, ValueError):
+            max_runs = None
+    lp = _loop_scheduler.create_loop(
+        spec=spec,
+        mode=mode,
+        interval_seconds=interval_seconds,
+        project_path=project_path,
+        max_runs=max_runs,
+    )
+    return {"success": True, "loop": lp}
+
+
+@router.post("/loops/{loop_id}/toggle")
+async def toggle_loop(loop_id: str):
+    """暂停 / 恢复循环。"""
+    if _loop_scheduler is None:
+        raise HTTPException(503, "Loop scheduler 未启用")
+    lp = _loop_scheduler.toggle(loop_id)
+    if lp is None:
+        raise HTTPException(404, f"Loop {loop_id} not found")
+    return {"success": True, "loop": lp}
+
+
+@router.delete("/loops/{loop_id}")
+async def delete_loop(loop_id: str):
+    """删除循环（不影响已经 spawn 出去的 task）。"""
+    if _loop_scheduler is None:
+        raise HTTPException(503, "Loop scheduler 未启用")
+    if not _loop_scheduler.delete(loop_id):
+        raise HTTPException(404, f"Loop {loop_id} not found")
+    return {"success": True}
+
+
+@router.get("/loops/{loop_id}/history")
+async def loop_history(loop_id: str):
+    """循环的运行历史（每轮 spawn 的 task_id + 结果）。"""
+    if _loop_scheduler is None:
+        raise HTTPException(503, "Loop scheduler 未启用")
+    h = _loop_scheduler.history(loop_id)
+    if h is None:
+        raise HTTPException(404, f"Loop {loop_id} not found")
+    return h
 
 
 # ============================================================

@@ -67,6 +67,7 @@ _SLASH_CMDS: list[tuple[str, str]] = [
     ("/discuss", "参与闭环讨论 / 选择方案"),
     ("/history", "迭代历史"),
     ("/continue", "续接历史任务"),
+    ("/loop", "自动循环：定时/自定步重跑任务"),
     ("/web", "在浏览器打开 Dashboard"),
     ("/config", "查看当前配置"),
     ("/clear", "清屏"),
