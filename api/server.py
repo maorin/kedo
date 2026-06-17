@@ -1179,6 +1179,11 @@ class KimiClient(BaseLLMClient):
     WRITE_TIMEOUT = 30         # 写超时
     MAX_RETRIES = 2            # 最大重试次数
 
+    # Kimi For Coding（api.kimi.com/coding/v1 的 kimi-for-coding 模型）只对白名单
+    # coding agent（Kimi CLI / Claude Code / Roo Code 等）放行，靠 User-Agent 识别。
+    # 所有请求路径都必须带上，否则 403 access_terminated_error。
+    USER_AGENT = "claude-code/0.1.0"
+
     def __init__(self, api_key: str, model: str = "kimi-k2.5",
                  base_url: str = "https://api.moonshot.ai/v1",
                  max_tokens: int = 8192):
@@ -1187,13 +1192,17 @@ class KimiClient(BaseLLMClient):
         self.base_url = base_url
         self.max_tokens = max_tokens
 
+    def _temperature(self) -> float:
+        # kimi-for-coding 服务端只接受 temperature=1（其它值 400 invalid_request_error）
+        return 1.0 if self.model == "kimi-for-coding" else 0.1
+
     async def chat(self, messages: list[dict]) -> str:
         import httpx
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            "User-Agent": "claude-code/0.1.0",
+            "User-Agent": self.USER_AGENT,
         }
 
         timeout = httpx.Timeout(
@@ -1260,7 +1269,7 @@ class KimiClient(BaseLLMClient):
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            "User-Agent": "claude-code/0.1.0",
+            "User-Agent": self.USER_AGENT,
         }
         timeout = httpx.Timeout(
             connect=self.CONNECT_TIMEOUT,
@@ -1280,7 +1289,7 @@ class KimiClient(BaseLLMClient):
                 json={
                     "model": self.model,
                     "messages": messages,
-                    "temperature": 0.1,
+                    "temperature": self._temperature(),
                     "max_tokens": self.max_tokens,
                     "stream": True,
                 },
@@ -1351,7 +1360,7 @@ class KimiClient(BaseLLMClient):
                 json={
                     "model": self.model,
                     "messages": messages,
-                    "temperature": 0.1,
+                    "temperature": self._temperature(),
                     "max_tokens": self.max_tokens,
                     "stream": True,
                 },
@@ -1484,7 +1493,7 @@ class KimiClient(BaseLLMClient):
                 json={
                     "model": self.model,
                     "messages": messages,
-                    "temperature": 0.1,
+                    "temperature": self._temperature(),
                     "max_tokens": self.max_tokens,
                 },
             )
@@ -1518,6 +1527,7 @@ class KimiClient(BaseLLMClient):
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
+            "User-Agent": self.USER_AGENT,  # kimi-for-coding 白名单 gate
         }
         timeout = httpx.Timeout(
             connect=self.CONNECT_TIMEOUT,
@@ -1528,7 +1538,7 @@ class KimiClient(BaseLLMClient):
         body = {
             "model": self.model,
             "messages": messages,
-            "temperature": 0.1,
+            "temperature": self._temperature(),
             "max_tokens": self.max_tokens,
         }
         if tools:
