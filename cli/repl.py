@@ -656,7 +656,7 @@ class KedoREPL:
             ("/candidates, /c", "列出所有候选版本"),
             ("/discuss, /d", "参与闭环讨论（选择方案）"),
             ("/history", "查看迭代历史"),
-            ("/loop", "自动循环：/loop <间隔> <任务> 定时重跑；/loop <任务> 自定步；/loop list|stop <id>"),
+            ("/loop", "自动循环：<间隔> <任务> 定时；<任务> 自定步；iterate <任务> [:: 目标] 迭代到达成；list|stop <id>"),
             ("/web, /w", "在浏览器中打开 Dashboard"),
             ("/config", "查看当前配置"),
             ("/clear", "清屏"),
@@ -1292,6 +1292,12 @@ class KedoREPL:
         if sub in ("pause", "resume", "toggle"):
             self._loop_toggle(rest)
             return
+        if sub in ("iterate", "iter", "until"):
+            if not rest:
+                self._safe_print(f"  {ERROR}用法: /loop iterate <任务> [:: <目标>]{C.RESET}  (反复迭代直到目标达成/成功)")
+                return
+            self._loop_create_iterate(rest)
+            return
 
         # 创建：首 token 是时长 → interval 模式；否则整串作为任务 → 自定步
         interval = self._parse_duration(sub)
@@ -1339,6 +1345,26 @@ class KedoREPL:
             err = (data or {}).get("error", "未知错误")
             self._safe_print(f"  {ERROR}✗ 创建失败: {err}{C.RESET}")
 
+    def _loop_create_iterate(self, rest: str):
+        """/loop iterate <任务> [:: <目标>] —— 模式 B：反复迭代直到目标达成。"""
+        goal = None
+        spec = rest.strip()
+        if "::" in rest:
+            spec, goal = (x.strip() for x in rest.split("::", 1))
+        body = {"spec": spec, "mode": "iterate", "project_path": self.project_path}
+        if goal:
+            body["goal"] = goal
+        data = self._api_post("/loops", body)
+        if data and data.get("success"):
+            lp = data["loop"]
+            crit = f"目标: {goal}" if goal else "判定: 任务成功完成即停"
+            self._safe_print(f"  {SUCCESS}✓ 自迭代循环已创建{C.RESET} {HIGHLIGHT}{lp['id']}{C.RESET}  (上限 {lp.get('max_runs')} 轮)")
+            self._safe_print(f"    {MUTED}任务: {spec[:60]}{C.RESET}")
+            self._safe_print(f"    {MUTED}{crit}{C.RESET}")
+        else:
+            err = (data or {}).get("error", "未知错误")
+            self._safe_print(f"  {ERROR}✗ 创建失败: {err}{C.RESET}")
+
     def _loop_list(self):
         loops = self._api_get("/loops")
         print()
@@ -1352,6 +1378,8 @@ class KedoREPL:
             color = {"running": SUCCESS, "paused": WARN, "completed": MUTED}.get(status, MUTED)
             if lp.get("mode") == "interval":
                 cadence = f"每 {self._fmt_dur(lp.get('interval_seconds'))}"
+            elif lp.get("mode") == "iterate":
+                cadence = "迭代→目标" + (f"({lp['goal'][:18]})" if lp.get("goal") else "(成功即停)")
             else:
                 cadence = "自定步"
             runs = lp.get("run_count", 0)

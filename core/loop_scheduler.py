@@ -50,10 +50,14 @@ class LoopScheduler:
         broadcast: Optional[Callable[[dict], Awaitable[None]]] = None,
         storage_dir: str = ".kedo/state",
         default_project_path: str = ".",
+        judge_llm=None,
     ):
         self._agent = react_agent
         self._state = state_manager
         self._broadcast = broadcast  # async fn(payload: dict) | None
+        # mode="iterate" 的目标达成判定用的 LLM（优先传 Reviewer LLM = 独立视角）；
+        # None 时 iterate 退回"任务是否成功完成"的状态判定
+        self._judge_llm = judge_llm
         self._loops: dict[str, dict] = {}
         self._path = Path(storage_dir) / "loops.json"
         self._default_project = default_project_path
@@ -102,17 +106,27 @@ class LoopScheduler:
         interval_seconds: Optional[int] = None,
         project_path: Optional[str] = None,
         max_runs: Optional[int] = None,
+        goal: Optional[str] = None,
     ) -> dict:
-        """新建一个 loop。mode='interval' 需 interval_seconds；'continuous' 上轮完成即重跑。"""
+        """
+        新建一个 loop：
+          - mode='interval'：每 interval_seconds 重跑（没给间隔自动退化为 continuous）
+          - mode='continuous'：上一轮跑完即重跑（最简自定步）
+          - mode='iterate'（M2 模式 B）：每轮跑完判定是否达成 goal，达成即停；
+            无 goal 文本时按"任务是否成功完成"判定。为安全默认 max_runs=10。
+        """
         if mode == "interval" and not interval_seconds:
             mode = "continuous"  # 没给间隔就退化为自定步
+        if mode == "iterate" and not max_runs:
+            max_runs = 10  # 自迭代安全上限，避免目标永不达成时无限跑
         loop_id = "lp-" + uuid.uuid4().hex[:6]
         now = _now()
         lp = {
             "id": loop_id,
             "spec": spec,
-            "mode": mode,  # "interval" | "continuous"  (M2: "iterate")
+            "mode": mode,  # "interval" | "continuous" | "iterate"
             "interval_seconds": interval_seconds,
+            "goal": (goal or "").strip() or None,
             "project_path": project_path or self._default_project,
             "max_runs": max_runs,
             "status": "running",
@@ -125,7 +139,10 @@ class LoopScheduler:
         }
         self._loops[loop_id] = lp
         self._persist()
-        logger.info(f"LoopScheduler: created {loop_id} mode={mode} interval={interval_seconds} spec={spec[:60]!r}")
+        logger.info(
+            f"LoopScheduler: created {loop_id} mode={mode} interval={interval_seconds} "
+            f"goal={(goal or '')[:40]!r} spec={spec[:60]!r}"
+        )
         return self._public(lp)
 
     def toggle(self, loop_id: str) -> Optional[dict]:
@@ -185,23 +202,36 @@ class LoopScheduler:
 
                 # 1) 本轮 spawn 的 task 还没到终态 → 等
                 cur = lp.get("current_task_id")
+                just_finished = None
+                last_status = None
                 if cur:
                     st = self._task_status(cur)
                     if st not in _TERMINAL:
                         continue
                     self._finish_run(lp, cur, st)
+                    just_finished, last_status = cur, st
                     lp["current_task_id"] = None
                     changed = True
 
-                # 2) max_runs 到顶 → 标完成
+                # 2) iterate（模式 B）：一轮跑完就判定目标是否达成，达成即停
+                if lp["mode"] == "iterate" and just_finished is not None:
+                    achieved, reason = await self._judge_iterate(lp, just_finished, last_status)
+                    self._annotate_judge(lp, just_finished, achieved, reason)
+                    if achieved:
+                        lp["status"] = "completed"
+                        changed = True
+                        await self._emit("loop_completed", lp, extra={"achieved": True, "reason": reason})
+                        continue
+
+                # 3) max_runs 到顶 → 标完成
                 if lp.get("max_runs") and lp["run_count"] >= lp["max_runs"]:
                     if lp["status"] != "completed":
                         lp["status"] = "completed"
                         changed = True
-                        await self._emit("loop_completed", lp)
+                        await self._emit("loop_completed", lp, extra={"reason": "达到 max_runs 上限"})
                     continue
 
-                # 3) 该开下一轮就开
+                # 4) 该开下一轮就开
                 if self._due(lp):
                     await self._spawn(lp)
                     changed = True
@@ -210,7 +240,7 @@ class LoopScheduler:
                 self._persist()
 
     def _due(self, lp: dict) -> bool:
-        if lp["mode"] == "continuous":
+        if lp["mode"] in ("continuous", "iterate"):
             return True  # 到这里说明上一轮已结束（current_task_id 已清）
         nra = lp.get("next_run_at")
         if not nra:
@@ -273,6 +303,64 @@ class LoopScheduler:
             return resp.status if resp else TaskStatus.FAILED
         except Exception:  # noqa: BLE001
             return TaskStatus.FAILED
+
+    # ---------------------------------------------------------- iterate（模式 B）目标判定
+    async def _judge_iterate(self, lp: dict, task_id: str, last_status) -> tuple[bool, str]:
+        """
+        判定本轮是否达成 goal：
+          - 无 goal 文本 → 纯按任务是否 COMPLETED 判定
+          - 有 goal 且有 judge_llm → 让 LLM 看目标 + 任务状态 + 近期日志给 JSON 裁决
+          - 有 goal 但无 judge_llm → 退回状态判定
+        注意：此处的 await 在 _tick 的锁内，judge 慢会让其它 loop 这一拍等待；loop 数少时可接受。
+        """
+        status_ok = last_status == TaskStatus.COMPLETED
+        goal = (lp.get("goal") or "").strip()
+        if not goal:
+            return status_ok, ("任务成功完成" if status_ok else "任务未成功完成，继续迭代")
+        if self._judge_llm is None:
+            return status_ok, "无判定 LLM，按任务状态判定"
+        try:
+            resp = self._state.get_task_status(task_id)
+            logs = "\n".join((resp.logs or [])[-30:]) if resp and resp.logs else ""
+            st_val = (
+                resp.status.value if resp and hasattr(resp.status, "value")
+                else (last_status.value if hasattr(last_status, "value") else str(last_status))
+            )
+            prompt = (
+                "你在判断一个自主 agent 是否达成了既定目标。只输出紧凑 JSON，不要多余文字。\n\n"
+                f"目标: {goal}\n"
+                f"本轮任务状态: {st_val}\n"
+                f"近期活动日志:\n{logs[:3000]}\n\n"
+                '严格输出: {"achieved": true 或 false, "reason": "一句话理由"}'
+            )
+            out = await self._judge_llm.chat([{"role": "user", "content": prompt}])
+            verdict = self._parse_verdict(out)
+            if verdict is None:
+                return status_ok, "判定输出无法解析，按任务状态判定"
+            return bool(verdict.get("achieved")), str(verdict.get("reason", ""))[:200]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"LoopScheduler: iterate judge failed: {e}")
+            return status_ok, f"判定异常（{e}），按任务状态判定"
+
+    @staticmethod
+    def _parse_verdict(text: str) -> Optional[dict]:
+        import re
+        if not text:
+            return None
+        m = re.search(r"\{.*\}", text, re.S)
+        if not m:
+            return None
+        try:
+            return json.loads(m.group(0))
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _annotate_judge(self, lp: dict, task_id: str, achieved: bool, reason: str) -> None:
+        for h in reversed(lp["history"]):
+            if h.get("task_id") == task_id:
+                h["goal_achieved"] = achieved
+                h["judge_reason"] = reason
+                break
 
     async def _emit(self, kind: str, lp: dict, extra: Optional[dict] = None) -> None:
         if not self._broadcast:

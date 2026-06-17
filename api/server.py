@@ -330,6 +330,8 @@ def create_app(config: dict = None) -> FastAPI:
         broadcast=ws_manager.broadcast,
         storage_dir=config.get("storage_dir", ".kedo/state"),
         default_project_path=config.get("project_path", "."),
+        # iterate（模式 B）目标判定优先用 Reviewer LLM（独立视角）；没有则回退主 LLM
+        judge_llm=(reviewer_llm if reviewer_llm is not None else llm_client),
     )
 
     # 注入依赖到路由（含 create_llm_client 引用，避免循环导入）

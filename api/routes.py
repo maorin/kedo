@@ -212,9 +212,10 @@ async def create_loop(body: dict = Body(...)):
     创建循环。body:
       - spec / description: 要循环执行的任务描述（必填）
       - interval_seconds: 固定间隔秒数（给了即 interval 模式；不给则 continuous 自定步）
-      - mode: 可选，"interval" | "continuous"（默认按 interval_seconds 推断）
+      - mode: 可选，"interval" | "continuous" | "iterate"（默认按 interval_seconds 推断）
+      - goal: 可选，iterate 模式的目标达成判定文本（无则按任务成功与否判定）
       - project_path: 可选，默认服务端项目根
-      - max_runs: 可选，跑满即自动停止
+      - max_runs: 可选，跑满即自动停止（iterate 默认 10）
     """
     if _loop_scheduler is None:
         raise HTTPException(503, "Loop scheduler 未启用")
@@ -230,6 +231,8 @@ async def create_loop(body: dict = Body(...)):
         except (TypeError, ValueError):
             raise HTTPException(400, "interval_seconds 必须为正整数")
     mode = body.get("mode") or ("interval" if interval_seconds else "continuous")
+    if mode not in ("interval", "continuous", "iterate"):
+        raise HTTPException(400, f"未知 mode: {mode}")
     project_path = body.get("project_path")
     if project_path in (None, "", "."):
         project_path = _project_path
@@ -245,6 +248,7 @@ async def create_loop(body: dict = Body(...)):
         interval_seconds=interval_seconds,
         project_path=project_path,
         max_runs=max_runs,
+        goal=body.get("goal"),
     )
     return {"success": True, "loop": lp}
 
