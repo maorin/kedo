@@ -1892,11 +1892,13 @@
             loops.forEach(l => {
                 const tr = document.createElement('tr');
                 const mode = l.mode === 'interval' ? ('每 ' + _fmtDur(l.interval_seconds))
+                           : l.mode === 'daily' ? ('每天 ' + (l.at_time || '?'))
                            : l.mode === 'iterate' ? ('迭代→' + (l.goal ? '目标' : '成功'))
                            : '自定步';
                 const runs = l.max_runs ? `${l.run_count || 0}/${l.max_runs}` : (l.run_count || 0);
-                const next = (l.status === 'running' && l.mode === 'interval') ? _fmtTime(l.next_run_at)
-                           : (l.current_task_id ? '运行中' : '—');
+                const next = l.current_task_id ? '运行中'
+                           : (l.status === 'running' && (l.mode === 'interval' || l.mode === 'daily')) ? _fmtTime(l.next_run_at)
+                           : '—';
                 const toggleLabel = l.status === 'running' ? '暂停' : '恢复';
                 tr.innerHTML = `
                     <td style="font-family:monospace;">${l.id}</td>
@@ -1974,6 +1976,7 @@
         function onLoopModeChange() {
             const mode = document.getElementById('loopMode').value;
             document.getElementById('loopIntervalRow').style.display = (mode === 'interval') ? 'block' : 'none';
+            document.getElementById('loopDailyRow').style.display = (mode === 'daily') ? 'block' : 'none';
             document.getElementById('loopGoalRow').style.display = (mode === 'iterate') ? 'block' : 'none';
         }
 
@@ -1988,6 +1991,10 @@
                 const sec = parseDurationStr(dur);
                 if (sec === null) { alert('间隔格式错误，示例: 5m / 30s / 1h30m'); return; }
                 body.interval_seconds = sec;
+            } else if (mode === 'daily') {
+                const at = document.getElementById('loopAtTime').value.trim();
+                if (!/^\d{1,2}:\d{2}$/.test(at)) { alert('请填写每天运行时刻 HH:MM'); return; }
+                body.at_time = at;
             } else if (mode === 'iterate') {
                 const goal = document.getElementById('loopGoal').value.trim();
                 if (goal) body.goal = goal;
@@ -6092,6 +6099,7 @@
                     <div style="font-size:0.75rem;color:#888;margin-bottom:0.25rem;">模式</div>
                     <select id="loopMode" onchange="onLoopModeChange()" style="width:100%;padding:0.5rem;background:rgba(30,41,59,0.6);border:1px solid rgba(100,200,255,0.2);border-radius:4px;color:#e0e0e0;font-size:0.85rem;">
                         <option value="interval">定时重跑（每隔固定时间）</option>
+                        <option value="daily">每天定时（每天某时刻跑一次）</option>
                         <option value="continuous">自定步（上一轮完成即重跑）</option>
                         <option value="iterate">自迭代到目标（达成/成功即停）</option>
                     </select>
@@ -6099,6 +6107,10 @@
                 <div>
                     <div style="font-size:0.75rem;color:#888;margin-bottom:0.25rem;">任务描述（每轮要执行的事）</div>
                     <textarea id="loopSpec" placeholder="如: 跑一遍回归测试并把失败截图汇总" style="width:100%;min-height:72px;padding:0.5rem;background:rgba(30,41,59,0.6);border:1px solid rgba(100,200,255,0.2);border-radius:4px;color:#e0e0e0;font-size:0.85rem;box-sizing:border-box;"></textarea>
+                </div>
+                <div id="loopDailyRow" style="display:none;">
+                    <div style="font-size:0.75rem;color:#888;margin-bottom:0.25rem;">每天运行时刻（本机本地时间，HH:MM）</div>
+                    <input type="time" id="loopAtTime" value="00:30" style="width:100%;padding:0.5rem;background:rgba(30,41,59,0.6);border:1px solid rgba(100,200,255,0.2);border-radius:4px;color:#e0e0e0;font-size:0.85rem;box-sizing:border-box;">
                 </div>
                 <div id="loopGoalRow" style="display:none;">
                     <div style="font-size:0.75rem;color:#888;margin-bottom:0.25rem;">目标达成判定（留空=任务成功完成即停）</div>

@@ -657,7 +657,7 @@ class KedoREPL:
             ("/candidates, /c", "列出所有候选版本"),
             ("/discuss, /d", "参与闭环讨论（选择方案）"),
             ("/history", "查看迭代历史"),
-            ("/loop", "自动循环：<间隔> <任务> 定时；<任务> 自定步；iterate <任务> [:: 目标] 迭代到达成；list|stop <id>"),
+            ("/loop", "自动循环：<间隔> <任务> 定时；daily HH:MM <任务> 每天定时；<任务> 自定步；iterate <任务> [:: 目标]；list|stop <id>"),
             ("/skill", "技能包：list / install <git-url或路径> / show <name> / rm <name>"),
             ("/web, /w", "在浏览器中打开 Dashboard"),
             ("/config", "查看当前配置"),
@@ -1300,6 +1300,13 @@ class KedoREPL:
                 return
             self._loop_create_iterate(rest)
             return
+        if sub == "daily":
+            dparts = rest.split(maxsplit=1)
+            if len(dparts) < 2 or ":" not in dparts[0]:
+                self._safe_print(f"  {ERROR}用法: /loop daily HH:MM <任务>{C.RESET}  (例: /loop daily 00:30 跑 HCI 回归)")
+                return
+            self._loop_create(dparts[1], interval_seconds=None, mode="daily", at_time=dparts[0])
+            return
 
         # 创建：首 token 是时长 → interval 模式；否则整串作为任务 → 自定步
         interval = self._parse_duration(sub)
@@ -1332,14 +1339,21 @@ class KedoREPL:
         out = "".join(p for p in (f"{h}h" if h else "", f"{m}m" if m else "", f"{s}s" if s else "") if p)
         return out or "0s"
 
-    def _loop_create(self, spec: str, interval_seconds: Optional[int], mode: str):
+    def _loop_create(self, spec: str, interval_seconds: Optional[int], mode: str, at_time: str = None):
         body = {"spec": spec, "mode": mode, "project_path": self.project_path}
         if interval_seconds:
             body["interval_seconds"] = interval_seconds
+        if at_time:
+            body["at_time"] = at_time
         data = self._api_post("/loops", body)
         if data and data.get("success"):
             lp = data["loop"]
-            when = f"每 {self._fmt_dur(interval_seconds)} 重跑" if interval_seconds else "上一轮完成后立即重跑（自定步）"
+            if mode == "daily":
+                when = f"每天 {at_time} 跑"
+            elif interval_seconds:
+                when = f"每 {self._fmt_dur(interval_seconds)} 重跑"
+            else:
+                when = "上一轮完成后立即重跑（自定步）"
             self._safe_print(f"  {SUCCESS}✓ 循环已创建{C.RESET} {HIGHLIGHT}{lp['id']}{C.RESET} — {when}")
             self._safe_print(f"    {MUTED}目标: {spec[:70]}{C.RESET}")
             self._safe_print(f"    {MUTED}查看: /loop list   停止: /loop stop {lp['id']}{C.RESET}")
@@ -1380,6 +1394,8 @@ class KedoREPL:
             color = {"running": SUCCESS, "paused": WARN, "completed": MUTED}.get(status, MUTED)
             if lp.get("mode") == "interval":
                 cadence = f"每 {self._fmt_dur(lp.get('interval_seconds'))}"
+            elif lp.get("mode") == "daily":
+                cadence = f"每天 {lp.get('at_time')}"
             elif lp.get("mode") == "iterate":
                 cadence = "迭代→目标" + (f"({lp['goal'][:18]})" if lp.get("goal") else "(成功即停)")
             else:

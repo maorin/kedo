@@ -40,6 +40,27 @@ def _iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat() if dt else None
 
 
+def _parse_hhmm(at_time: str) -> tuple[int, int]:
+    """'00:30' → (0, 30)；非法抛 ValueError。"""
+    parts = (at_time or "").strip().split(":")
+    if len(parts) != 2:
+        raise ValueError("at_time 必须是 HH:MM")
+    h, m = int(parts[0]), int(parts[1])
+    if not (0 <= h < 24 and 0 <= m < 60):
+        raise ValueError("at_time 超出范围")
+    return h, m
+
+
+def _next_daily(at_time: str) -> datetime:
+    """下一次 HH:MM 的本机本地时刻（aware）。今天还没到就用今天，否则明天。"""
+    h, m = _parse_hhmm(at_time)
+    now_local = datetime.now().astimezone()
+    target = now_local.replace(hour=h, minute=m, second=0, microsecond=0)
+    if target <= now_local:
+        target += timedelta(days=1)
+    return target
+
+
 class LoopScheduler:
     TICK_SECONDS = 5
 
@@ -107,11 +128,13 @@ class LoopScheduler:
         project_path: Optional[str] = None,
         max_runs: Optional[int] = None,
         goal: Optional[str] = None,
+        at_time: Optional[str] = None,
     ) -> dict:
         """
         新建一个 loop：
           - mode='interval'：每 interval_seconds 重跑（没给间隔自动退化为 continuous）
           - mode='continuous'：上一轮跑完即重跑（最简自定步）
+          - mode='daily'：每天本地时间 at_time(HH:MM) 跑一次（cron 式定时）
           - mode='iterate'（M2 模式 B）：每轮跑完判定是否达成 goal，达成即停；
             无 goal 文本时按"任务是否成功完成"判定。为安全默认 max_runs=10。
         """
@@ -119,20 +142,26 @@ class LoopScheduler:
             mode = "continuous"  # 没给间隔就退化为自定步
         if mode == "iterate" and not max_runs:
             max_runs = 10  # 自迭代安全上限，避免目标永不达成时无限跑
+        if mode == "daily":
+            _parse_hhmm(at_time)  # 校验格式，非法抛 ValueError
+            first_run = _iso(_next_daily(at_time))
+        else:
+            first_run = _iso(_now())  # 第一轮立即触发
         loop_id = "lp-" + uuid.uuid4().hex[:6]
         now = _now()
         lp = {
             "id": loop_id,
             "spec": spec,
-            "mode": mode,  # "interval" | "continuous" | "iterate"
+            "mode": mode,  # "interval" | "continuous" | "daily" | "iterate"
             "interval_seconds": interval_seconds,
+            "at_time": at_time if mode == "daily" else None,
             "goal": (goal or "").strip() or None,
             "project_path": project_path or self._default_project,
             "max_runs": max_runs,
             "status": "running",
             "run_count": 0,
             "created_at": _iso(now),
-            "next_run_at": _iso(now),  # 第一轮立即触发
+            "next_run_at": first_run,
             "last_run_at": None,
             "current_task_id": None,
             "history": [],
@@ -153,9 +182,11 @@ class LoopScheduler:
             lp["status"] = "paused"
         else:
             lp["status"] = "running"
-            # resume 后让 interval loop 尽快补跑（不积压历史窗口）
+            # resume 后：interval 尽快补跑；daily 重算下一次本地时刻
             if lp["mode"] == "interval":
                 lp["next_run_at"] = _iso(_now())
+            elif lp["mode"] == "daily" and lp.get("at_time"):
+                lp["next_run_at"] = _iso(_next_daily(lp["at_time"]))
         self._persist()
         return self._public(lp)
 
@@ -239,6 +270,13 @@ class LoopScheduler:
             if changed:
                 self._persist()
 
+    def _reschedule(self, lp: dict) -> None:
+        """interval / daily 模式跑完一轮后算下一次 next_run_at。"""
+        if lp["mode"] == "interval" and lp.get("interval_seconds"):
+            lp["next_run_at"] = _iso(_now() + timedelta(seconds=lp["interval_seconds"]))
+        elif lp["mode"] == "daily" and lp.get("at_time"):
+            lp["next_run_at"] = _iso(_next_daily(lp["at_time"]))
+
     def _due(self, lp: dict) -> bool:
         if lp["mode"] in ("continuous", "iterate"):
             return True  # 到这里说明上一轮已结束（current_task_id 已清）
@@ -270,9 +308,8 @@ class LoopScheduler:
                 "status": "spawn_error",
                 "error": str(e),
             })
-            # interval 模式仍排下一轮，避免一次失败就卡死
-            if lp["mode"] == "interval" and lp.get("interval_seconds"):
-                lp["next_run_at"] = _iso(_now() + timedelta(seconds=lp["interval_seconds"]))
+            # interval / daily 仍排下一轮，避免一次失败就卡死
+            self._reschedule(lp)
             return
 
         lp["run_count"] = run_no
@@ -285,8 +322,7 @@ class LoopScheduler:
             "finished_at": None,
             "status": "running",
         })
-        if lp["mode"] == "interval" and lp.get("interval_seconds"):
-            lp["next_run_at"] = _iso(_now() + timedelta(seconds=lp["interval_seconds"]))
+        self._reschedule(lp)
         await self._emit("loop_execution", lp, extra={"task_id": task_id, "run": run_no})
 
     def _finish_run(self, lp: dict, task_id: str, status) -> None:

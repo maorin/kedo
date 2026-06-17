@@ -253,7 +253,9 @@
   - 目标判定：有 `goal` 文本且有判定 LLM → LLM 输出 JSON 裁决（`{achieved, reason}`）；无 goal → 按任务是否 COMPLETED 判定；判定 LLM **优先用 Reviewer LLM**（独立视角 = Reviewer 联动），无则回退主 LLM
   - 安全：iterate 默认 `max_runs=10`，目标永不达成也不会无限跑；每轮 verdict 记进 history（`goal_achieved` / `judge_reason`）
   - 入口：REPL `/loop iterate <任务> [:: <目标>]`；dashboard 创建 modal 加「模式」下拉 + 目标输入框，历史表显示 ✓/✗ 达成
-- **后续（按需）**：模型驱动的真·自定步（让 agent 自报下次间隔）；dashboard 历史改抽屉式
+- **M1.1（✅ 2026-06-17）**：加 `daily` 模式 —— 每天本地时间 `at_time`(HH:MM) 跑一次（cron 式定时，用本地时区算 next_run，非 UTC）。REPL `/loop daily HH:MM <任务>`、dashboard 模式下拉 + 时间选择、API `mode=daily`+`at_time`。实战：hci-ui-regression 每天 0:30 跑回归。
+- **已知缺口**：loop 只能经 dashboard / REPL `/loop` / API 创建，**ReactAgent 没有 create_loop 工具** —— 用自然语言让 agent "建个每天循环" 不会真注册（agent 当普通 task 处理）。要支持得加 loop 工具（待定）。
+- **后续（按需）**：模型驱动的真·自定步（让 agent 自报下次间隔）；dashboard 历史改抽屉式；agent 侧 create_loop 工具
 - **估时：** M1 + M2 均已完成
 
 ---

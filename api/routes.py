@@ -234,8 +234,11 @@ async def create_loop(body: dict = Body(...)):
         except (TypeError, ValueError):
             raise HTTPException(400, "interval_seconds 必须为正整数")
     mode = body.get("mode") or ("interval" if interval_seconds else "continuous")
-    if mode not in ("interval", "continuous", "iterate"):
+    if mode not in ("interval", "continuous", "iterate", "daily"):
         raise HTTPException(400, f"未知 mode: {mode}")
+    at_time = (body.get("at_time") or "").strip() or None
+    if mode == "daily" and not at_time:
+        raise HTTPException(400, "daily 模式需要 at_time (HH:MM)")
     project_path = body.get("project_path")
     if project_path in (None, "", "."):
         project_path = _project_path
@@ -245,14 +248,18 @@ async def create_loop(body: dict = Body(...)):
             max_runs = int(max_runs)
         except (TypeError, ValueError):
             max_runs = None
-    lp = _loop_scheduler.create_loop(
-        spec=spec,
-        mode=mode,
-        interval_seconds=interval_seconds,
-        project_path=project_path,
-        max_runs=max_runs,
-        goal=body.get("goal"),
-    )
+    try:
+        lp = _loop_scheduler.create_loop(
+            spec=spec,
+            mode=mode,
+            interval_seconds=interval_seconds,
+            project_path=project_path,
+            max_runs=max_runs,
+            goal=body.get("goal"),
+            at_time=at_time,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return {"success": True, "loop": lp}
 
 
