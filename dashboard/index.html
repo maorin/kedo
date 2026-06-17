@@ -1822,6 +1822,12 @@
             if (!iso) return '—';
             try { return new Date(iso).toLocaleTimeString(); } catch (e) { return '—'; }
         }
+        // 完整 HTML 转义（用于把不可信值——任务描述、LLM 判定理由——插进 innerHTML/属性）
+        function escHtml(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
 
         async function refreshLoopsData() {
             try {
@@ -1858,7 +1864,7 @@
                 const toggleLabel = l.status === 'running' ? '暂停' : '恢复';
                 tr.innerHTML = `
                     <td style="font-family:monospace;">${l.id}</td>
-                    <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${(l.spec||'').replace(/"/g,'&quot;')}">${(l.spec || '').slice(0, 50)}</td>
+                    <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(l.spec)}">${escHtml((l.spec || '').slice(0, 50))}</td>
                     <td>${mode}</td>
                     <td><span class="status-badge ${badge[l.status] || 'pending'}">${l.status}</span></td>
                     <td>${runs}</td>
@@ -1904,7 +1910,7 @@
                         let verdict = '';
                         if (h.goal_achieved !== undefined) {
                             const ok = h.goal_achieved;
-                            verdict = `<span class="status-badge ${ok ? 'success' : 'skipped'}" title="${(h.judge_reason||'').replace(/"/g,'&quot;')}">${ok ? '✓ 达成' : '✗ 未达成'}</span>`;
+                            verdict = `<span class="status-badge ${ok ? 'success' : 'skipped'}" title="${escHtml(h.judge_reason)}">${ok ? '✓ 达成' : '✗ 未达成'}</span>`;
                         }
                         tr.innerHTML = `
                             <td>${h.run}</td>
