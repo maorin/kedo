@@ -55,8 +55,8 @@ class LoopScheduler:
         self._agent = react_agent
         self._state = state_manager
         self._broadcast = broadcast  # async fn(payload: dict) | None
-        # mode="iterate" 的目标达成判定用的 LLM（优先传 Reviewer LLM = 独立视角）；
-        # None 时 iterate 退回"任务是否成功完成"的状态判定
+        # mode="iterate" 目标达成判定用的独立 LLM：建议只传 Reviewer LLM（独立视角）。
+        # 传 None 时 _judge_iterate 会回退到 agent 当前 LLM（跟随 /llm/switch 热切换）。
         self._judge_llm = judge_llm
         self._loops: dict[str, dict] = {}
         self._path = Path(storage_dir) / "loops.json"
@@ -317,7 +317,10 @@ class LoopScheduler:
         goal = (lp.get("goal") or "").strip()
         if not goal:
             return status_ok, ("任务成功完成" if status_ok else "任务未成功完成，继续迭代")
-        if self._judge_llm is None:
+        # 判定 LLM 解析顺序：显式传入的 Reviewer LLM（独立视角）> agent 当前 LLM（跟随 /llm/switch
+        # 热切换，避免一直用启动时的旧 client）。两者都没有才退回状态判定。
+        judge = self._judge_llm or getattr(self._agent, "llm", None)
+        if judge is None:
             return status_ok, "无判定 LLM，按任务状态判定"
         try:
             resp = self._state.get_task_status(task_id)
@@ -333,7 +336,7 @@ class LoopScheduler:
                 f"近期活动日志:\n{logs[:3000]}\n\n"
                 '严格输出: {"achieved": true 或 false, "reason": "一句话理由"}'
             )
-            out = await self._judge_llm.chat([{"role": "user", "content": prompt}])
+            out = await judge.chat([{"role": "user", "content": prompt}])
             verdict = self._parse_verdict(out)
             if verdict is None:
                 return status_ok, "判定输出无法解析，按任务状态判定"

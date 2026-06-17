@@ -330,8 +330,9 @@ def create_app(config: dict = None) -> FastAPI:
         broadcast=ws_manager.broadcast,
         storage_dir=config.get("storage_dir", ".kedo/state"),
         default_project_path=config.get("project_path", "."),
-        # iterate（模式 B）目标判定优先用 Reviewer LLM（独立视角）；没有则回退主 LLM
-        judge_llm=(reviewer_llm if reviewer_llm is not None else llm_client),
+        # iterate（模式 B）目标判定：只传 Reviewer LLM（独立视角）；reviewer 关闭时传 None，
+        # 让 scheduler 在判定时回退到 agent 当前 LLM（跟随 /llm/switch 热切换，不锁死启动时的 client）
+        judge_llm=reviewer_llm,
     )
 
     # 注入依赖到路由（含 create_llm_client 引用，避免循环导入）
