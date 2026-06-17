@@ -260,7 +260,16 @@ async def create_loop(body: dict = Body(...)):
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
+    await _broadcast_loop_changed(lp)
     return {"success": True, "loop": lp}
+
+
+async def _broadcast_loop_changed(data: dict):
+    """create/toggle/delete 后推 WS，让已打开的 dashboard 循环页实时刷新。"""
+    try:
+        await ws_manager.broadcast({"type": "loop_event", "event": "loop_changed", "data": data or {}})
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @router.post("/loops/{loop_id}/toggle")
@@ -271,6 +280,7 @@ async def toggle_loop(loop_id: str):
     lp = _loop_scheduler.toggle(loop_id)
     if lp is None:
         raise HTTPException(404, f"Loop {loop_id} not found")
+    await _broadcast_loop_changed(lp)
     return {"success": True, "loop": lp}
 
 
@@ -281,6 +291,7 @@ async def delete_loop(loop_id: str):
         raise HTTPException(503, "Loop scheduler 未启用")
     if not _loop_scheduler.delete(loop_id):
         raise HTTPException(404, f"Loop {loop_id} not found")
+    await _broadcast_loop_changed({"id": loop_id, "deleted": True})
     return {"success": True}
 
 
