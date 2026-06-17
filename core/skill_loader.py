@@ -179,6 +179,9 @@ class SkillLoader:
         source = (source or "").strip()
         if not source:
             raise ValueError("source 不能为空")
+        # 防 argv flag 注入：以 - 开头会被 git/shutil 当成选项（如 --upload-pack=… → RCE）
+        if source.startswith("-"):
+            raise ValueError("source 不能以 '-' 开头")
 
         tmp = self.skills_dir / ".tmp_install"
         if tmp.exists():
@@ -187,8 +190,9 @@ class SkillLoader:
         is_git = bool(re.match(r"^(ssh://|https?://|git@|git://)", source)) or source.endswith(".git")
         try:
             if is_git:
+                # -- 终止选项解析，user-controlled source 一律当位置参数
                 env_cmd = [
-                    "git", "clone", "--depth", "1", source, str(tmp),
+                    "git", "clone", "--depth", "1", "--", source, str(tmp),
                 ]
                 proc = subprocess.run(
                     env_cmd,
