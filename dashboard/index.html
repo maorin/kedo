@@ -1058,6 +1058,7 @@
                         <button class="view-btn" data-view="deploy">部署</button>
                         <button class="view-btn" data-view="test">测试</button>
                         <button class="view-btn" data-view="loops">⏱️ 循环</button>
+                        <button class="view-btn" data-view="skills">🔧 技能</button>
                     </div>
                 </div>
                 <div class="header-status">
@@ -1595,6 +1596,32 @@
                     </table>
                 </div>
             </div>
+
+            <!-- ====== 技能视图 (Skill 消费) ====== -->
+            <div class="monitor-view" id="skillsView" style="overflow:hidden;">
+                <div style="display:flex;height:100%;overflow:hidden;">
+                    <!-- 左：skill 列表 + 安装 -->
+                    <div style="width:320px;flex-shrink:0;border-right:1px solid rgba(100,200,255,0.1);display:flex;flex-direction:column;overflow:hidden;">
+                        <div style="padding:1rem 1.2rem;border-bottom:1px solid rgba(100,200,255,0.1);flex-shrink:0;">
+                            <h2 style="font-size:1.05rem;color:#e0e0e0;font-weight:600;margin:0 0 0.6rem;">🔧 技能库</h2>
+                            <div style="display:flex;gap:0.4rem;">
+                                <input type="text" id="skillInstallSource" placeholder="git-url 或本地路径" style="flex:1;padding:0.4rem;background:rgba(30,41,59,0.6);border:1px solid rgba(100,200,255,0.2);border-radius:4px;color:#e0e0e0;font-size:0.78rem;box-sizing:border-box;">
+                                <button class="monitor-refresh-btn" style="background:rgba(0,217,255,0.15);color:#00d9ff;" onclick="installSkill()">安装</button>
+                            </div>
+                            <div id="skillInstallMsg" style="font-size:0.72rem;color:#888;margin-top:0.4rem;min-height:1em;"></div>
+                        </div>
+                        <div id="skillsList" style="flex:1;overflow-y:auto;padding:0.6rem;display:flex;flex-direction:column;gap:0.4rem;min-height:0;">
+                            <div style="color:#888;padding:1.5rem 1rem;text-align:center;font-size:0.82rem;">加载中...</div>
+                        </div>
+                    </div>
+                    <!-- 右：skill 详情 -->
+                    <div style="flex:1;overflow-y:auto;padding:1.2rem 1.6rem;">
+                        <div id="skillDetail">
+                            <div style="color:#888;padding:2rem 1rem;text-align:center;">选择左侧技能查看完整指令（SKILL.md）</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <footer>
@@ -1729,6 +1756,7 @@
             deployView: document.getElementById('deployView'),
             testView: document.getElementById('testView'),
             loopsView: document.getElementById('loopsView'),
+            skillsView: document.getElementById('skillsView'),
             viewBtns: document.querySelectorAll('.view-btn'),
             // 文档
             docsTree: document.getElementById('docsTree'),
@@ -1770,6 +1798,10 @@
                 dom.loopsView.style.display = 'none';
                 dom.loopsView.classList.remove('active');
             }
+            if (dom.skillsView) {
+                dom.skillsView.style.display = 'none';
+                dom.skillsView.classList.remove('active');
+            }
 
             // 显示对应视图
             if (viewName === 'pipeline') {
@@ -1802,6 +1834,10 @@
                 dom.loopsView.classList.add('active');
                 dom.loopsView.style.display = 'block';
                 refreshLoopsData();
+            } else if (viewName === 'skills') {
+                dom.skillsView.classList.add('active');
+                dom.skillsView.style.display = 'block';
+                refreshSkillsData();
             }
         }
 
@@ -1979,6 +2015,91 @@
             const mult = { s: 1, m: 60, h: 3600 };
             while ((m = re.exec(s)) !== null) total += parseInt(m[1]) * mult[m[2]];
             return total || null;
+        }
+
+        // ============================================================
+        // Skill 消费（技能视图）
+        // ============================================================
+        let _skillsCache = [];
+        async function refreshSkillsData() {
+            try {
+                const resp = await fetch(`${API_BASE}/skills`);
+                _skillsCache = await resp.json();
+            } catch (e) { _skillsCache = []; }
+            renderSkillsList();
+        }
+
+        function renderSkillsList() {
+            const list = document.getElementById('skillsList');
+            list.innerHTML = '';
+            if (!_skillsCache || _skillsCache.length === 0) {
+                list.innerHTML = '<div style="color:#888;padding:1.5rem 1rem;text-align:center;font-size:0.82rem;">暂无技能。上方输入 git-url 安装。</div>';
+                return;
+            }
+            _skillsCache.forEach(sk => {
+                const div = document.createElement('div');
+                div.style.cssText = 'padding:0.6rem 0.7rem;background:rgba(30,41,59,0.6);border:1px solid rgba(100,200,255,0.15);border-radius:5px;cursor:pointer;';
+                div.innerHTML = `
+                    <div style="font-weight:600;color:#00d9ff;font-size:0.85rem;">${escHtml(sk.name)}</div>
+                    <div style="font-size:0.72rem;color:#888;margin-top:0.2rem;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${escHtml(sk.description || '(无描述)')}</div>`;
+                div.onclick = () => showSkillDetail(sk.name);
+                list.appendChild(div);
+            });
+        }
+
+        async function showSkillDetail(name) {
+            const panel = document.getElementById('skillDetail');
+            panel.innerHTML = '<div style="color:#888;padding:1rem;">加载中...</div>';
+            try {
+                const sk = await (await fetch(`${API_BASE}/skills/${encodeURIComponent(name)}`)).json();
+                const files = (sk.files || []).map(f => `<code style="background:rgba(0,0,0,0.3);padding:1px 5px;border-radius:3px;font-size:0.72rem;">${escHtml(f)}</code>`).join(' ');
+                panel.innerHTML = `
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;margin-bottom:0.5rem;">
+                        <div>
+                            <h2 style="color:#00d9ff;margin:0;font-size:1.15rem;">${escHtml(sk.name)}</h2>
+                            <div style="color:#888;font-size:0.8rem;margin-top:0.3rem;">${escHtml(sk.description || '')}</div>
+                        </div>
+                        <button class="monitor-refresh-btn" style="color:#ef4444;flex-shrink:0;" onclick="deleteSkill('${escHtml(sk.name)}')">卸载</button>
+                    </div>
+                    <div style="font-size:0.74rem;color:#888;margin-bottom:0.3rem;">目录: <code style="font-size:0.72rem;">${escHtml(sk.dir || '')}</code></div>
+                    <div style="font-size:0.74rem;color:#888;margin-bottom:0.8rem;">随包文件: ${files || '（无）'}</div>
+                    <div style="font-size:0.7rem;color:#666;margin-bottom:0.4rem;">↓ SKILL.md 指令正文（agent 跑任务时会在系统 prompt 看到此 skill 的名字+描述，按需 skill_read 读下面全文）</div>
+                    <pre style="margin:0;padding:0.9rem;background:rgba(0,0,0,0.3);border:1px solid rgba(100,200,255,0.1);border-radius:6px;font-size:0.76rem;line-height:1.5;color:#c9d1d9;white-space:pre-wrap;overflow:auto;max-height:60vh;">${escHtml(sk.body || '')}</pre>`;
+            } catch (e) {
+                panel.innerHTML = `<div style="color:#ef4444;">加载失败: ${escHtml(e.message)}</div>`;
+            }
+        }
+
+        async function installSkill() {
+            const src = document.getElementById('skillInstallSource').value.trim();
+            const msg = document.getElementById('skillInstallMsg');
+            if (!src) { msg.textContent = '请填写 git-url 或本地路径'; return; }
+            msg.style.color = '#888'; msg.textContent = '安装中（git clone / 拷贝）...';
+            try {
+                const r = await fetch(`${API_BASE}/skills/install`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: src })
+                });
+                const res = await r.json();
+                if (res.success) {
+                    msg.style.color = '#22c55e'; msg.textContent = '✓ 已安装: ' + res.skill.name;
+                    document.getElementById('skillInstallSource').value = '';
+                    await refreshSkillsData();
+                    showSkillDetail(res.skill.name);
+                } else {
+                    msg.style.color = '#ef4444'; msg.textContent = '✗ ' + (res.error || '安装失败');
+                }
+            } catch (e) { msg.style.color = '#ef4444'; msg.textContent = '✗ ' + e.message; }
+        }
+
+        async function deleteSkill(name) {
+            if (!confirm(`卸载技能 ${name}？`)) return;
+            try {
+                const r = await fetch(`${API_BASE}/skills/${encodeURIComponent(name)}`, { method: 'DELETE' });
+                if (r.ok) {
+                    document.getElementById('skillDetail').innerHTML = '<div style="color:#888;padding:2rem 1rem;text-align:center;">选择左侧技能查看完整指令（SKILL.md）</div>';
+                    refreshSkillsData();
+                }
+            } catch (e) { addLog('技能', '卸载失败: ' + e.message, 'error'); }
         }
 
         // ============================================================

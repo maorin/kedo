@@ -24,7 +24,7 @@
 4. 🔄 Browser Bridge **M4** 局部完成（基础设施齐 + browser_research 路径 A 实战通了；真隔离 chrome 启动 Linux Google Chrome 阻塞，待真需求来时迁 Playwright）
 5. ✅ 对接本地 **ds4** 推理引擎（DeepSeek V4 Flash）作为新 LLM provider — 基础 + 文档落地 2026-05-21（`9beb2f0` `a7eff1c`），待 switchvideo 实战验证长 context
 6. ✅ **/loop 自动循环**（参考 Claude Code `/loop`）— M1 模式 A（定时/自定步）+ M2 模式 B（agent 自迭代到目标，LLM 判定 / Reviewer 联动）均落地 2026-06-17：REPL `/loop` + `core/loop_scheduler.py` + dashboard「⏱️ 循环」面板
-7. 🆕 **skill 双向**（kedo 消费本地 markdown skill 包 + kedo 暴露为 skill/MCP 供 Claude Code/Cursor 调用，参考 Claude Code）— 含 dashboard「🔧 技能」面板
+7. 🔄 **skill 双向**（参考 Claude Code）— ✅ 方向 1（消费 Agent Skill 包）落地 2026-06-17：`core/skill_loader.py` + `skill_list`/`skill_read` 工具 + 系统 prompt 注入 + REPL `/skill` + dashboard「🔧 技能」；方向 2（暴露为 skill/MCP）待做
 8. 主 dashboard 整合 Inbox 工作流（避免独立 URL）
 
 ---
@@ -43,7 +43,7 @@
 | 工具脆弱性 | profile_guard + auto_fix ✅ | tool 调用幂等性 + retry 策略 | `deep-dives/tool-fragility.md` |
 | LLM Provider | Kimi/Claude/DeepSeek/OpenAI/**ds4** ✅ | switchvideo 实战验证 ds4 长 context + quirk-mitigation 抽象层 | `llm-providers.md` |
 | **/loop 自动循环** | M1 定时 + M2 自迭代 ✅ | 模型驱动真·自定步 / 更细 dashboard drawer | 本文 §`/loop 自动循环` |
-| **Skill（消费）** | 🆕 规划 | 本地 skill 包加载 + ReactAgent 调用 + dashboard 面板 | 本文 §`Skill 双向` |
+| **Skill（消费）** | ✅ 落地 | git/本地 install + skill_read 工具 + prompt 注入 + dashboard | 本文 §`Skill 双向` |
 | **Skill（暴露）** | 探讨稿 → 规划 | kedo 暴露为 skill/MCP 供 Claude Code/Cursor 调用 | `deep-dives/kedo-as-skill-and-skill-host.md` |
 
 ---
@@ -262,9 +262,18 @@
 
 **详见：** `deep-dives/kedo-as-skill-and-skill-host.md`。参考 Claude Code 的 skill 机制。决策：**消费 + 暴露两个方向都做**。
 
-### 方向 1 — kedo 消费本地 skill 包（Skill-as-consumer）
-- kedo 能加载本地 markdown skill 包（对标 Claude Code：带 frontmatter `name`/`description`/when-to-use 的 `SKILL.md` + 配套脚本），ReactAgent **按需读取并遵循**
+### 方向 1 — kedo 消费 Agent Skill 包（✅ 落地 2026-06-17）
+- kedo 能加载 Agent Skill 包（兼容 Claude Code / Codex：带 frontmatter `name`/`description` 的 `SKILL.md` + 随包 `scripts/`/`references/`），ReactAgent **按需读取并遵循**
 - 价值：用 markdown 指令包扩展 agent 能力，无需每次写 `tools/*.py`；可沉淀"部署/测试/审查"等可复用流程
+
+**已交付：**
+- `core/skill_loader.py`：`SkillLoader` 装到 `~/.config/kedo/skills/<name>/`（全局复用）；`install(git-url | 本地路径)` 只 clone/拷贝 + 解析 frontmatter，**不执行**包内脚本；`catalog_for_prompt()` 出目录
+- `tools/skill_tools.py`：`skill_list`（列已装）+ `skill_read(name)`（读完整 SKILL.md 正文 + 随包文件清单 + 目录路径）；执行交给现有 `shell_execute`/`file_*`/`git`/`browser_*`
+- 系统 prompt 注入：`core/react_agent.py:1018-1032` charter 之后追加「## Available Skills」目录（只名字+描述，正文按需 skill_read）
+- API：`GET /skills`、`GET /skills/{name}`、`POST /skills/install`、`DELETE /skills/{name}`
+- REPL `/skill list|install|show|rm`；dashboard「🔧 技能」view（左列表+安装框，右 SKILL.md 全文 + 卸载）
+- 信任模型同 Claude Code skill：install 不跑脚本，脚本只在 agent 遵循 skill 时经 shell_execute 跑
+- 实战来源：`ssh://git@192.168.5.54:222/skills/hci-ui-regression.git`（HCI UI 回归 skill）
 
 **复用现成机制（关键发现）：** kedo 已有 **Charter** —— `.kedo/project_charter.md`，YAML frontmatter + markdown 正文，`Charter.load()` 加载、`summarize_for_prompt()` 注入系统 prompt。**skill 消费就是把 Charter 这套"单包绑定指令"泛化成"多包按需加载"**，不用从零造。
 

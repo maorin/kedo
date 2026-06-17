@@ -617,6 +617,7 @@ class KedoREPL:
             "/d": self._cmd_discuss,
             "/history": self._cmd_history,
             "/loop": self._cmd_loop,
+            "/skill": self._cmd_skill,
             "/web": self._cmd_web,
             "/w": self._cmd_web,
             "/login": self._cmd_login,
@@ -657,6 +658,7 @@ class KedoREPL:
             ("/discuss, /d", "参与闭环讨论（选择方案）"),
             ("/history", "查看迭代历史"),
             ("/loop", "自动循环：<间隔> <任务> 定时；<任务> 自定步；iterate <任务> [:: 目标] 迭代到达成；list|stop <id>"),
+            ("/skill", "技能包：list / install <git-url或路径> / show <name> / rm <name>"),
             ("/web, /w", "在浏览器中打开 Dashboard"),
             ("/config", "查看当前配置"),
             ("/clear", "清屏"),
@@ -1413,6 +1415,94 @@ class KedoREPL:
             self._safe_print(f"  {SUCCESS}✓ 循环 {loop_id} 已删除{C.RESET}")
         else:
             err = (data or {}).get("error", "未找到该循环")
+            self._safe_print(f"  {ERROR}✗ {err}{C.RESET}")
+
+    # ─── /skill 技能包 ────────────────────────────────────────
+
+    def _cmd_skill(self, args: str = ""):
+        """
+        /skill                      列出已安装 skill
+        /skill list                 同上
+        /skill install <git-url|路径>  安装一个 Agent Skill 包
+        /skill show <name>          查看某 skill 的完整指令
+        /skill rm <name>            卸载
+        """
+        args = (args or "").strip()
+        parts = args.split(maxsplit=1)
+        sub = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        if not args or sub in ("list", "ls"):
+            self._skill_list()
+        elif sub in ("install", "add", "i"):
+            self._skill_install(rest)
+        elif sub in ("show", "read", "cat"):
+            self._skill_show(rest)
+        elif sub in ("rm", "remove", "del", "uninstall"):
+            self._skill_remove(rest)
+        else:
+            self._safe_print(f"  {ERROR}用法: /skill list | install <git-url|路径> | show <name> | rm <name>{C.RESET}")
+
+    def _skill_list(self):
+        skills = self._api_get("/skills")
+        print()
+        if not skills:
+            print(f"  {MUTED}暂无已安装 skill。用 /skill install <git-url> 安装。{C.RESET}")
+            print()
+            return
+        print(f"  {HIGHLIGHT}{C.BOLD}已安装 Skill{C.RESET}")
+        for sk in skills:
+            print(f"  {SUCCESS}● {sk.get('name')}{C.RESET}  {MUTED}{(sk.get('description') or '')[:70]}{C.RESET}")
+            nfiles = len(sk.get("files") or [])
+            print(f"      {MUTED}{nfiles} 个随包文件 · {sk.get('dir')}{C.RESET}")
+        print(f"\n  {MUTED}/skill show <name> 看完整指令 · agent 跑任务时会自动看到这些 skill{C.RESET}")
+        print()
+
+    def _skill_install(self, source: str):
+        if not source:
+            self._safe_print(f"  {ERROR}用法: /skill install <git-url 或本地路径>{C.RESET}")
+            return
+        self._safe_print(f"  {BRAND}⟳ 安装 skill: {source}{C.RESET}  {MUTED}(git clone / 拷贝中...){C.RESET}")
+        data = self._api_post("/skills/install", {"source": source})
+        if data and data.get("success"):
+            sk = data["skill"]
+            self._safe_print(f"  {SUCCESS}✓ 已安装{C.RESET} {HIGHLIGHT}{sk.get('name')}{C.RESET}")
+            self._safe_print(f"    {MUTED}{(sk.get('description') or '')[:80]}{C.RESET}")
+            self._safe_print(f"    {MUTED}{len(sk.get('files') or [])} 个随包文件 → {sk.get('dir')}{C.RESET}")
+        else:
+            err = (data or {}).get("error", "未知错误")
+            self._safe_print(f"  {ERROR}✗ 安装失败: {err}{C.RESET}")
+
+    def _skill_show(self, name: str):
+        if not name:
+            self._safe_print(f"  {ERROR}用法: /skill show <name>{C.RESET}")
+            return
+        sk = self._api_get(f"/skills/{name}")
+        if not sk or not sk.get("name"):
+            self._safe_print(f"  {ERROR}✗ 未找到 skill: {name}{C.RESET}")
+            return
+        print()
+        print(f"  {HIGHLIGHT}{C.BOLD}{sk.get('name')}{C.RESET}  {MUTED}{sk.get('dir')}{C.RESET}")
+        print(f"  {MUTED}{sk.get('description')}{C.RESET}")
+        if sk.get("files"):
+            print(f"  {ACCENT}随包文件:{C.RESET} {', '.join(sk['files'])}")
+        print(divider())
+        body = sk.get("body") or ""
+        for line in body.splitlines()[:60]:
+            print(f"  {line}")
+        if len(body.splitlines()) > 60:
+            print(f"  {MUTED}... (正文较长，完整内容见 {sk.get('dir')}/SKILL.md){C.RESET}")
+        print()
+
+    def _skill_remove(self, name: str):
+        if not name:
+            self._safe_print(f"  {ERROR}用法: /skill rm <name>{C.RESET}")
+            return
+        data = self._api_delete(f"/skills/{name}")
+        if data and data.get("success"):
+            self._safe_print(f"  {SUCCESS}✓ 已卸载 skill: {name}{C.RESET}")
+        else:
+            err = (data or {}).get("error", "未找到该 skill")
             self._safe_print(f"  {ERROR}✗ {err}{C.RESET}")
 
     def _cmd_quit(self, _=""):

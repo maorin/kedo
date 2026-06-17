@@ -68,6 +68,7 @@ _SLASH_CMDS: list[tuple[str, str]] = [
     ("/history", "迭代历史"),
     ("/continue", "续接历史任务"),
     ("/loop", "自动循环：定时/自定步重跑任务"),
+    ("/skill", "技能包：安装/列出/查看 Agent Skill"),
     ("/web", "在浏览器打开 Dashboard"),
     ("/config", "查看当前配置"),
     ("/clear", "清屏"),

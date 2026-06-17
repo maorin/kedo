@@ -108,6 +108,15 @@ def create_app(config: dict = None) -> FastAPI:
         profile_manager=profile_manager,
     )
     tool_registry = ToolRegistry()
+
+    # Skill 消费（Skill 双向 · 方向 1）：加载 ~/.config/kedo/skills/ 下的 Agent Skill 包，
+    # 注册 skill_list / skill_read 工具，目录注入 ReactAgent 系统 prompt
+    from core.skill_loader import SkillLoader
+    from tools.skill_tools import SkillListTool, SkillReadTool
+    skill_loader = SkillLoader(skills_dir=config.get("skills_dir"))
+    tool_registry.register(SkillListTool(skill_loader))
+    tool_registry.register(SkillReadTool(skill_loader))
+
     tool_registry.register(CodeGeneratorTool(llm_client, config=config, profile_guard=profile_guard))
     tool_registry.register(shell)
     tool_registry.register(TestRunnerTool(shell))
@@ -217,6 +226,7 @@ def create_app(config: dict = None) -> FastAPI:
         reject_tracker=reject_tracker,
         role_swap=role_swap,
         reviewer=reviewer,
+        skill_loader=skill_loader,
     )
 
     # role_swap 需要 react_agent + reviewer 都创建好后才能 bind
@@ -353,6 +363,7 @@ def create_app(config: dict = None) -> FastAPI:
         context_inbox=context_inbox,
         browser_policy=browser_policy,
         loop_scheduler=loop_scheduler,
+        skill_loader=skill_loader,
     )
 
     # 注册路由 — 必须在 StaticFiles 之前

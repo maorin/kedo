@@ -112,12 +112,15 @@ class ReactAgent:
         reject_tracker=None,
         role_swap=None,
         reviewer=None,
+        skill_loader=None,
     ):
         self.llm = llm_client
         self.tools = tool_registry
         self.state = state
         self.memory = memory
         self.config = config or {}
+        # 已安装 skill 的目录注入系统 prompt（Skill 双向 · 方向 1）。可为 None。
+        self._skill_loader = skill_loader
         # 跨工具/Agent 共享的 reject 计数器；屏蔽 respond 直到 Producer 升级
         self._reject_tracker = reject_tracker
         # Producer ↔ Reviewer 角色对换管理器（可为 None）
@@ -1025,6 +1028,16 @@ IMPORTANT: You MUST output properly closed ```tool_call``` blocks to act. Do NOT
                     prompt = prompt + "\n\n" + charter.summarize_for_prompt()
             except Exception as e:
                 logger.debug(f"ReactAgent: charter load skipped: {e}")
+
+        # Skill 双向 · 方向 1：把已安装 skill 的目录（名字+描述）注入 prompt，
+        # 正文/随包文件由 agent 用 skill_read / file_read 按需取
+        if self._skill_loader is not None:
+            try:
+                catalog = self._skill_loader.catalog_for_prompt()
+                if catalog:
+                    prompt = prompt + "\n\n" + catalog
+            except Exception as e:
+                logger.debug(f"ReactAgent: skill catalog skipped: {e}")
         return prompt
 
     async def _gather_prior_task_context(self, current_task_id: str, project_path: str) -> str:

@@ -53,6 +53,7 @@ _browser_bridge: Optional[BrowserBridge] = None
 _context_inbox: Optional[ContextInbox] = None
 _browser_policy = None  # core.browser_permissions.BrowserPermissionPolicy or None
 _loop_scheduler = None  # core.loop_scheduler.LoopScheduler or None（/loop 自动循环）
+_skill_loader = None  # core.skill_loader.SkillLoader or None（skill 消费）
 
 
 def set_dependencies(
@@ -70,10 +71,11 @@ def set_dependencies(
     context_inbox: Optional[ContextInbox] = None,
     browser_policy=None,
     loop_scheduler=None,
+    skill_loader=None,
 ):
     global _agent_loop, _react_agent, _state_manager, _version_manager
     global _planner, _evaluator, _reviewer, _role_swap, _create_llm_client, _project_path
-    global _browser_bridge, _context_inbox, _browser_policy, _loop_scheduler
+    global _browser_bridge, _context_inbox, _browser_policy, _loop_scheduler, _skill_loader
     _agent_loop = agent_loop
     _react_agent = react_agent
     _state_manager = state_manager
@@ -88,6 +90,7 @@ def set_dependencies(
     _context_inbox = context_inbox
     _browser_policy = browser_policy
     _loop_scheduler = loop_scheduler
+    _skill_loader = skill_loader
 
 
 # ============================================================
@@ -283,6 +286,59 @@ async def loop_history(loop_id: str):
     if h is None:
         raise HTTPException(404, f"Loop {loop_id} not found")
     return h
+
+
+# ============================================================
+# Skill 消费 API（Skill 双向 · 方向 1）
+# 加载逻辑在 core/skill_loader.py；agent 侧用 skill_list / skill_read 工具。
+# ============================================================
+
+
+@router.get("/skills")
+async def list_skills():
+    """列出已安装 skill（名字 + 描述 + 随包文件）。"""
+    if _skill_loader is None:
+        return []
+    return [sk.to_public() for sk in _skill_loader.list_skills()]
+
+
+@router.get("/skills/{name}")
+async def get_skill(name: str):
+    """读取单个 skill 的完整内容（含 SKILL.md 正文）。"""
+    if _skill_loader is None:
+        raise HTTPException(503, "Skill loader 未启用")
+    sk = _skill_loader.get(name)
+    if sk is None:
+        raise HTTPException(404, f"Skill {name} not found")
+    return sk.to_public(with_body=True)
+
+
+@router.post("/skills/install")
+async def install_skill(body: dict = Body(...)):
+    """
+    安装一个 Agent Skill。body: {"source": "<git-url 或本地路径>"}
+    只 clone/拷贝 + 解析 frontmatter，不执行包内脚本。
+    """
+    if _skill_loader is None:
+        raise HTTPException(503, "Skill loader 未启用")
+    source = (body.get("source") or "").strip()
+    if not source:
+        raise HTTPException(400, "source 不能为空")
+    try:
+        sk = _skill_loader.install(source)
+    except Exception as e:  # noqa: BLE001
+        return {"success": False, "error": str(e)}
+    return {"success": True, "skill": sk.to_public()}
+
+
+@router.delete("/skills/{name}")
+async def delete_skill(name: str):
+    """卸载一个 skill。"""
+    if _skill_loader is None:
+        raise HTTPException(503, "Skill loader 未启用")
+    if not _skill_loader.remove(name):
+        raise HTTPException(404, f"Skill {name} not found")
+    return {"success": True}
 
 
 # ============================================================
