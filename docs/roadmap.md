@@ -1,6 +1,6 @@
 # kedo Roadmap
 
-> **状态**：滚动更新的工作文档，不是承诺。最后更新 **2026-05-21**（本地 ds4 provider 基础落地）。
+> **状态**：滚动更新的工作文档，不是承诺。最后更新 **2026-06-17**（回填：M3.5 路径 B `run_test_cases` v1 落地 + Browser 三层联动护栏）。
 >
 > 本文是"现在做什么、下一步做什么、为什么"的清单。架构层面的"为什么"详见 `deep-dives/`，里程碑实现细节看对应 design 文档与 commit。
 >
@@ -19,11 +19,13 @@
 
 **下一周期**重点（按优先级）：
 1. ✅ Browser Bridge **M3** + 双 Agent 实战通了（2026-05-09）
-2. ⏸ Browser Bridge **M3.5**（测试用例自动执行）— 暂搁置，重启时直接做路径 B `run_test_cases` 专用工具
-3. 🔄 Browser Bridge **M4** 局部完成（基础设施齐 + browser_research 路径 A 实战通了；真隔离 chrome 启动 Linux Google Chrome 阻塞，待真需求来时迁 Playwright）
-4. ✅ 对接本地 **ds4** 推理引擎（DeepSeek V4 Flash）作为新 LLM provider — 基础落地 2026-05-21，待 switchvideo 实战验证长 context
-5. 主 dashboard 整合 Inbox 工作流（避免独立 URL）
-6. 探索 **kedo 作为 skill** 暴露（让 Claude Code / Cursor 远程调用）
+2. ✅ Browser Bridge **M3.5** 路径 B `run_test_cases` v1 落地（2026-05-11 `04fc8f5`）— regex 驱动 markdown TC 自动执行；🔄 待补断言精度 + per-case 报告完善
+3. ✅ Browser **三层联动护栏**（2026-05-23 `0e8d335`）— navigate 默认 new_tab + extract 回正文 + sticky tab inject，dashboard 不被抢，实战 turns 23→2
+4. 🔄 Browser Bridge **M4** 局部完成（基础设施齐 + browser_research 路径 A 实战通了；真隔离 chrome 启动 Linux Google Chrome 阻塞，待真需求来时迁 Playwright）
+5. ✅ 对接本地 **ds4** 推理引擎（DeepSeek V4 Flash）作为新 LLM provider — 基础 + 文档落地 2026-05-21（`9beb2f0` `a7eff1c`），待 switchvideo 实战验证长 context
+6. 🆕 **/loop 自动循环**（定时/自定步重跑 + agent 自迭代到目标，两模式，参考 Claude Code `/loop`）— REPL `/loop` + dashboard「⏱️ 循环」面板
+7. 🆕 **skill 双向**（kedo 消费本地 markdown skill 包 + kedo 暴露为 skill/MCP 供 Claude Code/Cursor 调用，参考 Claude Code）— 含 dashboard「🔧 技能」面板
+8. 主 dashboard 整合 Inbox 工作流（避免独立 URL）
 
 ---
 
@@ -33,14 +35,16 @@
 |---|---|---|---|
 | 主 Agent Loop | ReactAgent 单轨 ✅ | Hierarchical Agent (③→④) | `deep-dives/agent-workflow-hybrid.md` |
 | 多 Agent 协同 | Reviewer 二审 ✅ | Sub-agent as Tool / Orchestrator-Worker | `deep-dives/multi-agent-architecture.md` |
-| Browser Bridge | M1+M2+M3 + 双 Agent 实战 ✅ | M3.5 测试执行 → M4 隔离 profile | `deep-dives/browser-bridge-design.md` |
+| Browser Bridge | M1+M2+M3+M3.5(v1)+三层联动 ✅ | M3.5 断言/报告完善 → M4 隔离(待 Playwright) | `deep-dives/browser-bridge-design.md` |
 | Virtual Test | T1/T2 ✅、T3→真机 coredump ✅ | 提取 charter 测试用例自动化 | `virtual-test-strategy.md` |
 | Charter 治理 | propose_charter_change 工具 ✅ | charter diff UI、版本回退 | (待写 deep-dive) |
 | 上下文管理 | memory + react_agent 收敛检测 ✅ | long-horizon 摘要器 | `deep-dives/context-management.md`、`long-horizon-memory.md` |
 | Self-evaluation | EvaluateTool + Reviewer ✅ | 多维度对照 dimension drift | `deep-dives/self-evaluation.md` |
 | 工具脆弱性 | profile_guard + auto_fix ✅ | tool 调用幂等性 + retry 策略 | `deep-dives/tool-fragility.md` |
 | LLM Provider | Kimi/Claude/DeepSeek/OpenAI/**ds4** ✅ | switchvideo 实战验证 ds4 长 context + quirk-mitigation 抽象层 | `llm-providers.md` |
-| **Skill 暴露** | 探讨稿 | MCP / output protocol | `deep-dives/kedo-as-skill-and-skill-host.md` |
+| **/loop 自动循环** | 🆕 规划 | M1 定时重跑+dashboard 面板 → M2 agent 自迭代 | 本文 §`/loop 自动循环` |
+| **Skill（消费）** | 🆕 规划 | 本地 skill 包加载 + ReactAgent 调用 + dashboard 面板 | 本文 §`Skill 双向` |
+| **Skill（暴露）** | 探讨稿 → 规划 | kedo 暴露为 skill/MCP 供 Claude Code/Cursor 调用 | `deep-dives/kedo-as-skill-and-skill-host.md` |
 
 ---
 
@@ -80,9 +84,23 @@
 - ✅ 自动生成 14 模块测试用例文档（76KB）
 - ✅ 期间修了 4 个 bug：tab_id=0 / openai 必需 dep / api_key leak / logger INFO（commits `7dedae4` `78711ad` `2619e5e` `ee84d3e`）
 
-### M3.5 — 测试用例自动执行（⏸ 暂搁置，设计文档已落地）
+### M3.5 — 测试用例自动执行（✅ 路径 B v1 落地 2026-05-11 `04fc8f5`，🔄 待完善）
 
 **详细设计：** [`deep-dives/m3.5-test-execution-design.md`](deep-dives/m3.5-test-execution-design.md)（2026-05-11 写完）— 5 个设计点 + v1/v2/v3 演化路径 + 4 个待决定点。
+
+**已交付（路径 B v1，`tools/run_test_cases.py` 544 行）：**
+- `parse_tc_markdown`：regex 找 `## TC-XX-NNN` 边界 + 提取表格内 优先级/前置条件/测试步骤/预期结果
+- `map_step`：12 个 regex pattern 覆盖 click / type / navigate / wait_for / scroll / submit / screenshot（前缀允许 0-30 字描述，覆盖 60-70% 标准 LLM 措辞）
+- `RunTestCasesTool`：Python 直调 bridge 绕过 ReactAgent + event_bus 推进度；`prefer_role` 先 isolated profile 失败降级 user session（同 browser_research）
+- `TC-LOGIN-*` 默认自动 skip（M3 密码硬规则）；每 case 跑前可选 navigate base_url 重置
+- isolation：`UNSUPPORTED_STEP` → 截图 + FAIL，不影响后续 case
+- 双格式输出：results md（人看）+ json（CI 用）到 `<md>/results/`，失败截图到 `results/screenshots/<TC-ID>.png`
+- 已注册到 api/server.py（ReactAgent 工具数 32 → 33）
+
+**v1 的已知边界（= 下一步待完善）：**
+- 断言精度仍"粗略"：步骤无错即 PASS，**预期结果尚未真正比对**（v2 目标）
+- map_step regex 只覆盖标准措辞，非标准步骤落 UNSUPPORTED_STEP
+- 单文件全部 case；跨 14 模块 × ~5 TC ≈ 70 TC 的批量编排还没做
 
 **用例：** 把 M3 写出的测试用例 markdown 让 ReactAgent **自动执行** —— 不只生成文档而是真跑测试。
 
@@ -104,21 +122,13 @@
 - **路径 A**：纯 ReactAgent prompt 驱动（task 描述里说"按 TC 一条条跑"）。最快验证，不写代码。
 - **路径 B**：加专用 `run_test_cases(md_file, tc_id)` 工具。300 行 Python，1-2 天，更稳。
 
-**当前进度（2026-05-10 暂搁置）：** 路径 A 试到一半（task `08079a68`）。撞到的具体情况：
-- agent 14 个 md 全读取后 plan_development 出 6 子任务，但具体执行步骤进度慢、context 很快塞满
+**历史：路径 A 的搁置（2026-05-10）** 路径 A（纯 prompt 驱动）试到一半（task `08079a68`）就放弃，原因：
+- agent 14 个 md 全读取后 plan_development 出 6 子任务，但执行步骤进度慢、context 很快塞满
 - 14 模块 × 平均 5 TC ≈ 70 个 TC，单 task 跑完成本太高
 - 密码硬规则 + 收敛检测误伤 + LLM 走捷径多重叠加，纯 prompt 驱动不稳
+- → 决定改走路径 B（专用工具），已于 2026-05-11 `04fc8f5` 落地 v1（见上）
 
-**重启时建议直接走路径 B**：写专用 `run_test_cases(md_file, tc_id="all")` 工具：
-- markdown TC 章节解析 (regex `^## TC-[A-Z]+-\d+`)
-- 步骤 → 浏览器动作映射（点击【X】按钮 → click text_match=X / 输入"Y" → type value=Y）
-- 预期结果 → query 验证 + 截图比对
-- per-case PASS/FAIL + screenshot on fail + 汇总 results.json
-- isolation：一 TC 失败不影响下一个（重置到登录态 dashboard）
-
-工作量 1-2 天，重启时再开。
-
-**估时：** 路径 B 重启时 1-2 天
+**下一步（v2）：** 断言比对（预期结果 → query 验证 + 截图比对）+ 跨文件批量编排 + map_step 措辞覆盖扩充。
 
 ### M4 — 隔离 profile + `browser_research`（🔄 局部完成 2026-05-10）
 
@@ -197,21 +207,94 @@
 
 ---
 
-## Skill 暴露（探索阶段）
+## /loop 自动循环（🆕 规划 2026-06-17）
 
-**详见：** `deep-dives/kedo-as-skill-and-skill-host.md`
+**目标：** 参考 Claude Code 的 `/loop`，给 kedo 加"自动循环"能力。决策：**两种模式都做**。
 
-三个相关想法：
-- **A** kedo 对外暴露 skill（让 Claude Code / Cursor 远程调用）
-- **B** kedo 内部消费第三方 skill 包（替代/补充内置 `tools/*.py`）
-- **C** A 实现后，调用方反过来读 kedo 源码、提 patch（协同进化）
+### 模式 A — 定时 / 自定步重跑（REPL 驱动）
+- 用法：`/loop [interval] <task描述 | /slash命令>`，如 `/loop 5m /status`、`/loop 30m 跑一遍回归测试`
+- 省略 interval → **自定步（self-paced）**：每轮跑完由模型自己决定下次间隔（对标 Claude Code 的 ScheduleWakeup 动态节奏）
+- 每到点自动重跑：定时任务用 `/tasks` 创建新 task；定时 slash 命令直接复用 `_handle_command` 分发
+- 需要：start / stop / list / status 子命令；一个轻量调度循环（后台线程或 asyncio task）
 
-**当前状态：** 仅讨论稿。实施前需先决定：
-- 协议（MCP / Anthropic Output Protocol / 自定义 HTTP）
-- 暴露粒度（黑盒 task / 白盒原子能力 / 两层都给）
-- 状态语义（同步 / 异步 + task_id 轮询）
+### 模式 B — agent 自迭代到目标（ReactAgent 驱动）
+- 对同一目标反复迭代，直到满足条件 / 收敛（自主改进循环），而非固定间隔重跑
+- 复用现有 `react_agent._loop()` 的 Think→Act→Observe + 收敛检测，外面再套一层"目标达成判定 + 重启 task"
+- 与 Reviewer 二审天然契合：每轮产物过 EvaluateTool/Reviewer，未达分继续迭代
 
-**优先级：** Browser Bridge M3/M4 之后再认真投入。
+### 落地点（来自代码勘查）
+- **命令注册**：`cli/repl.py:603-632` 命令字典加 `"/loop": self._cmd_loop`
+- **handler**：`cli/repl.py` ~L1260 新增 `_cmd_loop(args)`（解析 interval + 目标，调 API）
+- **help / 补全**：`cli/repl.py:642-668` 帮助表；`cli/repl_pt.py:58-75` `_SLASH_CMDS` 自动补全
+- **API**：`api/routes.py`（`switch_llm` 后，~L947）加 `POST /tasks/schedule`（或 `/loop`）
+- **调度服务（新）**：建议 `core/scheduler.py` —— 跟踪活跃 loop、到点触发、持久化到 StateManager
+- **持久化**：`core/state_manager.py` 加 `save/list/delete_schedule`
+- 现状：**无任何 cron/调度/轮询设施**，全新写
+
+### Web 界面（dashboard）设计
+`dashboard/index.html` 是单文件 vanilla JS（5730 行），按现有 view-switcher 模式加一个 **「⏱️ 循环」view**：
+- **入口按钮**：`index.html:1053-1060` view-switcher 加 `<button data-view="loops">⏱️ 循环</button>`；`switchView()`（`1704-1752`）加 `loops` 分支；DOM 缓存 `~1680` 加 `loopsView`
+- **主面板**（仿 deploy/test view 的 `monitor-view` 布局）：
+  - 顶部 stats 卡片：活跃 loop 数 / 累计运行次数 / 上次结果
+  - 循环列表 table：循环 ID｜目标描述｜**模式(A 定时/自定步 · B 自迭代)**｜间隔(或"自定步"/"目标达成")｜状态｜下次运行｜操作(启动/暂停/删除)
+  - 右侧 drawer（仿 `deploy-drawer`）：选中 loop 看运行历史（每次触发的 task_id + 结果 + 时间）
+- **创建 modal**（仿 `addTargetModal` `index.html:5663-5700`，`.modal-overlay`+`.show`）：
+  - 目标描述（task 或 `/slash` 命令）
+  - **模式选择**：A 定时/自定步（填 interval，留空=自定步）｜B agent 自迭代（填"目标达成判定"文本 + 最大轮数）
+  - project_path
+- **实时联动**：复用 WebSocket（`handleWebSocketMessage` `3593-4002`），新事件 `loop_created/started/paused/execution` → 更新列表 + 写 console
+- **后端**：`api/routes.py` 加 `GET/POST /api/loops`、`POST /api/loops/{id}/toggle`、`DELETE /api/loops/{id}`、`GET /api/loops/{id}/history`（对应 §落地点的 `core/scheduler.py`）
+
+### 阶段
+- **M1**：模式 A 定时/自定步重跑 + start/stop/list/status（REPL `/loop`）+ dashboard「循环」view 基础（列表/创建/启停）—— 最快出可用
+- **M2**：模式 B agent 自迭代 + 目标达成判定 + Reviewer 联动 + dashboard 运行历史 drawer
+- **估时：** M1 2-3 天（含 UI），M2 2-3 天
+
+---
+
+## Skill 双向（🆕 规划 2026-06-17）
+
+**详见：** `deep-dives/kedo-as-skill-and-skill-host.md`。参考 Claude Code 的 skill 机制。决策：**消费 + 暴露两个方向都做**。
+
+### 方向 1 — kedo 消费本地 skill 包（Skill-as-consumer）
+- kedo 能加载本地 markdown skill 包（对标 Claude Code：带 frontmatter `name`/`description`/when-to-use 的 `SKILL.md` + 配套脚本），ReactAgent **按需读取并遵循**
+- 价值：用 markdown 指令包扩展 agent 能力，无需每次写 `tools/*.py`；可沉淀"部署/测试/审查"等可复用流程
+
+**复用现成机制（关键发现）：** kedo 已有 **Charter** —— `.kedo/project_charter.md`，YAML frontmatter + markdown 正文，`Charter.load()` 加载、`summarize_for_prompt()` 注入系统 prompt。**skill 消费就是把 Charter 这套"单包绑定指令"泛化成"多包按需加载"**，不用从零造。
+
+**落地点（来自代码勘查）：**
+- **新建 `core/skill_loader.py`**：仿 `core/project_charter.py`，扫描 `.kedo/skills/*.md`，解析 frontmatter（`name`/`description`/`applies_to`/`priority`），每个 skill 一个 `Skill` dataclass + `summarize_for_prompt()`
+- **prompt 注入**：`core/react_agent.py:1018-1028`（charter 注入之后追加 skill section）—— 默认只注入 `name`+`description` 清单，正文按需用工具读，避免 prompt 膨胀
+- **新工具**：`tools/` 加 `skill_list` / `skill_read`（遵循 `BaseTool` ABC，`tools/base.py:37-91`），注册到 `api/server.py:104-322`（当前 ~40 工具）
+- **可选**：skill 也能带 `forbidden_patterns`，复用 `tools/profile_guard.py` 的 charter 违规检查引擎
+- 现状：**无 skills 子系统**（`skills/` 目录、Skill 类、loader 都没有），但 Charter 提供了可直接套用的范式
+
+### 方向 2 — kedo 暴露为 skill / MCP（Skill-as-host，原"Skill 暴露"）
+- 把 kedo 包装成 skill / MCP server，让 Claude Code / Cursor 远程调用 kedo 的任务能力
+- 三个相关想法：
+  - **A** kedo 对外暴露 skill（让 Claude Code / Cursor 远程调用）
+  - **B** kedo 内部消费第三方 skill 包（= 上面方向 1，已升级为要做）
+  - **C** A 实现后，调用方反过来读 kedo 源码、提 patch（协同进化）
+- 实施前需先决定：
+  - 协议（MCP / Anthropic Output Protocol / 自定义 HTTP）
+  - 暴露粒度（黑盒 task / 白盒原子能力 / 两层都给）
+  - 状态语义（同步 / 异步 + task_id 轮询）
+
+### Web 界面（dashboard）设计
+按现有 view-switcher 模式加一个 **「🔧 技能」view**（主要服务方向 1 消费；方向 2 暴露后期加"暴露状态"卡片）：
+- **入口按钮**：`index.html:1053-1060` 加 `<button data-view="skills">🔧 技能</button>`；`switchView()` 加 `skills` 分支；DOM 缓存加 `skillsView`
+- **布局**（仿 docs view 的"左树 + 右阅读/编辑"，`index.html:1500-1552`）：
+  - **左栏**：`.kedo/skills/*.md` 扫描出的 skill 包列表，每项显示 `name` + 一行 `description`（读 frontmatter），带"已加载/启用"状态点
+  - **右栏**：选中 skill → 渲染 markdown 正文（复用 docs 的 `renderDocContent`）+ 顶部元信息卡片（name / description / applies_to / priority / 启用状态）
+  - **操作**：启用/禁用开关、重新加载（从磁盘 re-scan）、"在当前 task 注入"指示
+  - 可选：复用 docs 编辑器（`saveCurrentDoc` 模式 `3265-3293`）直接在 dashboard 编 skill md
+- **实时联动**：WebSocket 新事件 `skill_loaded/toggled/used` → 标记哪些 skill 被当前 task 命中
+- **后端**：`api/routes.py` 加 `GET /api/skills`（列表+frontmatter）、`GET /api/skills/{id}`（正文）、`POST /api/skills/{id}/toggle`、`POST /api/skills/{id}/reload`（对应 §落地点的 `core/skill_loader.py`）
+- **复用提示**：charter 已有 `GET /api/charter` + 提案审批 UI（`charter/propose-change` `routes.py:538`），skill 列表/详情可照搬这套读取+渲染范式
+
+### 优先级与顺序
+- **先做方向 1（消费）**：纯本地、无需定协议、能立刻增强 agent，且为方向 2 提供"可暴露的能力单元"；含 dashboard「技能」view
+- **方向 2（暴露）** 待协议决定后再认真投入（与 Browser Bridge 后续并行）；dashboard 后期加"对外暴露状态"卡片
 
 ---
 
@@ -233,12 +316,11 @@
 
 ```
 ✅ Done (2026-05-08~09):  M1 (通道) + M2 (只读) + M3 (写+权限+双Agent) + 14 模块测试文档自动生成
-⏸ Parked (2026-05-10):    M3.5 (测试执行) — 路径 A 实战不稳，待重启时走路径 B (run_test_cases 工具)
-Week 1-2:   M4 (隔离 profile + browser_research) 或 主 dashboard 整合 Inbox（看哪个更紧）
-Week 2:     Browser Bridge M3 (写控制 + Tier-2 权限) [legacy entry, ignore]
-Week 3:     Browser Bridge M4 (隔离 profile + browser_research)
-Week 4:     主 dashboard 整合 Inbox + 收尾打磨
-            或：进入 Skill 暴露 PoC
+✅ Done (2026-05-11):     M3.5 路径 B run_test_cases v1 (04fc8f5) — regex 驱动 markdown TC 自动执行
+✅ Done (2026-05-21):     ds4 (DeepSeek V4 Flash) provider 基础 + 文档 (9beb2f0 a7eff1c)
+✅ Done (2026-05-23):     Browser 三层联动护栏 (0e8d335) — dashboard 不被抢，turns 23→2
+Next:       M3.5 v2 (断言比对 + 批量编排) / ds4 switchvideo 长 context 实战 / 主 dashboard 整合 Inbox
+按需:       M4 真隔离 (迁 Playwright，等硬需求) / Skill 暴露 PoC
 ```
 
 并行：
