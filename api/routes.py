@@ -2846,8 +2846,14 @@ async def get_test_report_file(path: str):
     if not p.is_file():
         raise HTTPException(404, "文件不存在")
     text = p.read_text(encoding="utf-8", errors="replace")
-    media = "text/html" if p.suffix.lower() == ".html" else "text/plain"
-    return Response(content=text, media_type=f"{media}; charset=utf-8")
+    is_html = p.suffix.lower() == ".html"
+    media = "text/html" if is_html else "text/plain"
+    headers = {"X-Content-Type-Options": "nosniff"}
+    if is_html:
+        # 报告 HTML 是回归套件生成的不可信内容（含被测 UI 文本）。sandbox CSP 让它仍能
+        # 渲染查看，但禁用脚本并置于不透明源，杜绝在 kedo 源上执行脚本 → 防 stored XSS。
+        headers["Content-Security-Policy"] = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:"
+    return Response(content=text, media_type=f"{media}; charset=utf-8", headers=headers)
 
 
 @router.get("/test/status")

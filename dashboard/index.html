@@ -1965,7 +1965,7 @@
                         if (proj && when) {
                             const date = String(when).slice(0, 10);
                             const path = `${proj}/test/report/${date}/ai-regression/html/index.html`;
-                            reportLink = ` <a href="#" onclick="openReport('${escHtml(path)}');return false;" style="color:#00d9ff;font-size:0.78rem;">📄报告</a>`;
+                            reportLink = ` <a href="#" onclick="openReportIdx(${_rpt(path)});return false;" style="color:#00d9ff;font-size:0.78rem;">📄报告</a>`;
                         }
                         tr.innerHTML = `
                             <td>${h.run}</td>
@@ -3315,6 +3315,10 @@
             loadTestReports();
         }
 
+        // 报告路径登记表：onclick 里只放整数下标，绝不把不可信字符串插进事件处理属性
+        const _rptPaths = [];
+        function _rpt(path) { return _rptPaths.push(path) - 1; }
+        function openReportIdx(i) { const p = _rptPaths[i]; if (p) openReport(p); }
         function openReport(path) {
             window.open(`${API_BASE}/test/report-file?path=${encodeURIComponent(path)}`, '_blank');
         }
@@ -3336,11 +3340,11 @@
                 const counts = { pass: 0, failed: 0, blocked: 0 };
                 (r.cases || []).forEach(c => { counts[c.status] = (counts[c.status] || 0) + 1; });
                 const caseChips = (r.cases || []).map(c =>
-                    `<span onclick="openReport('${escHtml(c.html)}')" title="点击打开 ${escHtml(c.name)}" style="cursor:pointer;margin:2px;display:inline-block;" class="status-badge ${badge[c.status] || 'pending'}">${escHtml(c.name)}</span>`
+                    `<span onclick="openReportIdx(${_rpt(c.html)})" title="点击打开 ${escHtml(c.name)}" style="cursor:pointer;margin:2px;display:inline-block;" class="status-badge ${badge[c.status] || 'pending'}">${escHtml(c.name)}</span>`
                 ).join(' ');
-                const idxBtn = r.index_html ? `<button class="monitor-refresh-btn" style="background:rgba(0,217,255,0.15);color:#00d9ff;" onclick="openReport('${escHtml(r.index_html)}')">打开汇总报告</button>` : '';
-                const mdBtn = r.index_md ? `<button class="monitor-refresh-btn" onclick="openReport('${escHtml(r.index_md)}')">Markdown</button>` : '';
-                const logBtn = r.log ? `<button class="monitor-refresh-btn" onclick="openReport('${escHtml(r.log)}')">日志</button>` : '';
+                const idxBtn = r.index_html ? `<button class="monitor-refresh-btn" style="background:rgba(0,217,255,0.15);color:#00d9ff;" onclick="openReportIdx(${_rpt(r.index_html)})">打开汇总报告</button>` : '';
+                const mdBtn = r.index_md ? `<button class="monitor-refresh-btn" onclick="openReportIdx(${_rpt(r.index_md)})">Markdown</button>` : '';
+                const logBtn = r.log ? `<button class="monitor-refresh-btn" onclick="openReportIdx(${_rpt(r.log)})">日志</button>` : '';
                 wrap.innerHTML = `
                     <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;flex-wrap:wrap;">
                         <div style="font-weight:600;color:#e0e0e0;">📄 ${escHtml(r.date)}
