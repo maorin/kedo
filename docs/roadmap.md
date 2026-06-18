@@ -281,7 +281,11 @@
 - API：`GET /skills`、`GET /skills/{name}`、`POST /skills/install`、`DELETE /skills/{name}`
 - REPL `/skill list|install|show|rm`；dashboard「🔧 技能」view（左列表+安装框，右 SKILL.md 全文 + 卸载）
 - 信任模型同 Claude Code skill：install 不跑脚本，脚本只在 agent 遵循 skill 时经 shell_execute 跑
-- 实战来源：`ssh://git@192.168.5.54:222/skills/hci-ui-regression.git`（HCI UI 回归 skill）
+- 实战来源：`hci-ui-regression`（HCI UI 回归）、`hci-package-iso`（HCI crypto ISO 打包）两个 skill，均从 `ssh://git@192.168.5.54:222/skills/*.git` 装
+
+**配套监控持久化（2026-06-18）：** 把 skill 跑出来的结果落盘 + dashboard 展示：
+- 测试：`core/test_store.py` + 测试 view（见 §`/loop` M1.3）
+- 打包：`core/package_store.py` → `package_runs.json`；`POST /package/scan`（ssh 到构建机如 `root@192.168.7.93` 枚举 `output/*Crypto*.iso`+sha256+rpm+日志，host 严格校验防 ssh 注入）+ `GET /package/runs`；dashboard「打包」view 加「ISO 打包记录」面板（构建机/ISO 大小+sha256/RPM/状态/时间 + 扫描按钮）
 
 **复用现成机制（关键发现）：** kedo 已有 **Charter** —— `.kedo/project_charter.md`，YAML frontmatter + markdown 正文，`Charter.load()` 加载、`summarize_for_prompt()` 注入系统 prompt。**skill 消费就是把 Charter 这套"单包绑定指令"泛化成"多包按需加载"**，不用从零造。
 

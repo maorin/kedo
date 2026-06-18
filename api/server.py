@@ -114,6 +114,8 @@ def create_app(config: dict = None) -> FastAPI:
     # 测试监控持久化（把回归结果落盘成耐久历史）
     from core.test_store import TestStore
     test_store = TestStore(storage_dir=config.get("storage_dir", ".kedo/state"))
+    from core.package_store import PackageStore
+    package_store = PackageStore(storage_dir=config.get("storage_dir", ".kedo/state"))
 
     from core.skill_loader import SkillLoader
     from tools.skill_tools import SkillListTool, SkillReadTool
@@ -369,6 +371,7 @@ def create_app(config: dict = None) -> FastAPI:
         loop_scheduler=loop_scheduler,
         skill_loader=skill_loader,
         test_store=test_store,
+        package_store=package_store,
     )
 
     # 注册路由 — 必须在 StaticFiles 之前

@@ -55,6 +55,7 @@ _browser_policy = None  # core.browser_permissions.BrowserPermissionPolicy or No
 _loop_scheduler = None  # core.loop_scheduler.LoopScheduler or None（/loop 自动循环）
 _skill_loader = None  # core.skill_loader.SkillLoader or None（skill 消费）
 _test_store = None  # core.test_store.TestStore or None（测试监控持久化）
+_package_store = None  # core.package_store.PackageStore or None（打包记录持久化）
 
 
 def set_dependencies(
@@ -74,10 +75,11 @@ def set_dependencies(
     loop_scheduler=None,
     skill_loader=None,
     test_store=None,
+    package_store=None,
 ):
     global _agent_loop, _react_agent, _state_manager, _version_manager
     global _planner, _evaluator, _reviewer, _role_swap, _create_llm_client, _project_path
-    global _browser_bridge, _context_inbox, _browser_policy, _loop_scheduler, _skill_loader, _test_store
+    global _browser_bridge, _context_inbox, _browser_policy, _loop_scheduler, _skill_loader, _test_store, _package_store
     _agent_loop = agent_loop
     _react_agent = react_agent
     _state_manager = state_manager
@@ -94,6 +96,7 @@ def set_dependencies(
     _loop_scheduler = loop_scheduler
     _skill_loader = skill_loader
     _test_store = test_store
+    _package_store = package_store
 
 
 # ============================================================
@@ -2839,6 +2842,110 @@ async def test_runs():
         scanned.extend(_scan_reports(root))
     _test_store.sync(scanned)
     return _test_store.summary()
+
+
+# ============================================================
+# 打包记录 API（hci-package-iso skill 的 ISO 打包结果）
+# ssh 到远程构建机枚举 output/*Crypto*.iso + sha256 + rpm + 日志，落盘持久化。
+# ============================================================
+
+_HOST_RE = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9._:-]+$")
+_DIR_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+
+
+def _build_scan_script(packager_dir: str) -> str:
+    return (
+        f'cd {packager_dir} 2>/dev/null || {{ echo NO_DIR; exit 0; }}; '
+        'for f in output/*Crypto*.iso; do [ -f "$f" ] && echo "ISO|$(basename "$f")|$(stat -c%s "$f" 2>/dev/null)"; done; '
+        'for f in output/*Crypto*.iso.sha256; do [ -f "$f" ] && echo "SHA|$(basename "$f")|$(head -c200 "$f" 2>/dev/null | tr -d "\\n")"; done; '
+        'echo "RPMS|$(ls sources/rpm/crypto/*.rpm 2>/dev/null | wc -l)"; '
+        'echo "LOG|$(ls -t output/*.log 2>/dev/null | head -1)"'
+    )
+
+
+def _parse_scan(out: str) -> dict:
+    isos: dict[str, dict] = {}
+    rpm_count = 0
+    log = None
+    saw_dir = True
+    for line in out.splitlines():
+        line = line.strip()
+        if line == "NO_DIR":
+            saw_dir = False
+            continue
+        parts = line.split("|")
+        tag = parts[0]
+        if tag == "ISO" and len(parts) >= 3:
+            d = isos.setdefault(parts[1], {"name": parts[1]})
+            try:
+                d["size"] = int(parts[2] or 0)
+            except ValueError:
+                d["size"] = 0
+        elif tag == "SHA" and len(parts) >= 3:
+            iso_name = parts[1][:-7] if parts[1].endswith(".sha256") else parts[1]
+            sha_val = parts[2].split()[0] if parts[2] else ""
+            isos.setdefault(iso_name, {"name": iso_name})["sha256"] = sha_val
+        elif tag == "RPMS" and len(parts) >= 2:
+            try:
+                rpm_count = int(parts[1] or 0)
+            except ValueError:
+                rpm_count = 0
+        elif tag == "LOG" and len(parts) >= 2:
+            log = parts[1] or None
+    iso_list = list(isos.values())
+    if not saw_dir:
+        status = "no-dir"
+    elif any(i.get("sha256") for i in iso_list):
+        status = "success"
+    elif iso_list:
+        status = "incomplete"
+    else:
+        status = "no-artifact"
+    return {"isos": iso_list, "rpm_count": rpm_count, "log": log, "status": status}
+
+
+@router.post("/package/scan")
+async def package_scan(body: dict = Body(...)):
+    """
+    ssh 到构建机扫描 hci-package-iso 产物并落盘。body: {"host":"root@192.168.7.93", "dir":"/root/hci_packager"}
+    host 严格校验为 user@host，远程脚本固定（无用户插值），防 ssh 参数 / 命令注入。
+    """
+    if _package_store is None:
+        raise HTTPException(503, "Package store 未启用")
+    host = (body.get("host") or "").strip()
+    packager_dir = (body.get("dir") or "/root/hci_packager").strip()
+    if not _HOST_RE.match(host):
+        raise HTTPException(400, "host 必须是 user@host 形式（无空格/特殊字符）")
+    if not _DIR_RE.match(packager_dir):
+        raise HTTPException(400, "dir 含非法字符")
+    cmd = [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+        "-o", "StrictHostKeyChecking=accept-new", "--",
+        host, _build_scan_script(packager_dir),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "ssh 扫描超时（40s）"}
+    if proc.returncode != 0 and not proc.stdout.strip():
+        return {"success": False, "error": f"ssh 失败: {proc.stderr.strip()[:300]}"}
+    parsed = _parse_scan(proc.stdout)
+    rec = {
+        "host": host,
+        "dir": packager_dir,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        **parsed,
+    }
+    saved = _package_store.record(rec)
+    return {"success": True, "run": saved}
+
+
+@router.get("/package/runs")
+async def package_runs():
+    """本地持久化的打包记录历史。"""
+    if _package_store is None:
+        return []
+    return _package_store.list_runs()
 
 
 @router.get("/test/report-file")

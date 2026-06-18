@@ -1257,6 +1257,31 @@
                                 </tbody>
                             </table>
                         </div>
+                        <!-- ISO 打包记录 (hci-package-iso skill) -->
+                        <div class="monitor-table-wrap">
+                            <div class="monitor-table-title" style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+                                <span>ISO 打包记录（hci-package-iso）</span>
+                                <span style="display:flex;gap:0.4rem;align-items:center;">
+                                    <input type="text" id="pkgScanHost" value="root@192.168.7.93" placeholder="user@host" style="padding:0.3rem 0.5rem;background:rgba(30,41,59,0.6);border:1px solid rgba(100,200,255,0.2);border-radius:4px;color:#e0e0e0;font-size:0.78rem;width:160px;">
+                                    <button class="monitor-refresh-btn" style="background:rgba(0,217,255,0.15);color:#00d9ff;" onclick="scanPackage()">扫描记录</button>
+                                </span>
+                            </div>
+                            <div id="pkgScanMsg" style="font-size:0.72rem;color:#888;margin-bottom:0.4rem;min-height:1em;"></div>
+                            <table class="monitor-table">
+                                <thead>
+                                    <tr>
+                                        <th>构建机</th>
+                                        <th>ISO（大小 / sha256）</th>
+                                        <th>RPM</th>
+                                        <th>状态</th>
+                                        <th>时间</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="pkgRunsBody">
+                                    <tr><td colspan="5" style="text-align:center;color:#888;padding:1.5rem;">暂无打包记录，点「扫描记录」</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
                         <!-- 候选版本 -->
                         <div class="monitor-table-wrap">
                             <div class="monitor-table-title">候选版本</div>
@@ -2424,6 +2449,62 @@
             } catch (e) {
                 renderBuildData({ total: 0, success: 0, failed: 0, running: 0, records: [] });
             }
+            loadPackageRuns();
+        }
+
+        function _fmtBytes(n) {
+            n = Number(n) || 0;
+            if (n >= 1073741824) return (n / 1073741824).toFixed(2) + ' GB';
+            if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+            if (n >= 1024) return (n / 1024).toFixed(0) + ' KB';
+            return n + ' B';
+        }
+
+        async function loadPackageRuns() {
+            const tbody = document.getElementById('pkgRunsBody');
+            if (!tbody) return;
+            let runs = [];
+            try { runs = await (await fetch(`${API_BASE}/package/runs`)).json(); } catch (e) { return; }
+            if (!runs || runs.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#888;padding:1.5rem;">暂无打包记录，点「扫描记录」</td></tr>';
+                return;
+            }
+            const badge = { success: 'success', incomplete: 'skipped', 'no-artifact': 'pending', 'no-dir': 'failed' };
+            const stLabel = { success: '成功', incomplete: '不完整', 'no-artifact': '无产物', 'no-dir': '无目录' };
+            tbody.innerHTML = '';
+            runs.forEach(r => {
+                const isoCell = (r.isos && r.isos.length)
+                    ? r.isos.map(i => `<div title="${escHtml(i.sha256 || '')}">${escHtml(i.name)} <span style="color:#888;">(${_fmtBytes(i.size)}${i.sha256 ? ' · sha256 ✓' : ''})</span></div>`).join('')
+                    : '<span style="color:#888;">—</span>';
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td style="font-family:monospace;font-size:0.78rem;">${escHtml(r.host)}</td>
+                    <td style="font-size:0.78rem;">${isoCell}</td>
+                    <td>${r.rpm_count || 0}</td>
+                    <td><span class="status-badge ${badge[r.status] || 'pending'}">${stLabel[r.status] || r.status}</span></td>
+                    <td style="font-size:0.75rem;color:#aaa;">${_fmtTime(r.recorded_at)}</td>`;
+                tbody.appendChild(tr);
+            });
+        }
+
+        async function scanPackage() {
+            const host = document.getElementById('pkgScanHost').value.trim();
+            const msg = document.getElementById('pkgScanMsg');
+            if (!host) { msg.textContent = '请填写构建机 user@host'; return; }
+            msg.style.color = '#888'; msg.textContent = `正在 ssh ${host} 扫描打包产物...`;
+            try {
+                const res = await (await fetch(`${API_BASE}/package/scan`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ host })
+                })).json();
+                if (res.success) {
+                    const r = res.run;
+                    msg.style.color = '#22c55e';
+                    msg.textContent = `✓ 已记录：${(r.isos || []).length} 个 ISO · ${r.rpm_count} 个 RPM · 状态 ${r.status}`;
+                    loadPackageRuns();
+                } else {
+                    msg.style.color = '#ef4444'; msg.textContent = '✗ ' + (res.error || '扫描失败');
+                }
+            } catch (e) { msg.style.color = '#ef4444'; msg.textContent = '✗ ' + e.message; }
         }
 
         function renderBuildData(data) {
