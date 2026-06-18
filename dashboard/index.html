@@ -1449,6 +1449,12 @@
                                 </tbody>
                             </table>
                         </div>
+                        <div class="monitor-table-wrap">
+                            <div class="monitor-table-title">回归报告（点击直接打开）</div>
+                            <div id="testReportsList" style="padding:0.5rem 0;">
+                                <div style="color:#888;padding:1rem;text-align:center;font-size:0.85rem;">加载中...</div>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- 右侧抽拉面板 -->
@@ -1876,6 +1882,7 @@
 
         function renderLoops(loops) {
             loops = loops || [];
+            window._loopsCache = loops;
             const active = loops.filter(l => l.status === 'running').length;
             const runTotal = loops.reduce((a, l) => a + (l.run_count || 0), 0);
             document.getElementById('loopsActiveCount').textContent = active;
@@ -1939,6 +1946,8 @@
                 document.getElementById('loopHistoryId').textContent = id;
                 const tbody = document.getElementById('loopHistoryBody');
                 tbody.innerHTML = '';
+                const lp = (window._loopsCache || []).find(l => l.id === id);
+                const proj = lp && lp.project_path;
                 if (!hist || hist.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#888;padding:1rem;">还没有运行记录</td></tr>';
                 } else {
@@ -1950,12 +1959,20 @@
                             const ok = h.goal_achieved;
                             verdict = `<span class="status-badge ${ok ? 'success' : 'skipped'}" title="${escHtml(h.judge_reason)}">${ok ? '✓ 达成' : '✗ 未达成'}</span>`;
                         }
+                        // 该轮跑完那天的回归报告（点击打开）
+                        let reportLink = '';
+                        const when = h.finished_at || h.started_at;
+                        if (proj && when) {
+                            const date = String(when).slice(0, 10);
+                            const path = `${proj}/test/report/${date}/ai-regression/html/index.html`;
+                            reportLink = ` <a href="#" onclick="openReport('${escHtml(path)}');return false;" style="color:#00d9ff;font-size:0.78rem;">📄报告</a>`;
+                        }
                         tr.innerHTML = `
                             <td>${h.run}</td>
                             <td style="font-family:monospace;">${h.task_id || '—'}</td>
                             <td>${_fmtTime(h.started_at)}</td>
                             <td>${_fmtTime(h.finished_at)}</td>
-                            <td><span class="status-badge ${badge[h.status] || 'pending'}">${h.status}</span> ${verdict}</td>`;
+                            <td><span class="status-badge ${badge[h.status] || 'pending'}">${h.status}</span> ${verdict}${reportLink}</td>`;
                         tbody.appendChild(tr);
                     });
                 }
@@ -3295,6 +3312,46 @@
             } catch (e) {
                 renderTestData({ total: 0, passed: 0, failed: 0, skipped: 0, suites: [] });
             }
+            loadTestReports();
+        }
+
+        function openReport(path) {
+            window.open(`${API_BASE}/test/report-file?path=${encodeURIComponent(path)}`, '_blank');
+        }
+
+        async function loadTestReports() {
+            const box = document.getElementById('testReportsList');
+            if (!box) return;
+            let runs = [];
+            try { runs = await (await fetch(`${API_BASE}/test/reports`)).json(); } catch (e) { runs = []; }
+            if (!runs || runs.length === 0) {
+                box.innerHTML = '<div style="color:#888;padding:1rem;text-align:center;font-size:0.85rem;">暂无回归报告</div>';
+                return;
+            }
+            const badge = { pass: 'success', failed: 'failed', blocked: 'skipped', other: 'pending' };
+            box.innerHTML = '';
+            runs.forEach(r => {
+                const wrap = document.createElement('div');
+                wrap.style.cssText = 'padding:0.6rem 0.8rem;margin-bottom:0.5rem;background:rgba(30,41,59,0.5);border:1px solid rgba(100,200,255,0.12);border-radius:5px;';
+                const counts = { pass: 0, failed: 0, blocked: 0 };
+                (r.cases || []).forEach(c => { counts[c.status] = (counts[c.status] || 0) + 1; });
+                const caseChips = (r.cases || []).map(c =>
+                    `<span onclick="openReport('${escHtml(c.html)}')" title="点击打开 ${escHtml(c.name)}" style="cursor:pointer;margin:2px;display:inline-block;" class="status-badge ${badge[c.status] || 'pending'}">${escHtml(c.name)}</span>`
+                ).join(' ');
+                const idxBtn = r.index_html ? `<button class="monitor-refresh-btn" style="background:rgba(0,217,255,0.15);color:#00d9ff;" onclick="openReport('${escHtml(r.index_html)}')">打开汇总报告</button>` : '';
+                const mdBtn = r.index_md ? `<button class="monitor-refresh-btn" onclick="openReport('${escHtml(r.index_md)}')">Markdown</button>` : '';
+                const logBtn = r.log ? `<button class="monitor-refresh-btn" onclick="openReport('${escHtml(r.log)}')">日志</button>` : '';
+                wrap.innerHTML = `
+                    <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+                        <div style="font-weight:600;color:#e0e0e0;">📄 ${escHtml(r.date)}
+                            <span style="font-size:0.75rem;color:#888;font-weight:400;margin-left:0.5rem;">通过 ${counts.pass||0} · 失败 ${counts.failed||0} · 阻塞 ${counts.blocked||0}</span>
+                            <span style="font-size:0.7rem;color:#555;margin-left:0.5rem;">${escHtml(r.root)}</span>
+                        </div>
+                        <div style="display:flex;gap:0.4rem;">${idxBtn}${mdBtn}${logBtn}</div>
+                    </div>
+                    <div style="margin-top:0.4rem;">${caseChips}</div>`;
+                box.appendChild(wrap);
+            });
         }
 
         function renderTestData(data) {

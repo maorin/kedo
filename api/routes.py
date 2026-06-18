@@ -2743,6 +2743,113 @@ async def setup_deploy_target(target_id: str, body: dict = Body(default={})):
     }
 
 
+# ============================================================
+# 回归测试报告浏览（test/report/<date>/ai-regression/）
+# 供 dashboard「测试」view 直接点开 html/md 报告；含 daily loop 跑出来的。
+# ============================================================
+
+
+def _report_roots() -> list[str]:
+    """允许扫描/读取报告的项目根：服务端项目 + 所有 loop 的 project_path。"""
+    roots = set()
+    if _project_path:
+        roots.add(str(Path(_project_path).resolve()))
+    try:
+        if _loop_scheduler is not None:
+            for lp in _loop_scheduler.list_loops():
+                pp = lp.get("project_path")
+                if pp:
+                    roots.add(str(Path(pp).resolve()))
+    except Exception:  # noqa: BLE001
+        pass
+    return list(roots)
+
+
+def _case_status(stem: str) -> str:
+    s = stem.lower()
+    if s.endswith("pass"):
+        return "pass"
+    if s.endswith("fail"):
+        return "failed"
+    if s.endswith("blocked"):
+        return "blocked"
+    return "other"
+
+
+def _scan_reports(root: str) -> list[dict]:
+    base = Path(root) / "test" / "report"
+    runs = []
+    if not base.is_dir():
+        return runs
+    for date_dir in sorted(base.iterdir(), reverse=True):
+        ai = date_dir / "ai-regression"
+        if not ai.is_dir():
+            continue
+        html_dir, md_dir = ai / "html", ai / "md"
+        cases = []
+        if html_dir.is_dir():
+            for f in sorted(html_dir.glob("*.html")):
+                if f.name == "index.html":
+                    continue
+                md = md_dir / (f.stem + ".md")
+                cases.append({
+                    "name": f.stem,
+                    "status": _case_status(f.stem),
+                    "html": str(f),
+                    "md": str(md) if md.exists() else None,
+                })
+        idx_html = html_dir / "index.html"
+        idx_md = md_dir / "index.md"
+        log = date_dir / "ai-regression.log"
+        runs.append({
+            "date": date_dir.name,
+            "root": root,
+            "index_html": str(idx_html) if idx_html.exists() else None,
+            "index_md": str(idx_md) if idx_md.exists() else None,
+            "log": str(log) if log.exists() else None,
+            "cases": cases,
+        })
+    return runs
+
+
+@router.get("/test/reports")
+async def list_test_reports():
+    """列出各项目 test/report/<date>/ai-regression/ 报告（含 daily loop 跑的），按日期倒序。"""
+    out = []
+    for root in _report_roots():
+        out.extend(_scan_reports(root))
+    out.sort(key=lambda r: r.get("date", ""), reverse=True)
+    return out
+
+
+@router.get("/test/report-file")
+async def get_test_report_file(path: str):
+    """安全读取一个报告文件：必须在某允许 root 的 test/report 树内，仅 .html/.md/.log。"""
+    from fastapi.responses import Response
+    try:
+        p = Path(path).resolve()
+    except Exception:
+        raise HTTPException(400, "bad path")
+    if p.suffix.lower() not in (".html", ".md", ".log"):
+        raise HTTPException(400, "只允许 .html/.md/.log")
+    ok = False
+    for root in _report_roots():
+        rep = (Path(root) / "test" / "report").resolve()
+        try:
+            p.relative_to(rep)
+            ok = True
+            break
+        except ValueError:
+            continue
+    if not ok:
+        raise HTTPException(403, "path 不在允许的报告目录内")
+    if not p.is_file():
+        raise HTTPException(404, "文件不存在")
+    text = p.read_text(encoding="utf-8", errors="replace")
+    media = "text/html" if p.suffix.lower() == ".html" else "text/plain"
+    return Response(content=text, media_type=f"{media}; charset=utf-8")
+
+
 @router.get("/test/status")
 async def get_test_status():
     """获取测试监控状态汇总"""
