@@ -259,6 +259,7 @@
 - **M1.2 回归报告浏览（✅ 2026-06-18）**：dashboard「测试」view 加「回归报告」面板 —— 扫各项目（服务端 + 所有 loop project_path）的 `test/report/<date>/ai-regression/`，按日期列出，点 chip/汇总按钮直接打开 html/md/log；「自动循环」运行历史每行加 📄报告 链接。
   - 后端 `GET /test/reports` + `GET /test/report-file`（限报告树内 + 仅 .html/.md/.log 防穿越）
   - 安全：报告 HTML 是被测套件生成的不可信内容 → 以 `Content-Security-Policy: sandbox` + `X-Content-Type-Options: nosniff` 返回（能渲染查看但禁脚本、置不透明源）；前端 onclick 只放整数下标（不把不可信路径插进事件属性）
+- **M1.3 测试监控持久化（✅ 2026-06-18）**：`core/test_store.py` 把每轮回归结果落盘 `<storage_dir>/test_runs.json`（按 root::date upsert，用例 status 从报告文件名推）。`GET /test/runs` 返回最新一轮 + 累计 + 历史；测试 view 卡片=最新一轮健康度、记录表=持久化历史。**报告目录被套件按天清掉、kedo 重启都不丢监控历史**。
 - **已知缺口**：loop 只能经 dashboard / REPL `/loop` / API 创建，**ReactAgent 没有 create_loop 工具** —— 用自然语言让 agent "建个每天循环" 不会真注册（agent 当普通 task 处理）。要支持得加 loop 工具（待定）。
 - **后续（按需）**：模型驱动的真·自定步（让 agent 自报下次间隔）；dashboard 历史改抽屉式；agent 侧 create_loop 工具
 - **估时：** M1 + M2 均已完成

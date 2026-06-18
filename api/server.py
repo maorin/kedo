@@ -111,6 +111,10 @@ def create_app(config: dict = None) -> FastAPI:
 
     # Skill 消费（Skill 双向 · 方向 1）：加载 ~/.config/kedo/skills/ 下的 Agent Skill 包，
     # 注册 skill_list / skill_read 工具，目录注入 ReactAgent 系统 prompt
+    # 测试监控持久化（把回归结果落盘成耐久历史）
+    from core.test_store import TestStore
+    test_store = TestStore(storage_dir=config.get("storage_dir", ".kedo/state"))
+
     from core.skill_loader import SkillLoader
     from tools.skill_tools import SkillListTool, SkillReadTool
     skill_loader = SkillLoader(skills_dir=config.get("skills_dir"))
@@ -364,6 +368,7 @@ def create_app(config: dict = None) -> FastAPI:
         browser_policy=browser_policy,
         loop_scheduler=loop_scheduler,
         skill_loader=skill_loader,
+        test_store=test_store,
     )
 
     # 注册路由 — 必须在 StaticFiles 之前

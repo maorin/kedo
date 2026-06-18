@@ -1432,16 +1432,16 @@
                             </div>
                         </div>
                         <div class="monitor-table-wrap">
-                            <div class="monitor-table-title">测试执行记录</div>
+                            <div class="monitor-table-title">测试执行记录（本地持久化）</div>
                             <table class="monitor-table">
                                 <thead>
                                     <tr>
-                                        <th>测试套件</th>
-                                        <th>用例数</th>
+                                        <th>日期 / 套件</th>
+                                        <th>用例</th>
                                         <th>通过</th>
-                                        <th>失败</th>
+                                        <th>失败 / 阻塞</th>
                                         <th>状态</th>
-                                        <th>耗时</th>
+                                        <th>报告</th>
                                     </tr>
                                 </thead>
                                 <tbody id="testTableBody">
@@ -3312,7 +3312,42 @@
             } catch (e) {
                 renderTestData({ total: 0, passed: 0, failed: 0, skipped: 0, suites: [] });
             }
+            loadTestRuns();    // 本地持久化的测试历史 → 覆盖卡片 + 记录表
             loadTestReports();
+        }
+
+        async function loadTestRuns() {
+            let data = null;
+            try { data = await (await fetch(`${API_BASE}/test/runs`)).json(); } catch (e) { return; }
+            if (!data) return;
+            // 卡片 = 最新一轮（当前测试健康度）
+            const L = data.latest;
+            if (L) {
+                document.getElementById('testTotal').textContent = L.total || 0;
+                document.getElementById('testPassed').textContent = L.passed || 0;
+                document.getElementById('testFailed').textContent = L.failed || 0;
+                document.getElementById('testSkipped').textContent = L.blocked || 0;
+            }
+            // 记录表 = 持久化的每日运行历史
+            const tbody = document.getElementById('testTableBody');
+            const runs = data.runs || [];
+            if (runs.length === 0) return;  // 没持久化数据就保留 renderTestData 的内容
+            tbody.innerHTML = '';
+            runs.forEach(r => {
+                const tr = document.createElement('tr');
+                const st = (r.failed > 0) ? 'failed' : (r.blocked > 0 ? 'skipped' : 'success');
+                const stLabel = (r.failed > 0) ? '有失败' : (r.blocked > 0 ? '有阻塞' : '全通过');
+                let reportCell = '—';
+                if (r.index_html) reportCell = `<a href="#" onclick="openReportIdx(${_rpt(r.index_html)});return false;" style="color:#00d9ff;">📄报告</a>`;
+                tr.innerHTML = `
+                    <td>${escHtml(r.date)}</td>
+                    <td>${r.total || 0}</td>
+                    <td style="color:#22c55e;">${r.passed || 0}</td>
+                    <td style="color:#ef4444;">${(r.failed || 0) + (r.blocked ? ' / ' + r.blocked + '阻塞' : '')}</td>
+                    <td><span class="status-badge ${st}">${stLabel}</span></td>
+                    <td>${reportCell}</td>`;
+                tbody.appendChild(tr);
+            });
         }
 
         // 报告路径登记表：onclick 里只放整数下标，绝不把不可信字符串插进事件处理属性

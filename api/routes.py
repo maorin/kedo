@@ -54,6 +54,7 @@ _context_inbox: Optional[ContextInbox] = None
 _browser_policy = None  # core.browser_permissions.BrowserPermissionPolicy or None
 _loop_scheduler = None  # core.loop_scheduler.LoopScheduler or None（/loop 自动循环）
 _skill_loader = None  # core.skill_loader.SkillLoader or None（skill 消费）
+_test_store = None  # core.test_store.TestStore or None（测试监控持久化）
 
 
 def set_dependencies(
@@ -72,10 +73,11 @@ def set_dependencies(
     browser_policy=None,
     loop_scheduler=None,
     skill_loader=None,
+    test_store=None,
 ):
     global _agent_loop, _react_agent, _state_manager, _version_manager
     global _planner, _evaluator, _reviewer, _role_swap, _create_llm_client, _project_path
-    global _browser_bridge, _context_inbox, _browser_policy, _loop_scheduler, _skill_loader
+    global _browser_bridge, _context_inbox, _browser_policy, _loop_scheduler, _skill_loader, _test_store
     _agent_loop = agent_loop
     _react_agent = react_agent
     _state_manager = state_manager
@@ -91,6 +93,7 @@ def set_dependencies(
     _browser_policy = browser_policy
     _loop_scheduler = loop_scheduler
     _skill_loader = skill_loader
+    _test_store = test_store
 
 
 # ============================================================
@@ -2819,7 +2822,23 @@ async def list_test_reports():
     for root in _report_roots():
         out.extend(_scan_reports(root))
     out.sort(key=lambda r: r.get("date", ""), reverse=True)
+    # 顺手把当前报告同步进本地持久化测试历史（耐久，报告被清也不丢）
+    if _test_store is not None:
+        _test_store.sync(out)
     return out
+
+
+@router.get("/test/runs")
+async def test_runs():
+    """本地持久化的测试运行历史（<storage_dir>/test_runs.json）+ 最新一轮 + 累计。"""
+    if _test_store is None:
+        return {"latest": None, "totals": {"total": 0, "passed": 0, "failed": 0, "blocked": 0}, "runs": []}
+    # 先扫一遍当前磁盘报告并 upsert，保证拿到的是最新的
+    scanned = []
+    for root in _report_roots():
+        scanned.extend(_scan_reports(root))
+    _test_store.sync(scanned)
+    return _test_store.summary()
 
 
 @router.get("/test/report-file")
