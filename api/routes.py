@@ -2854,11 +2854,12 @@ _DIR_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 
 def _build_scan_script(packager_dir: str) -> str:
+    # 通用匹配 output/*.iso（covers 基础版 Thecloud-HCI-Data-*.iso 与 crypto 版 *Crypto*.iso）
     return (
         f'cd {packager_dir} 2>/dev/null || {{ echo NO_DIR; exit 0; }}; '
-        'for f in output/*Crypto*.iso; do [ -f "$f" ] && echo "ISO|$(basename "$f")|$(stat -c%s "$f" 2>/dev/null)"; done; '
-        'for f in output/*Crypto*.iso.sha256; do [ -f "$f" ] && echo "SHA|$(basename "$f")|$(head -c200 "$f" 2>/dev/null | tr -d "\\n")"; done; '
-        'echo "RPMS|$(ls sources/rpm/crypto/*.rpm 2>/dev/null | wc -l)"; '
+        'for f in output/*.iso; do [ -f "$f" ] && echo "ISO|$(basename "$f")|$(stat -c%s "$f" 2>/dev/null)"; done; '
+        'for f in output/*.iso.sha256; do [ -f "$f" ] && echo "SHA|$(basename "$f")|$(head -c200 "$f" 2>/dev/null | tr -d "\\n")"; done; '
+        'echo "RPMS|$(find sources/rpm -name "*.rpm" 2>/dev/null | wc -l)"; '
         'echo "LOG|$(ls -t output/*.log 2>/dev/null | head -1)"'
     )
 
