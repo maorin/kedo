@@ -56,6 +56,7 @@ _loop_scheduler = None  # core.loop_scheduler.LoopScheduler or None（/loop 自�
 _skill_loader = None  # core.skill_loader.SkillLoader or None（skill 消费）
 _test_store = None  # core.test_store.TestStore or None（测试监控持久化）
 _package_store = None  # core.package_store.PackageStore or None（打包记录持久化）
+_deploy_store = None  # core.deploy_store.DeployStore or None（部署记录持久化）
 
 
 def set_dependencies(
@@ -76,10 +77,11 @@ def set_dependencies(
     skill_loader=None,
     test_store=None,
     package_store=None,
+    deploy_store=None,
 ):
     global _agent_loop, _react_agent, _state_manager, _version_manager
     global _planner, _evaluator, _reviewer, _role_swap, _create_llm_client, _project_path
-    global _browser_bridge, _context_inbox, _browser_policy, _loop_scheduler, _skill_loader, _test_store, _package_store
+    global _browser_bridge, _context_inbox, _browser_policy, _loop_scheduler, _skill_loader, _test_store, _package_store, _deploy_store
     _agent_loop = agent_loop
     _react_agent = react_agent
     _state_manager = state_manager
@@ -97,6 +99,7 @@ def set_dependencies(
     _skill_loader = skill_loader
     _test_store = test_store
     _package_store = package_store
+    _deploy_store = deploy_store
 
 
 # ============================================================
@@ -2947,6 +2950,101 @@ async def package_runs():
     if _package_store is None:
         return []
     return _package_store.list_runs()
+
+
+# ============================================================
+# ISO 部署记录 API（hci-iso-deploy skill 的部署结果）
+# ssh 到目标机查 ISO/挂载/install 日志/服务，落盘持久化。
+# ============================================================
+
+
+def _build_deploy_scan_script(target_dir: str) -> str:
+    return (
+        f'T={target_dir}; '
+        'ISO=$(ls -t "$T"/output/*.iso 2>/dev/null | head -1); '
+        '[ -n "$ISO" ] && echo "ISO|$(basename "$ISO")|$(stat -c%s "$ISO" 2>/dev/null)"; '
+        'mountpoint -q /mnt/hci_iso 2>/dev/null && echo "MOUNT|yes" || echo "MOUNT|no"; '
+        'LOG=$(ls -t "$T"/install-*.log 2>/dev/null | head -1); '
+        '[ -n "$LOG" ] && echo "LOG|$LOG" && echo "LOGTAIL|$(tail -1 "$LOG" 2>/dev/null | tr "|" " " | head -c200)"; '
+        'echo "SVC|$(systemctl list-units --type=service --state=running 2>/dev/null | grep -ciE \'hci|docker|libvirt|gluster\')"'
+    )
+
+
+def _parse_deploy_scan(out: str) -> dict:
+    iso = None
+    mounted = False
+    log = None
+    log_tail = ""
+    svc = 0
+    for line in out.splitlines():
+        line = line.strip()
+        parts = line.split("|")
+        tag = parts[0]
+        if tag == "ISO" and len(parts) >= 3:
+            try:
+                size = int(parts[2] or 0)
+            except ValueError:
+                size = 0
+            iso = {"name": parts[1], "size": size}
+        elif tag == "MOUNT" and len(parts) >= 2:
+            mounted = parts[1] == "yes"
+        elif tag == "LOG" and len(parts) >= 2:
+            log = parts[1] or None
+        elif tag == "LOGTAIL" and len(parts) >= 2:
+            log_tail = parts[1]
+        elif tag == "SVC" and len(parts) >= 2:
+            try:
+                svc = int(parts[1] or 0)
+            except ValueError:
+                svc = 0
+    if iso and log:
+        status = "deployed"
+    elif iso:
+        status = "transferred"
+    else:
+        status = "no-iso"
+    return {"iso": iso, "mounted": mounted, "install_log": log,
+            "log_tail": log_tail, "services": svc, "status": status}
+
+
+@router.post("/deploy/iso/scan")
+async def deploy_iso_scan(body: dict = Body(...)):
+    """
+    ssh 到部署目标机扫描 ISO 部署状态并落盘。
+    body: {"target":"root@192.168.1.133", "dir":"/root/hci_packager"}
+    target 严格校验 user@host；远程脚本固定无用户插值，防注入。
+    """
+    if _deploy_store is None:
+        raise HTTPException(503, "Deploy store 未启用")
+    target = (body.get("target") or "").strip()
+    target_dir = (body.get("dir") or "/root/hci_packager").strip()
+    if not _HOST_RE.match(target):
+        raise HTTPException(400, "target 必须是 user@host 形式")
+    if not _DIR_RE.match(target_dir):
+        raise HTTPException(400, "dir 含非法字符")
+    cmd = [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+        "-o", "StrictHostKeyChecking=accept-new", "--",
+        target, _build_deploy_scan_script(target_dir),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "ssh 扫描超时（40s）"}
+    if proc.returncode != 0 and not proc.stdout.strip():
+        return {"success": False, "error": f"ssh 失败: {proc.stderr.strip()[:300]}"}
+    parsed = _parse_deploy_scan(proc.stdout)
+    rec = {"target": target, "dir": target_dir,
+           "recorded_at": datetime.now(timezone.utc).isoformat(), **parsed}
+    return {"success": True, "run": _deploy_store.record(rec)}
+
+
+@router.get("/deploy/iso/runs")
+async def deploy_iso_runs():
+    """本地持久化的 ISO 部署记录历史。"""
+    if _deploy_store is None:
+        return []
+    return _deploy_store.list_runs()
 
 
 @router.get("/test/report-file")

@@ -116,6 +116,8 @@ def create_app(config: dict = None) -> FastAPI:
     test_store = TestStore(storage_dir=config.get("storage_dir", ".kedo/state"))
     from core.package_store import PackageStore
     package_store = PackageStore(storage_dir=config.get("storage_dir", ".kedo/state"))
+    from core.deploy_store import DeployStore
+    deploy_store = DeployStore(storage_dir=config.get("storage_dir", ".kedo/state"))
 
     from core.skill_loader import SkillLoader
     from tools.skill_tools import SkillListTool, SkillReadTool
@@ -372,6 +374,7 @@ def create_app(config: dict = None) -> FastAPI:
         skill_loader=skill_loader,
         test_store=test_store,
         package_store=package_store,
+        deploy_store=deploy_store,
     )
 
     # 注册路由 — 必须在 StaticFiles 之前
